@@ -60,7 +60,7 @@ finish_task.
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
-        response = chat(model=MODEL, messages=messages, tools=tools)
+        response = chat(model=MODEL, messages=messages, tools=tools, think=False)
         msg = response.message
         messages.append(msg)
 
@@ -75,20 +75,7 @@ finish_task.
             })
             continue
 
-        for call in msg.tool_calls:
-            fn = tool_map.get(call.function.name)
-            if fn is None:
-                result = f"ERROR: unknown tool '{call.function.name}'."
-            else:
-                print(f"🔧 {call.function.name}({call.function.arguments})")
-                try:
-                    result = fn(**call.function.arguments)
-                except TypeError as e:
-                    result = f"ERROR: bad arguments for {call.function.name}: {e}"
-                except ValueError as e:
-                    result = f"REJECTED: {e}"
-            print(result)
-            messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
+        messages.extend(dispatch_tool_calls(msg.tool_calls, tool_map))
 
         if TASK_STATE["done"]:
             print(f"\n✅ DONE: {TASK_STATE['summary']}")

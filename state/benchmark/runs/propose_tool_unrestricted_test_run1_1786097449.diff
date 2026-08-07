@@ -1,0 +1,30 @@
+diff --git a/curriculum.py b/curriculum.py
+index 5c69815..d9f7d5c 100644
+--- a/curriculum.py
++++ b/curriculum.py
+@@ -230,4 +230,25 @@ CURRICULUM = [
+         Self-test scenario: in a temporary directory, `git init` it (via subprocess), create and commit one file, then modify that file's content. Call git_diff on the temp directory and assert the returned string is non-empty and contains a `-` line with the original content and a `+` line with the new content. Then, separately, revert the file back to its committed content (or use a second commit-and-no-further-edits directory) and call git_diff again, asserting the result is an empty string. Also assert that calling git_diff on a directory that was never `git init`-ed returns a string starting with "ERROR:". Clean up the temp directory afterward.
+         """,
+     },
++     {
++         "name": "file_checksum",
++         "function_name": "file_checksum",
++         "path_params": ["filepath"],
++         "description": "Compute the SHA-256 hex digest of a file's contents as a lowercase hex string, using hashlib.",
++         "goal": f"""
++        CRITICAL OBJECTIVE: Build a standalone checksum utility named `file_checksum.py`.
++
++        It must be a self-contained Python script (standard library only — use the `hashlib` module) that:
++         - Accepts a filepath argument.
++         - Reads the file in binary mode and computes its SHA-256 hash digest using `hashlib.sha256()`.
++         - Returns the hex digest as a lowercase hexadecimal string (64 characters).
++         - Exposes this as `file_checksum(filepath: str) -> str`, returning the 64-character hex digest for any valid readable file.
++         - On any error (file not found, permission denied, etc.), raise a descriptive `ValueError` rather than swallowing it.
++         - When run as a script with a filepath argument, print the hex digest to stdout and exit 0.
++
++         {GRADUATION_CONTRACT}
++
++        Self-test scenario: create a temporary file with known content (e.g. b"hello"), call file_checksum on it, and assert the result equals the SHA-256 of that exact byte string ("2cf24dba5fb0a30e26e83b2ac5b9e29e15161d6e5c8f5bb7565b8d4db9282e17"). Then also assert that calling file_checksum on a non-existent path raises ValueError. Clean up the temp file afterward.
++         """,
++     },
+ ]

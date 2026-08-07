@@ -37,7 +37,7 @@ tools available to you.
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
-        response = chat(model=MODEL, messages=messages, tools=tools)
+        response = chat(model=MODEL, messages=messages, tools=tools, think=False)
         msg = response.message
         messages.append(msg)
 

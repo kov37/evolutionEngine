@@ -6,7 +6,17 @@ etc. — legitimate return types for a plain Python caller) crashed the next
 chat() call, since Ollama's Message.content must be a str. Protocol-level
 concerns like "how does a tool's return value become conversation content"
 belong in one place, not duplicated per orchestrator.
+
+MAX_MESSAGE_CONTENT_CHARS caps what actually accumulates in the
+conversation sent back to the model on every subsequent call — a large
+web_search/fetch result kept in full, forever, is real, measured context
+growth (this is what filled the model's 32768-token window and caused
+Ollama to start evicting it mid-generation in one run). Console output is
+unaffected — only what's replayed to the model on every future turn is
+capped.
 """
+
+MAX_MESSAGE_CONTENT_CHARS = 4000
 
 
 def dispatch_tool_calls(tool_calls, tool_map):
@@ -31,5 +41,14 @@ def dispatch_tool_calls(tool_calls, tool_map):
             result = str(result)
 
         print(result)
-        messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
+
+        content = result
+        if len(content) > MAX_MESSAGE_CONTENT_CHARS:
+            content = (
+                content[:MAX_MESSAGE_CONTENT_CHARS]
+                + f"\n...[truncated, {len(content) - MAX_MESSAGE_CONTENT_CHARS} more chars — "
+                  f"printed in full above, but not kept in context to avoid unbounded growth]"
+            )
+
+        messages.append({"role": "tool", "tool_name": call.function.name, "content": content})
     return messages
