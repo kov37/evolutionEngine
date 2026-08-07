@@ -3,20 +3,26 @@ import os
 from ollama import chat
 
 from curriculum import CURRICULUM
-from kernel.io_tools import RUN_STATE, WORKSPACE_DIR
-from registry import load_registry, verify_and_promote, is_promoted
+from dispatch import dispatch_tool_calls
+from kernel.io_tools import RUN_STATE
+from kernel.sandbox import get_root
+from registry import load_registry, verify, verify_and_promote, is_promoted
 
 MODEL = "qwen3.6:35b-mlx"
 
 
-def run_recursive_engine(master_goal, tools, iteration_budget=5):
+def run_recursive_engine(master_goal, tools, function_name=None, iteration_budget=5):
     RUN_STATE["goal_met"] = False
     RUN_STATE["target_file"] = None
     tool_map = {fn.__name__: fn for fn in tools}
 
     system_prompt = """You are a Principal Software Engineer running locally via hardware acceleration.
-Your job is to incrementally build standalone Python tools inside `./workspace/` to satisfy the goal you are given, using the tools available to you.
+Your job is to incrementally build standalone Python tools that satisfy the goal you are given, using the
+tools available to you.
 
+- Every path you pass to a tool (write_file, patch_file, read_file, list_dir, etc.) is ALREADY relative to
+  your working directory. Pass just the filename, e.g. path="my_tool.py" — never prefix it with "workspace/"
+  or any other directory name pointing at that root itself, or you will create an unwanted nested directory.
 - Use write_file to create a brand new file or to fully rewrite one.
 - Use patch_file only for a small surgical edit to a file that already exists; `search` must match the existing text exactly, including whitespace — call read_file first if you're not certain of the current contents.
 - Use list_workspace to check what already exists, and run_shell to run tests or install anything you need.
@@ -46,22 +52,26 @@ Your job is to incrementally build standalone Python tools inside `./workspace/`
             })
             continue
 
-        for call in msg.tool_calls:
-            fn = tool_map.get(call.function.name)
-            if fn is None:
-                result = f"ERROR: unknown tool '{call.function.name}'."
-            else:
-                print(f"🔧 {call.function.name}({call.function.arguments})")
-                try:
-                    result = fn(**call.function.arguments)
-                except TypeError as e:
-                    result = f"ERROR: bad arguments for {call.function.name}: {e}"
-                except ValueError as e:
-                    result = f"REJECTED: {e}"
-            print(result)
-            messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
+        messages.extend(dispatch_tool_calls(msg.tool_calls, tool_map))
 
         if RUN_STATE["goal_met"]:
+            if function_name:
+                module_path = os.path.join(get_root(), RUN_STATE["target_file"])
+                ok, err = verify(module_path, function_name)
+                if not ok:
+                    print(f"⚠️  '{RUN_STATE['target_file']}' ran cleanly, but doesn't satisfy the goal: {err}")
+                    RUN_STATE["goal_met"] = False
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"'{RUN_STATE['target_file']}' ran without error, but it does not define a "
+                            f"callable function named `{function_name}` as the objective requires — "
+                            f"{err}. Running cleanly is not enough; the file must expose exactly that "
+                            f"function. Continue working."
+                        ),
+                    })
+                    continue
+
             print(f"\n🎉 WIN! Created tool verified: workspace/{RUN_STATE['target_file']}")
             return True
 
@@ -81,10 +91,10 @@ if __name__ == "__main__":
             continue
 
         print(f"\n{'#' * 60}\n# GOAL: {entry['name']}\n{'#' * 60}")
-        won = run_recursive_engine(entry["goal"], tools)
+        won = run_recursive_engine(entry["goal"], tools, function_name=entry.get("function_name"))
 
         if won and entry.get("function_name"):
-            module_path = os.path.join(WORKSPACE_DIR, RUN_STATE["target_file"])
+            module_path = os.path.join(get_root(), RUN_STATE["target_file"])
             ok, err = verify_and_promote(
                 entry["name"], module_path, entry["function_name"],
                 entry.get("description", ""), entry.get("path_params"),

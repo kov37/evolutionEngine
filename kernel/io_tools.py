@@ -12,19 +12,26 @@ import re
 import subprocess
 import sys
 
-WORKSPACE_DIR = "./workspace"
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
-os.makedirs(os.path.join(WORKSPACE_DIR, "tools"), exist_ok=True)
+from kernel.sandbox import confine, get_root
 
 # Mutable state write_file/patch_file report back into. Kept out of the tool
 # signatures on purpose: extra params would leak into the auto-generated
 # JSON schema Ollama builds from these functions.
 RUN_STATE = {"goal_met": False, "target_file": None}
 
+# Whether write_file/patch_file auto-execute a just-written .py file as a
+# verification step. True for harness.py's curriculum-building (a
+# standalone tool SHOULD run standalone — that's the whole contract).
+# agent.py turns this off: a real project's files aren't necessarily meant
+# to run standalone, and auto-executing whatever the model just touched is
+# not something you want against a real project's file with side effects.
+AUTO_RUN_AFTER_WRITE = {"enabled": True}
+
 
 def _resolve(path: str) -> str:
-    """Confine a model-supplied filename to the workspace directory."""
-    return os.path.join(WORKSPACE_DIR, os.path.basename(path))
+    """Confine a model-supplied path to the current sandbox root. Allows
+    subdirectories — only genuine escapes are rejected. See kernel/sandbox.py."""
+    return confine(path)
 
 
 def validate_python_syntax(file_path, content):
@@ -48,14 +55,14 @@ def _strip_code_fences(text: str) -> str:
 def _test_after_write(full_path: str) -> str:
     """Run the file in a sandbox subprocess and report the outcome. Marks
     RUN_STATE['goal_met'] on a clean exit so the harness loop knows to stop."""
-    if not full_path.endswith(".py"):
+    if not full_path.endswith(".py") or not AUTO_RUN_AFTER_WRITE["enabled"]:
         return f"Wrote '{os.path.basename(full_path)}' ({os.path.getsize(full_path)} bytes)."
 
     print(f"⚙️  Running sandbox execution check on '{os.path.basename(full_path)}'...")
     try:
         result = subprocess.run(
-            [sys.executable, os.path.abspath(full_path)],
-            capture_output=True, text=True, timeout=10, cwd=WORKSPACE_DIR,
+            [sys.executable, full_path],
+            capture_output=True, text=True, timeout=10, cwd=get_root(),
         )
     except subprocess.TimeoutExpired:
         print("⏳ TIMEOUT ERROR")
@@ -64,7 +71,11 @@ def _test_after_write(full_path: str) -> str:
     if result.returncode == 0:
         print("🟢 EXECUTION CLEAN (Exit Code 0)")
         RUN_STATE["goal_met"] = True
-        RUN_STATE["target_file"] = os.path.basename(full_path)
+        # Relative to root, not just the basename — a leftover from before
+        # subdirectories were allowed. Losing the subdirectory prefix here
+        # is exactly what broke promotion for a nested path once _resolve()
+        # stopped flattening paths to their basename.
+        RUN_STATE["target_file"] = os.path.relpath(full_path, get_root())
         return f"Ran '{os.path.basename(full_path)}' successfully (exit 0). Output:\n{result.stdout}"
 
     print("🔴 RUNTIME CRASH DETECTED")
@@ -91,9 +102,10 @@ def read_file(path: str) -> str:
 
 def list_workspace() -> str:
     """List every file currently in the workspace, with size in bytes."""
+    root = get_root()
     entries = []
-    for name in sorted(os.listdir(WORKSPACE_DIR)):
-        full = os.path.join(WORKSPACE_DIR, name)
+    for name in sorted(os.listdir(root)):
+        full = os.path.join(root, name)
         if os.path.isdir(full):
             entries.append(f"{name}/ (dir)")
         else:
@@ -116,6 +128,7 @@ def write_file(path: str, content: str) -> str:
     if not valid:
         return f"REJECTED (invalid syntax, nothing written): {err}"
 
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
     with open(full_path, "w", encoding="utf-8") as f:
         f.write(content.rstrip() + "\n")
 

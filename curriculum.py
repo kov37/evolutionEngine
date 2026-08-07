@@ -125,4 +125,109 @@ CURRICULUM = [
         Self-test scenario: in a temp directory, write one throwaway unittest test module containing at least one test that passes and one that intentionally fails (e.g. `assert 1 == 2`) using `unittest.TestCase`. Call run_tests on that temp directory and assert: the returned success is False (because a test in it failed — this is run_tests correctly reporting the failure, not a bug), and the summary mentions both a passed and a failed count. Then write a second temp directory containing only passing tests, call run_tests on it, and assert success is True. Clean up both temp directories afterward. The overall self-test itself must still exit 0 — you are asserting that run_tests reports failures correctly, not requiring the inner throwaway suite to pass.
         """,
     },
+    {
+        "name": "web_search",
+        "function_name": "web_search",
+        "description": "Search the live web via the Tavily API and return the top results (title, url, short content snippet) as a formatted string.",
+        "goal": f"""
+        CRITICAL OBJECTIVE: Build a standalone web-search utility named `web_search_tool.py`, calling the Tavily Search API.
+
+        It must be a self-contained Python script (standard library only — use `urllib.request`, do NOT depend on the `tavily-python` package or any other third-party library) that:
+        - Reads the API key from the environment variable `TAVILY_API_KEY` at call time. NEVER hardcode a literal API key anywhere in the file — if the environment variable is not set, return the string "ERROR: TAVILY_API_KEY environment variable is not set." and make no network request.
+        - Sends a POST request to `https://api.tavily.com/search` with header `Authorization: Bearer <the key>` and a JSON body `{{"query": <the query>, "max_results": <n>}}`.
+        - The response body is JSON with a top-level `results` array; each entry has `title`, `url`, and `content` string fields.
+        - Exposes this as `web_search(query: str, max_results: int = 5) -> str`, returning a formatted string with one block per result showing its title, url, and content snippet — or the literal string "No results found." if the results array is empty.
+        - On any network error or a non-200 HTTP response, return a string starting with "ERROR:" describing what went wrong — do not raise an uncaught exception.
+        - When run as a script with a query argument, print the formatted results and exit 0. If TAVILY_API_KEY is missing, print the same error to stderr and exit 2.
+
+        {GRADUATION_CONTRACT}
+
+        Self-test scenario: THIS SELF-TEST MAKES ONE REAL, LIVE CALL TO THE TAVILY API — it is not a mock and costs real API quota, so make exactly one query and keep max_results small (e.g. 1). First check that TAVILY_API_KEY is set in the environment; if it is not, print a clear message explaining the self-test requires it and exit 1 immediately without attempting a request. If it is set, call web_search with a simple, unambiguous query (e.g. "Python programming language") and max_results=1, and assert: the call did not return a string starting with "ERROR:", and the returned string contains a "url" or "http" substring, confirming a real result came back — do not assert on the exact content of a live search result, since that is not deterministic.
+        """,
+    },
+    {
+        "name": "fetch",
+        "function_name": "fetch",
+        "description": "Retrieve the full content of one known URL (as markdown) via the Firecrawl API — the retrieval counterpart to web_search's discovery.",
+        "goal": f"""
+        CRITICAL OBJECTIVE: Build a standalone page-fetching utility named `fetch_tool.py`, calling the Firecrawl scrape API.
+
+        This is the retrieval counterpart to web_search: web_search discovers candidate URLs from a query and returns short snippets; fetch takes one already-known URL and returns that page's actual content in full.
+
+        It must be a self-contained Python script (standard library only — use `urllib.request`, do NOT depend on the `firecrawl-py` package or any other third-party library) that:
+        - Reads the API key from the environment variable `FIRECRAWL_API_KEY` at call time. NEVER hardcode a literal API key anywhere in the file — if the environment variable is not set, return the string "ERROR: FIRECRAWL_API_KEY environment variable is not set." and make no network request.
+        - Rejects any url argument that does not start with "http://" or "https://" with "ERROR: url must start with http:// or https://" and makes no network request in that case either.
+        - Sends a POST request to `https://api.firecrawl.dev/v2/scrape` with header `Authorization: Bearer <the key>` and a JSON body `{{"url": <the target url>, "formats": ["markdown"]}}`.
+        - The response body is JSON with a top-level `success` boolean and, on success, a `data` object containing a `markdown` string field (the page's extracted content) and a `metadata` object (which may include a `title`).
+        - Exposes this as `fetch(url: str) -> str`, returning the markdown content string on success. If `success` is false or the HTTP status is not 200, return a string starting with "ERROR:" describing what went wrong — do not raise an uncaught exception.
+        - When run as a script with a url argument, print the markdown content and exit 0. If FIRECRAWL_API_KEY is missing or the url is invalid, print the same error to stderr and exit 2.
+
+        {GRADUATION_CONTRACT}
+
+        Self-test scenario: THIS SELF-TEST MAKES ONE REAL, LIVE CALL TO THE FIRECRAWL API — it is not a mock and costs real API quota, so make exactly one call. First check that FIRECRAWL_API_KEY is set in the environment; if it is not, print a clear message explaining the self-test requires it and exit 1 immediately without attempting a request. If it is set, call fetch("https://example.com") — this is IANA's permanent, unchanging placeholder page, so the result is deterministic. Assert: the call did not return a string starting with "ERROR:", and the returned string contains the substring "Example Domain" (the fixed, known content of that specific page). Also assert that calling fetch with a non-http(s) url (e.g. "file:///etc/hostname") returns the "ERROR: url must start with" string rather than attempting a request.
+        """,
+    },
+    {
+        "name": "grep_dir",
+        "function_name": "grep_dir",
+        "path_params": ["root"],
+        "description": "Recursively search every file under a directory for a substring pattern, returning (relative_path, line_number, line_text) for every match.",
+        "goal": f"""
+        CRITICAL OBJECTIVE: Build a standalone recursive-search utility named `grep_dir_tool.py` — the multi-file counterpart to the existing single-file search_file tool.
+
+        It must be a self-contained Python script (standard library only) that:
+        - Accepts a search pattern and a root directory (default ".").
+        - Recursively walks every file under that root, skipping any directory named ".git" entirely.
+        - For each file, attempts to read it as UTF-8 text; if that raises UnicodeDecodeError (a binary file), skip that file silently rather than erroring.
+        - Within each readable file, finds every line containing the pattern, and records (path relative to root, using forward slashes, 1-indexed line number, line content).
+        - Caps the total number of matches returned at 200 — if more than 200 matches exist, return only the first 200 and append one final entry noting how many were omitted, so a huge hit count doesn't flood the caller.
+        - Exposes this as `grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]`.
+        - When run as a script with a pattern and optional root argument, prints one line per match in the form `<relative_path>:<line_number>: <line_text>`, and exits 0 if at least one match was found, 1 otherwise.
+
+        {GRADUATION_CONTRACT}
+
+        Self-test scenario: create a temporary directory tree with at least three files across at least two levels of nesting (e.g. root/a.txt, root/sub/b.txt, root/sub/deeper/c.txt), plant a distinctive marker string (e.g. 'NEEDLE_9f2c1') in two of the three files at known lines, and leave the third file without the marker. Call grep_dir on the temp root and assert: exactly two matches were found, each with the correct relative path and line number. Also assert a pattern known not to exist anywhere returns an empty list rather than erroring. Clean up the temp tree afterward.
+        """,
+    },
+    {
+        "name": "git_status",
+        "function_name": "git_status",
+        "path_params": ["root"],
+        "description": "List every changed/untracked/staged file in a git working tree as (status_code, path) pairs, via `git status --porcelain=v1`.",
+        "goal": f"""
+        CRITICAL OBJECTIVE: Build a standalone git-status utility named `git_status_tool.py`. This shells out to the real `git` binary via subprocess — do not reimplement git's diff/status logic in Python, git already provides a stable machine-readable interface for exactly this.
+
+        It must be a self-contained Python script (standard library only — use `subprocess`) that:
+        - Accepts a root directory (default ".").
+        - Runs `git status --porcelain=v1` with that directory as the subprocess `cwd`.
+        - If the command fails because the directory is not inside a git working tree (git's stderr will say so, or the exit code is non-zero for that reason), return the string "ERROR: not a git repository." rather than raising.
+        - Otherwise, parses each line of the porcelain output into a (status_code, path) tuple — the status_code is the two-character code at the start of each line (e.g. " M", "??", "A "), and the path is the rest of the line after the code and the following space, with surrounding whitespace stripped.
+        - Exposes this as `git_status(root: str = ".") -> list[tuple[str, str]]`, returning an empty list if there are no changes (a clean working tree is not an error).
+        - When run as a script with an optional root argument, prints one line per entry as `<status_code> <path>`, and exits 0 whether or not there are changes (a clean tree is success, not failure) — exits 2 only if root is not a git repository.
+
+        {GRADUATION_CONTRACT}
+
+        Self-test scenario: in a temporary directory, run `git init` (via subprocess, capturing/discarding its output), create one file and leave it untracked, `git add` and commit a second file then modify it afterward so it shows as modified. Call git_status on that temp directory and assert: the untracked file appears with status "??", the modified file appears with a status containing "M", and no other unexpected entries are present. Also assert that calling git_status on a plain temp directory that was never `git init`-ed returns the "ERROR: not a git repository." string. Clean up the temp directory afterward.
+        """,
+    },
+    {
+        "name": "git_diff",
+        "function_name": "git_diff",
+        "path_params": ["root"],
+        "description": "Return the full diff of a git working tree against HEAD (staged and unstaged combined) as a string, via `git diff HEAD`.",
+        "goal": f"""
+        CRITICAL OBJECTIVE: Build a standalone git-diff utility named `git_diff_tool.py`. This shells out to the real `git` binary via subprocess — do not reimplement diff logic in Python.
+
+        It must be a self-contained Python script (standard library only — use `subprocess`) that:
+        - Accepts a root directory (default ".").
+        - Runs `git diff HEAD` with that directory as the subprocess `cwd` (this shows staged and unstaged changes combined against the last commit). Pass `--no-color` explicitly so output is never contaminated with ANSI escape codes regardless of the user's git config.
+        - If the command fails because the directory is not inside a git working tree, or there is no HEAD commit yet (a brand new repo with no commits), return a string starting with "ERROR:" describing which of those it was, rather than raising.
+        - Exposes this as `git_diff(root: str = ".") -> str`, returning the raw diff text — an empty string means there are no differences from HEAD (that is success, not an error).
+        - When run as a script with an optional root argument, prints the diff (if any) and exits 0 whether or not there are changes — exits 2 only on the error conditions above.
+
+        {GRADUATION_CONTRACT}
+
+        Self-test scenario: in a temporary directory, `git init` it (via subprocess), create and commit one file, then modify that file's content. Call git_diff on the temp directory and assert the returned string is non-empty and contains a `-` line with the original content and a `+` line with the new content. Then, separately, revert the file back to its committed content (or use a second commit-and-no-further-edits directory) and call git_diff again, asserting the result is an empty string. Also assert that calling git_diff on a directory that was never `git init`-ed returns a string starting with "ERROR:". Clean up the temp directory afterward.
+        """,
+    },
 ]

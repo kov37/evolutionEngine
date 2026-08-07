@@ -2,17 +2,17 @@
 
 NOTE: this is a resource sandbox, not a security sandbox. It confines the
 working directory and caps runtime/output, but a command that reaches
-outside the workspace (`cd .. && rm -rf x`, absolute paths, network calls)
-is not blocked. That's an acceptable risk model for a local dev tool you
-run yourself against your own model — it would not be for anything
-processing untrusted input.
+outside the sandbox root (`cd .. && rm -rf x`, absolute paths, network
+calls) is not blocked. That's an acceptable risk model for a local dev
+tool you run yourself against your own model — it would not be for
+anything processing untrusted input. When agent.py points the sandbox root
+at a real project via --project, run_shell can run anything in that
+project — that's the explicit tradeoff of pointing it there.
 """
 
-import os
 import subprocess
 
-WORKSPACE_DIR = "./workspace"
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
+from kernel.sandbox import get_root
 
 SHELL_TIMEOUT_SECONDS = 15
 MAX_OUTPUT_CHARS = 4000
@@ -35,7 +35,7 @@ def run_shell(command: str) -> str:
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=SHELL_TIMEOUT_SECONDS, cwd=os.path.abspath(WORKSPACE_DIR),
+            timeout=SHELL_TIMEOUT_SECONDS, cwd=get_root(),
         )
     except subprocess.TimeoutExpired:
         return f"TIMEOUT after {SHELL_TIMEOUT_SECONDS}s — command likely hung."

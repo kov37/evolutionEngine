@@ -8,9 +8,14 @@ curriculum scenario test?) belongs to harness.py, not this module.
 Path confinement for graduated tools lives here too, not in the tools
 themselves. A tool declares which of its parameters are filesystem paths
 via `path_params` at promotion time; _load_graduated_tools wraps the
-function so those parameters get sandboxed to os.getcwd() before the
-model-authored code ever sees them. This is trusted code checking
-untrusted code's inputs, not untrusted code checking itself.
+function so those parameters get sandboxed via kernel.sandbox.confine()
+before the model-authored code ever sees them. This is trusted code
+checking untrusted code's inputs, not untrusted code checking itself.
+
+STATE_DIR is anchored to this file's own location, not os.getcwd() and not
+kernel.sandbox's root — the manifest tracks evolutionEngine's own tool
+registry, which must stay put regardless of what project agent.py is
+currently pointed at via --project.
 """
 
 import functools
@@ -20,10 +25,11 @@ import os
 
 from kernel.io_tools import read_file, write_file, patch_file, list_workspace
 from kernel.exec_tools import run_shell
+from kernel.sandbox import confine
 
 KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, run_shell]
 
-STATE_DIR = "./state"
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 MANIFEST_PATH = os.path.join(STATE_DIR, "registry_manifest.json")
 os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -40,28 +46,19 @@ def _save_manifest(manifest: dict) -> None:
         json.dump(manifest, f, indent=2)
 
 
-def _confine(root: str, value: str) -> str:
-    if not isinstance(value, str):
-        return value
-    resolved = os.path.realpath(value) if os.path.isabs(value) else os.path.realpath(os.path.join(root, value))
-    if resolved != root and not resolved.startswith(root + os.sep):
-        raise ValueError(f"path escapes the sandbox root ({root}): {value}")
-    return resolved
-
-
 def _wrap_with_confinement(fn, path_params):
-    """Sandbox the named kwargs to os.getcwd() before calling fn. Resolved
-    fresh per call, not at wrap time, since the sandbox root is wherever the
-    process happens to be running from when the tool call actually happens."""
+    """Sandbox the named kwargs via kernel.sandbox.confine() before calling
+    fn. Resolved fresh per call, not at wrap time, against whatever root is
+    currently set — the default workspace under harness.py, or wherever
+    agent.py's --project pointed it."""
     if not path_params:
         return fn
 
     @functools.wraps(fn)
     def wrapped(**kwargs):
-        root = os.path.realpath(os.getcwd())
         for param in path_params:
-            if param in kwargs:
-                kwargs[param] = _confine(root, kwargs[param])
+            if param in kwargs and isinstance(kwargs[param], str):
+                kwargs[param] = confine(kwargs[param])
         return fn(**kwargs)
 
     return wrapped
@@ -102,10 +99,14 @@ def promote(tool_name: str, module_path: str, function_name: str, description: s
     _save_manifest(manifest)
 
 
-def verify_and_promote(tool_name: str, module_path: str, function_name: str, description: str = "", path_params=None):
+def verify(module_path: str, function_name: str):
     """Import module_path and confirm function_name actually exists and is
-    callable before writing it into the manifest. Returns (ok, error)."""
-    spec = importlib.util.spec_from_file_location(tool_name, module_path)
+    callable. Returns (ok, error). Read-only — does not touch the manifest,
+    so harness.py can use this mid-loop to check a candidate before treating
+    it as a real win, not just after the loop's already ended."""
+    if not os.path.exists(module_path):
+        return False, f"{module_path} does not exist"
+    spec = importlib.util.spec_from_file_location(function_name, module_path)
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
@@ -114,6 +115,14 @@ def verify_and_promote(tool_name: str, module_path: str, function_name: str, des
         return False, f"could not import '{function_name}' from {module_path}: {e}"
     if not callable(fn):
         return False, f"'{function_name}' in {module_path} exists but is not callable"
+    return True, None
+
+
+def verify_and_promote(tool_name: str, module_path: str, function_name: str, description: str = "", path_params=None):
+    """verify() a candidate, and if it passes, write it into the manifest."""
+    ok, err = verify(module_path, function_name)
+    if not ok:
+        return False, err
 
     promote(tool_name, module_path, function_name, description, path_params)
     return True, None

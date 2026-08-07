@@ -1,13 +1,20 @@
 """The consumer, not the bootstrapper: takes a real task instead of a
 curriculum goal, and works it with the full tool registry. Not a curriculum
 goal itself — same tier as harness.py, hand-written orchestration code.
+
+Defaults to evolutionEngine/workspace like harness.py, but --project can
+point the whole toolbelt (kernel tools + every confined graduated tool) at
+any real directory — see kernel/sandbox.py for how that confinement works.
 """
 
-import sys
+import argparse
 
 from ollama import chat
 
+import kernel.io_tools as io_tools
+from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, finish_task
+from kernel.sandbox import get_root, set_root
 from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
@@ -19,16 +26,29 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET):
     TASK_STATE["summary"] = None
     tool_map = {fn.__name__: fn for fn in tools}
 
-    system_prompt = """You are a Principal Software Engineer running locally via hardware acceleration.
-You have a full toolbelt for working in `./workspace/`: read_file, write_file, patch_file, list_workspace,
-run_shell, search_file, list_symbols, list_dir, diff_files, run_tests, and finish_task.
+    system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
+You are working inside this directory: {get_root()}
+Every tool you have is confined to this directory and its subdirectories — you cannot read or write
+anything outside it, and attempts to do so will be rejected.
+
+Every path you pass to a tool is ALREADY relative to that directory. Pass just "src/app.py", never prefix
+it with the directory's own name — doing so creates an unwanted nested directory instead of reaching the
+real file.
+
+You have a full toolbelt: read_file, write_file, patch_file, list_workspace, run_shell, search_file,
+list_symbols, list_dir, diff_files, run_tests, grep_dir, git_status, git_diff, web_search, fetch, and
+finish_task.
 
 - Use patch_file for small surgical edits; `search` must match the existing text exactly — call read_file
   first if you're not certain of the current contents.
-- Use search_file/list_symbols/list_dir to understand code before changing it, run_tests to verify a change,
-  diff_files to review one.
-- Writing a .py file is automatically run in a sandbox immediately afterward and you'll be told whether it
-  executed cleanly.
+- Use grep_dir/list_symbols/list_dir to understand code before changing it (grep_dir searches the whole
+  project at once — prefer it over calling search_file file-by-file), run_tests to verify a change,
+  diff_files or git_diff to review one.
+- Use git_status/git_diff to review everything you've changed so far before calling finish_task, if the
+  project is a git repository.
+- Use web_search to find information or documentation, fetch to read a specific URL's full content.
+- Files you write are NOT automatically executed — this isn't a throwaway sandbox, so verify your own work
+  explicitly with run_tests or run_shell rather than assuming a write succeeded because it didn't error.
 - When — and only when — the task is fully complete, call finish_task with a short summary of what you did.
   Returning plain text without calling finish_task does not end the task; you are expected to keep working."""
 
@@ -81,12 +101,28 @@ run_shell, search_file, list_symbols, list_dir, diff_files, run_tests, and finis
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        task = " ".join(sys.argv[1:])
-    else:
-        task = input("Task: ").strip()
+    parser = argparse.ArgumentParser(description="Run the coding agent against a real task.")
+    parser.add_argument("task", nargs="+", help="The task to work on.")
+    parser.add_argument(
+        "--project", default=None,
+        help="Directory to confine the agent to. Defaults to evolutionEngine/workspace.",
+    )
+    args = parser.parse_args()
 
+    if args.project:
+        try:
+            set_root(args.project)
+        except NotADirectoryError as e:
+            raise SystemExit(f"❌ {e}")
+
+    # A real project's files aren't a throwaway sandbox — don't auto-execute
+    # whatever the model just wrote. See kernel/io_tools.py's AUTO_RUN_AFTER_WRITE.
+    io_tools.AUTO_RUN_AFTER_WRITE["enabled"] = False
+
+    task = " ".join(args.task)
     tools = load_registry() + [finish_task]
+
+    print(f"📁 Operating in: {get_root()}")
     print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
 
     run_agent(task, tools)
