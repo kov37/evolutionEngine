@@ -1,0 +1,43 @@
+{
+  "search_text": {
+    "module_path": "./workspace/search_text.py",
+    "function_name": "search_file",
+    "description": "Search a file line-by-line for a substring pattern; returns (line_number, line_text) for every match.",
+    "path_params": [
+      "filepath"
+    ]
+  },
+  "list_symbols": {
+    "module_path": "./workspace/list_symbols.py",
+    "function_name": "list_symbols",
+    "description": "Parse a Python file's AST and list every top-level function/class definition with its kind and line number.",
+    "path_params": [
+      "path"
+    ]
+  },
+  "list_dir": {
+    "module_path": "./workspace/list_dir_tool.py",
+    "function_name": "list_dir",
+    "description": "Recursively list every file and subdirectory beneath a root path, as (kind, relative_path) tuples.",
+    "path_params": [
+      "root"
+    ]
+  },
+  "diff_files": {
+    "module_path": "./workspace/diff_files_tool.py",
+    "function_name": "diff_files",
+    "description": "Compute a unified diff between two files, as a string, so a change can be inspected before or after it's applied.",
+    "path_params": [
+      "path_a",
+      "path_b"
+    ]
+  },
+  "run_tests": {
+    "module_path": "./workspace/run_tests_tool.py",
+    "function_name": "run_tests",
+    "description": "Discover and run a unittest test suite under a directory, returning (success, summary) instead of raw subprocess text a caller has to parse.",
+    "path_params": [
+      "path"
+    ]
+  }
+}
