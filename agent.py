@@ -70,6 +70,7 @@ DIAGNOSTIC_PHRASE_PATTERN = re.compile(
 BACKTICK_SYMBOL_PATTERN = re.compile(r"`(\w+)`")
 WATCHDOG_TURNS_WITHOUT_WRITE = 28
 SUBGOAL_AUTO_CLOSE_GRACE_TURNS = 3
+MAX_CHAT_RETRIES = 20  # see the retry loop's own comment — a bad streak needs real room to clear
 
 
 def _diagnosed_symbols(text: str) -> set:
@@ -109,9 +110,17 @@ def _live_model_options(model: str) -> dict:
 
 
 def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memory_policy="append-all",
-              forbidden_paths=None, requires_code_changes=True):
+              forbidden_paths=None, requires_code_changes=True, max_wall_clock_seconds=None):
+    """max_wall_clock_seconds, if given, caps real elapsed time rather than
+    turn count — for a genuinely hard, open-ended task where a fixed
+    iteration_budget is the wrong constraint (a model that's making real,
+    slow progress shouldn't be cut off mid-investigation just because it
+    hit an arbitrary turn number). iteration_budget still applies as an
+    outer backstop; pass a very large value to make it effectively
+    non-binding when wall-clock time is the real limit."""
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
+    run_started = time.monotonic()
 
     run_store = RunStore(
         task_id=task_id or f"adhoc-{int(time.time())}", task_text=task, model=MODEL,
@@ -196,12 +205,50 @@ you never act on."""
     subgoal_nudge_turns = {}  # subgoal_id -> iteration it was nudged about — once each, never repeated
 
     for iteration in range(1, iteration_budget + 1):
+        if max_wall_clock_seconds is not None and (time.monotonic() - run_started) >= max_wall_clock_seconds:
+            elapsed_min = (time.monotonic() - run_started) / 60
+            print("\n" + "=" * 60)
+            print(f"⏰ WALL-CLOCK LIMIT REACHED: {elapsed_min:.1f} min elapsed "
+                  f"(limit {max_wall_clock_seconds / 60:.0f} min) at iteration {iteration}/{iteration_budget}.")
+            print("=" * 60)
+            run_store.record_task_finished(iteration=iteration - 1, outcome="wall_clock_exhausted")
+            return False
+
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
         compiled_messages = compile_context(memory_policy, messages, run_dir=run_store.run_dir)
 
+        # A long unattended run must not die to one transient API hiccup —
+        # confirmed live, twice: a malformed-tool-call XML response from
+        # Ollama (a 500, "element <function> closed by </parameter>") with
+        # zero retry handling crashed the whole process outright. A first
+        # fix (5 retries, backoff capped at 30s) still wasn't enough —
+        # confirmed live a second time: this error recurred on 3 of the
+        # first 4 turns of a real overnight run, and the 4th occurrence
+        # didn't clear within 5 attempts, ending the entire run at
+        # iteration 4. Since the OTHER 3 occurrences each cleared after
+        # just one retry, this looks recoverable with more patience, not
+        # fundamentally broken — MAX_CHAT_RETRIES raised substantially and
+        # backoff extended so a bad streak has real room to clear before
+        # the run gives up.
         call_started = time.monotonic()
-        response = chat(model=MODEL, messages=compiled_messages, tools=tools, think=False)
+        response = None
+        last_error = None
+        for attempt in range(1, MAX_CHAT_RETRIES + 1):
+            try:
+                response = chat(model=MODEL, messages=compiled_messages, tools=tools, think=False)
+                break
+            except Exception as e:
+                last_error = e
+                print(f"⚠️  chat() failed (attempt {attempt}/{MAX_CHAT_RETRIES}): {type(e).__name__}: {e}")
+                if attempt < MAX_CHAT_RETRIES:
+                    time.sleep(min(120, 2 ** attempt))
+        if response is None:
+            print(f"\n❌ chat() failed {MAX_CHAT_RETRIES} times in a row — ending run cleanly rather than "
+                  f"crashing. Last error: {last_error}")
+            run_store.record_task_finished(iteration=iteration, outcome="api_failure",
+                                            summary=f"Aborted after repeated chat() failures: {last_error}")
+            return False
         latency_ms = int((time.monotonic() - call_started) * 1000)
         msg = response.message
         messages.append(msg)
