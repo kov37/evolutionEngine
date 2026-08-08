@@ -109,7 +109,7 @@ def _live_model_options(model: str) -> dict:
 
 
 def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memory_policy="append-all",
-              forbidden_paths=None):
+              forbidden_paths=None, requires_code_changes=True):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
 
@@ -450,7 +450,7 @@ you never act on."""
 
             gate = evaluate_completion_gate(
                 run_store.run_dir, project_root=get_root(), initial_git_head=initial_git_head,
-                forbidden_paths=forbidden_paths,
+                forbidden_paths=forbidden_paths, requires_code_changes=requires_code_changes,
             )
             if not gate["allowed"]:
                 print(f"\n🚫 finish_task REJECTED: {'; '.join(gate['reasons'])}")

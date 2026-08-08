@@ -210,6 +210,34 @@ def test_completion_gate_rejects_forbidden_path(tmp_dir):
     assert "forbidden path" in gate["reasons"][0]
 
 
+def test_completion_gate_no_code_changes_mode_rejects_with_no_exploration(tmp_dir):
+    store = _new_store(tmp_dir)
+    gate = evaluate_completion_gate(store.run_dir, requires_code_changes=False)
+    assert gate["allowed"] is False
+    assert "no real exploration" in gate["reasons"][0]
+
+
+def test_completion_gate_no_code_changes_mode_allows_after_exploration(tmp_dir):
+    store = _new_store(tmp_dir)
+    store.record_tool_call(iteration=1, tool_name="read_file", arguments={"path": "agent.py"}, result_text="...")
+    gate = evaluate_completion_gate(store.run_dir, requires_code_changes=False)
+    assert gate["allowed"] is True
+    assert gate["outcome"] == "unverified"
+
+
+def test_completion_gate_no_code_changes_mode_ignores_changed_entities_requirement(tmp_dir):
+    # The normal mode's very first check (changed_entities nonempty) must
+    # not apply here — a pure-analysis task has no diff by design, not by
+    # failure. Only exploration is checked.
+    store = _new_store(tmp_dir)
+    store.record_tool_call(iteration=1, tool_name="grep_dir", arguments={"pattern": "def ", "root": "."},
+                            result_text="agent.py:10: def run_agent")
+    normal_gate = evaluate_completion_gate(store.run_dir)
+    assert normal_gate["allowed"] is False, "sanity check: the normal mode should still reject with no changes"
+    analysis_gate = evaluate_completion_gate(store.run_dir, requires_code_changes=False)
+    assert analysis_gate["allowed"] is True
+
+
 # ---- subgoals.py ----
 
 def test_subgoal_complete_rejected_without_progress(tmp_dir):
@@ -435,6 +463,9 @@ def _run_self_test():
         test_completion_gate_rejects_without_diff_review,
         test_completion_gate_allows_and_labels_unverified,
         test_completion_gate_rejects_forbidden_path,
+        test_completion_gate_no_code_changes_mode_rejects_with_no_exploration,
+        test_completion_gate_no_code_changes_mode_allows_after_exploration,
+        test_completion_gate_no_code_changes_mode_ignores_changed_entities_requirement,
         test_subgoal_complete_rejected_without_progress,
         test_subgoal_complete_allowed_after_real_progress,
         test_subgoal_complete_rejects_unknown_and_double_completion,

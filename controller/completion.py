@@ -37,13 +37,38 @@ def current_git_head(project_root: str):
 
 
 def evaluate_completion_gate(run_dir: str, project_root: str = None, initial_git_head: str = None,
-                              forbidden_paths=None) -> dict:
+                              forbidden_paths=None, requires_code_changes: bool = True) -> dict:
     """Returns {"allowed": bool, "outcome": "unverified"|"rejected", "reasons": [...]}.
     "rejected" means finish_task must NOT be honored yet — reasons explain
     what's missing, in the same ERROR/REJECTED convention as patch_file, so
     the message can be fed straight back to the model. "unverified" means
     every generic predicate passed — allowed to actually stop the loop, but
-    honestly labeled: no external verifier confirmed it."""
+    honestly labeled: no external verifier confirmed it.
+
+    requires_code_changes=False is for tasks that are pure analysis/design
+    work, not code changes — "read this codebase and propose an
+    architecture redesign" has no diff to review and no test to run BY
+    DESIGN, not because something failed. Every predicate below (diff
+    nonempty, verification ran, diff reviewed) is simply inapplicable to
+    that task shape, not a bar the model failed to clear. The bar in this
+    mode is much lower, appropriately: SOME real exploration happened
+    before claiming done — the equivalent of "don't premature-patch" for
+    a task where there's no patch to be premature about. A wrong
+    architecture proposal is far cheaper than an unverified code change,
+    so the gate doesn't need to work as hard here."""
+    if not requires_code_changes:
+        explored = any(
+            r.get("event_type") == "tool_call"
+            and not r["payload"].get("result_preview", "").startswith(("ERROR", "REJECTED"))
+            for r in read_events(run_dir)
+        )
+        if not explored:
+            return {"allowed": False, "outcome": "rejected",
+                    "reasons": ["no real exploration has happened yet — read or search something before finishing"]}
+        return {"allowed": True, "outcome": "unverified",
+                "reasons": ["requires_code_changes=False: completion is based on exploration having occurred, "
+                            "not a diff or test — no code changes were expected for this task"]}
+
     state = reduce_state(run_dir)
     changed = state.get("changed_entities", [])
 
