@@ -79,7 +79,14 @@ def _parse_run_shell_result(full_text: str):
         exit_code = None
     stdout_m = re.search(r"STDOUT:\n(.*?)\nSTDERR:\n", full_text, re.DOTALL)
     stderr_m = re.search(r"STDERR:\n(.*)$", full_text, re.DOTALL)
-    return exit_code, (stdout_m.group(1) if stdout_m else ""), (stderr_m.group(1) if stderr_m else "")
+    # A self-generated stress test caught this: unlike stdout (bounded by
+    # the \nSTDERR:\n that follows it, so its own trailing newline is never
+    # part of the match), stderr runs to the literal end of the string —
+    # kernel/exec_tools.py's run_shell always ends its output with a
+    # newline after stderr content, which without rstrip ends up INSIDE
+    # the captured group (e.g. "error\n" instead of "error").
+    stderr = stderr_m.group(1).rstrip("\n") if stderr_m else ""
+    return exit_code, (stdout_m.group(1) if stdout_m else ""), stderr
 
 
 def _parse_run_tests_result(full_text: str):

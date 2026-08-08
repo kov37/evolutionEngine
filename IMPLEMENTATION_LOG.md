@@ -2,6 +2,34 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## Self-directed stress-test experiment: what it exposed, what got fixed, what got discarded
+
+Gave `agent.py` (full write access, `bounded-structured`, 50-turn budget) a genuinely hard, open-ended engineering task against its own live repo: build a deterministic stress-testing suite for the agentic memory implementation — 10,000-turn synthetic trajectories, property assertions, adversarial completion-gate tests, metrics, no LLM judge.
+
+**Outcome: never called `finish_task` (budget exhausted), but produced a 1,524-line test file, 42/46 passing when run directly.** Debugged every failure to its exact root cause:
+
+- The flagship 10k-turn generator crashed immediately on a hallucinated keyword argument (`output_bytes` instead of `output_tokens` — a typo, not a systemic misunderstanding; the function eight lines above used the correct name). Never caught because the run exhausted its budget before re-validating.
+- Two test-authorship guesses that didn't match reality: assumed the artifact filename on disk is the raw artifact_id (real code appends `.txt` and swaps `:`→`_`), and guessed `load_artifact` "returns None or a string" for a missing artifact instead of checking that it actually raises `FileNotFoundError`.
+- **One genuine, previously-unknown bug in this project's own production code**, legitimately caught: `memory/reducers.py`'s `_parse_run_shell_result()` didn't strip the trailing newline from stderr (`stdout` is bounded by `\nSTDERR:\n` so it's naturally clean; `stderr` runs to the literal end of the string, so `run_shell`'s own trailing newline landed inside the captured group). Confirmed directly, fixed with an `.rstrip("\n")`, regression test added.
+- **The most important finding**: checked which files it actually read. It explored `memory/` thoroughly (9 files) and never opened a single file in `controller/` — the directory holding the real completion gate, the real subgoal/hypothesis ledgers, and the patch-reversion detector. Consequence: its three "adversarial" completion-gate tests never touch `controller/completion.py`'s real `evaluate_completion_gate()` — they only prove `RunStore.record_task_finished()` isn't triggered by model prose, true by construction and not a real test of whether the actual gate (with its actual predicates) can be fooled by a confident but evidence-less `finish_task` claim. Its "hypothesis" and "auto-closure" simulations are generic text patterns in `response_text`, not calls to the real `hypothesis_record`/`subgoal_create`/`auto_close_open_subgoals` mechanisms. Its "patch reversion" test never calls `detect_patch_reversion()`. It satisfied the letter of the task without engaging the most relevant part of the codebase for it.
+- **Why it got stuck at the end**: it correctly noticed `memory/store.py` (~5,700 chars) kept getting truncated and repeatedly re-fetched it via raw `cat` instead of using `memory_expand` — not confusion, an accurate observation with the wrong recovery. `dispatch.py`'s `MAX_MESSAGE_CONTENT_CHARS` (4000) caps every tool result kept in context, including `read_file`'s own output, and the only guidance toward the fix was one passive mention buried in a long system-prompt paragraph — the same class of gap already fixed for `subgoal_complete` (a nudge, not a hope) still existed here.
+
+### Fixes
+
+- **`memory/reducers.py`**: `_parse_run_shell_result()` strips the trailing newline from stderr.
+- **`dispatch.py` + `agent.py`**: `dispatch_tool_calls()`'s `recorder` callback return value is now used — when a result gets truncated and the recorder returned an event record, the truncation message names the exact `memory_expand(ref='evt-NNNNNN')` call to recover it, instead of leaving the model to remember a generic prompt mention. `agent.py`'s `_record_tool_call` now returns `run_store.record_tool_call(...)`'s result so this has something to use. `harness.py`'s call site (no recorder, no `memory_expand` tool) is completely unaffected — the hint only appears when there's a real event_id to point at.
+- **`test_dispatch.py`** (new — `dispatch.py` had no dedicated test file before despite being shared, foundational code): 9 tests covering the pre-existing error/truncation behavior plus the new hint, including that a caller without a recorder (or whose recorder returns no event_id) gets the old, unchanged message.
+- **`memory/test_stress.py` discarded entirely**, not kept even in fixed form — per direct instruction, given the core "adversarial" requirement was answered too shallowly to be worth the ongoing maintenance cost of a large generated file whose main value (the `memory/`-only parts) substantially overlaps existing coverage in `memory/test_reducers.py` and `memory/test_phase5.py`.
+
+### Verification performed
+
+- Fixed the 3 bugs in the generated file first and confirmed all 46/46 tests passed, including the flagship 10k-turn scenario completing for the first time with real metrics (`peak_context_tokens: 4096`, `retrieval_precision: 0.6569`, `reducer_visible_progress: 207`) — then discarded the file per instruction; this was purely to confirm the diagnosis was correct before letting it go.
+- Full existing suite green after the `reducers.py`/`dispatch.py`/`agent.py` changes, plus the new `test_dispatch.py` and the `reducers.py` regression test.
+
+### Open question, not yet decided
+
+Whether to re-run a similar stress-test task with the system prompt or task text pointing more explicitly at `controller/` as equally in-scope for "the agentic memory implementation" — would test whether the exploration gap was a one-off or a systematic bias toward `memory/` as *the* implementation.
+
 ## First genuinely long-horizon task, and two fixes it motivated
 
 Pointed `agent.py` at a hand-built multi-file project (`library/models.py`, `catalog.py`, `operations.py`, `utils.py`, a real `unittest` suite) with one seeded bug requiring real cross-function tracing (`return_book` decrements `available_copies` instead of incrementing it) — not a single-line typo, closer to what this whole investigation originally needed SWE-bench for. Verified the seeded bug actually fails 2/5 tests and the real fix passes all 5, before ever running the agent.

@@ -26,9 +26,16 @@ def dispatch_tool_calls(tool_calls, tool_map, recorder=None):
 
     recorder, if given, is called as recorder(tool_name, arguments, full_result)
     once per call, with the FULL untruncated result — before the truncation
-    below ever happens. Optional and defaults to None so harness.py's call
-    site (which has no run store) is completely unaffected; only agent.py
-    passes one. See memory/store.py's RunStore.record_tool_call."""
+    below ever happens — and its return value is used, if it looks like an
+    event record (has an "event_id"), to tell the model exactly how to get
+    the truncated content back (memory_expand(ref=...)) instead of leaving
+    it to remember a generic prompt mention. A live run surfaced this isn't
+    hypothetical: the model correctly noticed a file kept getting truncated
+    and got stuck repeatedly re-fetching it via run_shell instead of using
+    memory_expand, which exists for exactly this. Optional and defaults to
+    None so harness.py's call site (which has no run store, and no
+    memory_expand tool) is completely unaffected; only agent.py passes one.
+    See memory/store.py's RunStore.record_tool_call."""
     messages = []
     for call in tool_calls:
         fn = tool_map.get(call.function.name)
@@ -56,15 +63,19 @@ def dispatch_tool_calls(tool_calls, tool_map, recorder=None):
 
         print(result)
 
+        recorded_event = None
         if recorder is not None:
-            recorder(call.function.name, call.function.arguments, result)
+            recorded_event = recorder(call.function.name, call.function.arguments, result)
 
         content = result
         if len(content) > MAX_MESSAGE_CONTENT_CHARS:
+            expand_hint = ""
+            if isinstance(recorded_event, dict) and recorded_event.get("event_id"):
+                expand_hint = f" Use memory_expand(ref='{recorded_event['event_id']}') to get the rest if you need it."
             content = (
                 content[:MAX_MESSAGE_CONTENT_CHARS]
                 + f"\n...[truncated, {len(content) - MAX_MESSAGE_CONTENT_CHARS} more chars — "
-                  f"printed in full above, but not kept in context to avoid unbounded growth]"
+                  f"printed in full above, but not kept in context to avoid unbounded growth.{expand_hint}]"
             )
 
         messages.append({"role": "tool", "tool_name": call.function.name, "content": content})

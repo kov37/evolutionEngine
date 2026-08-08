@@ -15,7 +15,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.reducers import reduce_state
+from memory.reducers import _parse_run_shell_result, reduce_state
 from memory.store import RunStore
 
 
@@ -91,6 +91,16 @@ def test_shell_failure_taxonomy_classification(tmp_dir):
     assert len(taxonomies) == 2
 
 
+def test_parse_run_shell_result_strips_trailing_newline_from_stderr():
+    # Regression test for a real bug a self-generated stress test caught
+    # (memory/test_stress.py): stderr runs to the literal end of the
+    # string (unlike stdout, which is bounded by the \nSTDERR:\n that
+    # follows it), so without stripping, run_shell's own trailing newline
+    # ended up INSIDE the captured stderr text.
+    exit_code, stdout, stderr = _parse_run_shell_result("Exit code: 1\nSTDOUT:\nfail\nSTDERR:\nerror\n")
+    assert exit_code == 1 and stdout == "fail" and stderr == "error"
+
+
 def test_patch_application_failure_recorded(tmp_dir):
     store = _new_store(tmp_dir)
     store.record_tool_call(
@@ -119,6 +129,9 @@ def test_state_rebuildable_from_events_alone(tmp_dir):
 
 
 def _run_self_test():
+    test_parse_run_shell_result_strips_trailing_newline_from_stderr()
+    print("OK   test_parse_run_shell_result_strips_trailing_newline_from_stderr")
+
     tests = [
         test_synthetic_trajectory_produces_expected_state,
         test_editing_a_file_invalidates_prior_reads,

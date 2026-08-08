@@ -246,8 +246,12 @@ you never act on."""
                     run_store.run_dir, arguments.get("path"), arguments.get("search"), arguments.get("replace"),
                 )
 
-            run_store.record_tool_call(iteration=_iteration, tool_name=tool_name, arguments=arguments,
-                                        result_text=full_result, post_content=post_content)
+            # Returned to dispatch_tool_calls so its truncation message (if
+            # this result is over MAX_MESSAGE_CONTENT_CHARS) can point the
+            # model at memory_expand(ref=<this exact event_id>) instead of
+            # relying on it to remember a generic prompt mention.
+            return run_store.record_tool_call(iteration=_iteration, tool_name=tool_name, arguments=arguments,
+                                               result_text=full_result, post_content=post_content)
 
         tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, recorder=_record_tool_call)
         messages.extend(tool_messages)
