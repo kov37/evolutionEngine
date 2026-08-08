@@ -20,7 +20,7 @@ import memory.summaries as summaries_module
 from controller.completion import evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
 from controller.phases import derive_phase
-from controller.progress import stagnation_nudge
+from controller.progress import detect_patch_reversion, stagnation_nudge
 from controller.subgoals import (auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress,
                                   subgoal_ledger)
 from memory.episodes import list_episodes
@@ -383,6 +383,41 @@ def test_stagnation_nudge_resets_on_new_progress(tmp_dir):
     assert stagnation_nudge(store.run_dir, current_iteration=20, threshold=15) is None
 
 
+def test_detect_patch_reversion_flags_exact_undo(tmp_dir):
+    # Regression test for a real "action instability" pattern a live run
+    # surfaced: the model correctly fixed a bug, then reverted its own
+    # fix back to the buggy version one patch later.
+    store = _new_store(tmp_dir)
+    store.record_tool_call(iteration=1, tool_name="patch_file", arguments={
+        "path": "a.py", "search": "return a - b", "replace": "return a + b",
+    }, result_text="Wrote 'a.py' (10 bytes).")
+    reverted = detect_patch_reversion(store.run_dir, "a.py", "return a + b", "return a - b")
+    assert reverted == "evt-000001"
+
+
+def test_detect_patch_reversion_ignores_unrelated_patches(tmp_dir):
+    store = _new_store(tmp_dir)
+    store.record_tool_call(iteration=1, tool_name="patch_file", arguments={
+        "path": "a.py", "search": "return a - b", "replace": "return a + b",
+    }, result_text="Wrote 'a.py' (10 bytes).")
+    # Different path — not a reversion of the a.py patch.
+    assert detect_patch_reversion(store.run_dir, "b.py", "return a + b", "return a - b") is None
+    # Same path, but not an exact inverse (different replace text).
+    assert detect_patch_reversion(store.run_dir, "a.py", "return a + b", "return a * b") is None
+    # A forward patch (not a revert of anything) — no match.
+    assert detect_patch_reversion(store.run_dir, "a.py", "return a + b", "return a + b + 1") is None
+
+
+def test_detect_patch_reversion_ignores_failed_prior_patches(tmp_dir):
+    store = _new_store(tmp_dir)
+    store.record_tool_call(iteration=1, tool_name="patch_file", arguments={
+        "path": "a.py", "search": "return a - b", "replace": "return a + b",
+    }, result_text="ERROR: search text was not found verbatim in 'a.py'.")
+    # The "fix" never actually applied — reverting text that was never
+    # really written must not be flagged as undoing verified work.
+    assert detect_patch_reversion(store.run_dir, "a.py", "return a + b", "return a - b") is None
+
+
 def _run_self_test():
     test_derive_phase_progression()
     print("OK   test_derive_phase_progression")
@@ -412,6 +447,9 @@ def _run_self_test():
         test_hypothesis_resolve_rejects_bad_status,
         test_stagnation_nudge_fires_after_threshold,
         test_stagnation_nudge_resets_on_new_progress,
+        test_detect_patch_reversion_flags_exact_undo,
+        test_detect_patch_reversion_ignores_unrelated_patches,
+        test_detect_patch_reversion_ignores_failed_prior_patches,
     ]
     try:
         for test_fn in tests_needing_tmp_dir:

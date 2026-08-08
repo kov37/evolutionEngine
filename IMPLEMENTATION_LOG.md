@@ -2,6 +2,26 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## First genuinely long-horizon task, and two fixes it motivated
+
+Pointed `agent.py` at a hand-built multi-file project (`library/models.py`, `catalog.py`, `operations.py`, `utils.py`, a real `unittest` suite) with one seeded bug requiring real cross-function tracing (`return_book` decrements `available_copies` instead of incrementing it) — not a single-line typo, closer to what this whole investigation originally needed SWE-bench for. Verified the seeded bug actually fails 2/5 tests and the real fix passes all 5, before ever running the agent.
+
+**Run 1** (24 turns, `bounded-structured`, succeeded): genuinely good long-horizon investigation — read every file, formed a hypothesis, wrote an isolated repro script, then a *second*, more sophisticated debug script with a custom `DebugBook.__setattr__` override to trace exactly when `available_copies` changed. Didn't write any code until turn 14 — real diagnosis first. Two problems surfaced:
+
+1. **"Action instability"** — a new failure pattern, distinct from the already-documented "plan instability" (re-deriving a diagnosis without ever acting). At turn 14 it correctly patched the fix. At turn 16, after re-reading and confirming the fix was in place, it patched *again* — reverting its own correct fix back to the buggy version. At turn 18 it reapplied the fix a third time. Accurate information each time; still undid verified work once.
+2. **Noisy raw git output**: `run_shell` running plain `git diff` in a non-git directory triggers git's own "not a repository, here's `--no-index` usage" dump — ~4000 characters of pure noise (hit `MAX_OUTPUT_CHARS`), versus the dedicated `git_diff` tool's clean one-line error. The completion gate's diff-review predicate correctly rejected a premature `finish_task` at turn 20, forcing exactly this detour.
+
+### Fixes
+
+- **`controller/progress.py`**: `detect_patch_reversion(run_dir, path, search, replace)` — purely mechanical string comparison against recorded `patch_file` arguments: is this call's `(search, replace)` the exact inverse of an earlier *successful* patch on the same path? Deliberately doesn't judge whether a revert is justified (a real "this fix was wrong, undo it" case looks identical at this level) — it only forces the model to say why, via the same enforced-grammar pattern as the existing `CONFIDENCE`/`ACTION` checkpoint (`REVERT_JUSTIFICATION: "mistake"|"new evidence"` / `ACTION: ...`), rather than blocking the action outright. `patch_file` itself stays a dumb, trusted primitive with no opinion on intent — consistent with how every other kernel tool in this project is scoped.
+- **`agent.py` system prompt**: explicit warning that raw `git diff`/`git status` via `run_shell` dumps unhelpful usage text outside a git repo, and to prefer the dedicated `git_status`/`git_diff` tools (which fail with one clean line) or `read_file` as the fallback.
+
+### Verification performed
+
+- `controller/test_controller.py` — 3 new tests for `detect_patch_reversion` (flags an exact undo, ignores unrelated/non-inverse patches, ignores a prior patch that itself failed — reverting text that was never really written isn't undoing verified work). Full suite still green (25/25).
+- **Run 2**, same task, both fixes in place: completed in **10 turns** (vs. 24), no revert occurred naturally this time, and it used the dedicated `git_diff` tool directly — clean one-line error, no noise dump. Confirms the git-nudge fix changed behavior.
+- **Honest gap**: the revert didn't recur in run 2, so the enforced-grammar nudge for `detect_patch_reversion` was never actually triggered live this session — it's validated at the unit level (directly reproducing the exact search/replace pair from run 1) and the wiring mirrors three other mechanisms already proven live (confidence checkpoint, repetition detector, subgoal nudge), but "does the model respond to `REVERT_JUSTIFICATION`/`ACTION` the way it responds to the other enforced-grammar formats" hasn't been observed with a real revert yet. The 24→10 turn / 143,657→59,955 token improvement between the two runs is suggestive but not a controlled result — single runs of a temperature=1 model, not an ablation; the model simply didn't flip-flop this time, for reasons not fully attributable to either fix.
+
 ## Runtime-owned subgoal closure, enforced-grammar nudge, and a real context-compaction comparison
 
 Prompted by the user's "separation of concerns" argument for Phase 5's adoption problem (state tracking belongs to the deterministic runtime, not to whether the model remembers to call a tool) — with one important correction discussed and agreed first: the runtime can't detect that a subgoal's free-text `success_condition` was *semantically* satisfied (same "Enforceable evidence versus semantic claims" limit as everywhere else); what it *can* detect is that the model **moved on** (created the next subgoal, or called `finish_task`) while an earlier subgoal still had unclaimed real progress — a reducer-visible transition, not a semantic judgment.

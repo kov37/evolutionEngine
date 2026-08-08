@@ -22,7 +22,7 @@ from context.budget import estimate_tokens
 from context.compiler import compile_context
 from controller.completion import current_git_head, evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
-from controller.progress import stagnation_nudge
+from controller.progress import detect_patch_reversion, stagnation_nudge
 from controller.subgoals import auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress
 from memory.store import RunStore
 from memory.tools import make_memory_tools
@@ -154,8 +154,10 @@ memory_expand, and finish_task.
 - Use grep_dir/list_symbols/list_dir to understand code before changing it (grep_dir searches the whole
   project at once — prefer it over calling search_file file-by-file), run_tests to verify a change,
   diff_files or git_diff to review one.
-- Use git_status/git_diff to review everything you've changed so far before calling finish_task, if the
-  project is a git repository.
+- Use git_status/git_diff (the dedicated tools, NOT `git status`/`git diff` via run_shell) to review
+  everything you've changed so far before calling finish_task. Outside a git repository, git itself prints
+  a large usage/help dump for a raw `git diff` command instead of a clean error — the dedicated git_diff
+  tool fails with one short line instead. If git_diff isn't applicable, read_file every file you changed.
 - Use web_search to find information or documentation, fetch to read a specific URL's full content.
 - Files you write are NOT automatically executed — this isn't a throwaway sandbox, so verify your own work
   explicitly with run_tests or run_shell rather than assuming a write succeeded because it didn't error.
@@ -222,6 +224,8 @@ you never act on."""
             })
             continue
 
+        reverted_patch_event_id = [None]  # mutable cell _record_tool_call can write into
+
         def _record_tool_call(tool_name, arguments, full_result, _iteration=iteration):
             # Phase 2's changed-entity reducer needs real before/after file
             # content to compute a diff. The event log can't get that at
@@ -236,6 +240,12 @@ you never act on."""
                         post_content = f.read()
                 except OSError:
                     post_content = None
+
+            if tool_name == "patch_file" and not full_result.startswith(("ERROR", "REJECTED")):
+                reverted_patch_event_id[0] = detect_patch_reversion(
+                    run_store.run_dir, arguments.get("path"), arguments.get("search"), arguments.get("replace"),
+                )
+
             run_store.record_tool_call(iteration=_iteration, tool_name=tool_name, arguments=arguments,
                                         result_text=full_result, post_content=post_content)
 
@@ -256,6 +266,33 @@ you never act on."""
             auto_closed = auto_close_open_subgoals(run_store, MODEL, iteration, reason="new subgoal created")
             for sid in auto_closed:
                 print(f"🔒 Auto-closed '{sid}' — runtime detected real progress before the model moved on.")
+
+        # Enforced-grammar nudge for "action instability" — a live run
+        # surfaced a new failure mode distinct from the already-documented
+        # "plan instability": the model correctly patched a bug fix, then
+        # one patch later reverted its own fix back to the buggy version,
+        # then reapplied it a third time. detect_patch_reversion() is
+        # purely mechanical (string comparison on recorded arguments) —
+        # it doesn't judge whether a revert was justified, it forces the
+        # model to say so explicitly instead of silently undoing verified
+        # work. Takes priority over the subgoal-completion nudge below
+        # (it's about something that just happened this exact turn).
+        if reverted_patch_event_id[0]:
+            print(f"↩️  Reversion detected: this turn's patch undoes {reverted_patch_event_id[0]} — forcing justification.")
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"STOP. The patch you just applied exactly reverts an earlier patch you already made and "
+                    f"had verified ({reverted_patch_event_id[0]}) — you've undone your own confirmed fix. "
+                    f"Respond using EXACTLY this two-line format, as the very first thing in your next message:\n\n"
+                    f"REVERT_JUSTIFICATION: <\"mistake\" or \"new evidence\">\n"
+                    f"ACTION: <what you are about to do>\n\n"
+                    f"If REVERT_JUSTIFICATION is \"mistake\", ACTION must be \"re-applying the correct fix\" and "
+                    f"you must call patch_file to restore it in this SAME turn. If REVERT_JUSTIFICATION is "
+                    f"\"new evidence\", ACTION must name the SPECIFIC new observation (a failing test, a new "
+                    f"symptom) that justifies undoing verified work — not general uncertainty."
+                ),
+            })
 
         messages_before_nudges = len(messages)
 
