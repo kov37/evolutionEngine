@@ -135,11 +135,31 @@ def write_file(path: str, content: str) -> str:
     return _test_after_write(full_path)
 
 
+def _find_whitespace_tolerant_span(search: str, content: str):
+    """search not found as an exact substring — before giving up, retry
+    treating any run of whitespace in `search` as flexible (any run of
+    whitespace in `content`). This is specifically for the single most
+    common real failure observed across every run logged so far
+    (SWEBENCH_ANALYSIS_PARALYSIS_FINDINGS.md, IMPLEMENTATION_LOG.md's
+    smoke test): the model reproducing a line with one extra/missing space
+    — e.g. before a trailing comment — that changes nothing about which
+    line it means. Returns (start, end) of the unique match, or None if
+    there isn't exactly one (zero or ambiguous multiple)."""
+    pattern = re.escape(search)
+    pattern = re.sub(r"(?:\\ |\\\t|\\\n)+", r"\\s+", pattern)
+    matches = list(re.finditer(pattern, content))
+    if len(matches) != 1:
+        return None
+    return matches[0].span()
+
+
 def patch_file(path: str, search: str, replace: str) -> str:
     """Surgically replace one exact substring inside a file that already
     exists in the workspace. Use this for small, targeted edits instead of
     rewriting the whole file. Call read_file first to see the exact current
-    text — the search string must match verbatim, including whitespace.
+    text — the search string should match verbatim, including whitespace;
+    a whitespace-only mismatch (e.g. one extra space) is tolerated as a
+    fallback ONLY when it still identifies exactly one location.
 
     Args:
       path: Filename to patch, e.g. 'patch_validator.py'. Must already exist.
@@ -156,10 +176,20 @@ def patch_file(path: str, search: str, replace: str) -> str:
     search = _strip_code_fences(search)
     replace = _strip_code_fences(replace)
 
-    if search not in content:
-        return f"ERROR: search text was not found verbatim in '{path}'. Call read_file to see the exact current contents, then retry."
+    if search in content:
+        start = content.index(search)
+        new_content = content[:start] + replace + content[start + len(search):]
+    else:
+        span = _find_whitespace_tolerant_span(search, content)
+        if span is None:
+            return (
+                f"ERROR: search text was not found verbatim in '{path}' (a whitespace-tolerant "
+                f"retry didn't find exactly one match either). Call read_file to see the exact "
+                f"current contents, then retry."
+            )
+        start, end = span
+        new_content = content[:start] + replace + content[end:]
 
-    new_content = content.replace(search, replace, 1)
     valid, err = validate_python_syntax(full_path, new_content)
     if not valid:
         return f"REJECTED (invalid syntax, nothing written): {err}"
