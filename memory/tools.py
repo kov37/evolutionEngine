@@ -35,7 +35,8 @@ def make_memory_tools(run_store):
         if subgoals:
             lines.append("Subgoals:")
             for sid, sg in subgoals.items():
-                lines.append(f"  - {sid} [{sg['status']}]: {sg['goal']}")
+                status = sg["status"] + (", auto-closed by runtime" if sg.get("auto_closed") else "")
+                lines.append(f"  - {sid} [{status}]: {sg['goal']}")
 
         hypotheses = hypothesis_ledger(run_store.run_dir)
         if hypotheses:

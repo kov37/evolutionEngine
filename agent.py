@@ -23,7 +23,7 @@ from context.compiler import compile_context
 from controller.completion import current_git_head, evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
 from controller.progress import stagnation_nudge
-from controller.subgoals import make_subgoal_tools
+from controller.subgoals import auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress
 from memory.store import RunStore
 from memory.tools import make_memory_tools
 from registry import load_registry
@@ -69,6 +69,7 @@ DIAGNOSTIC_PHRASE_PATTERN = re.compile(
 )
 BACKTICK_SYMBOL_PATTERN = re.compile(r"`(\w+)`")
 WATCHDOG_TURNS_WITHOUT_WRITE = 28
+SUBGOAL_AUTO_CLOSE_GRACE_TURNS = 3
 
 
 def _diagnosed_symbols(text: str) -> set:
@@ -190,6 +191,7 @@ you never act on."""
 
     turns_since_last_write = 0
     diagnosed_symbol_turns = {}  # symbol -> list of iterations it was flagged as the cause
+    subgoal_nudge_turns = {}  # subgoal_id -> iteration it was nudged about — once each, never repeated
 
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
@@ -239,6 +241,23 @@ you never act on."""
 
         tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, recorder=_record_tool_call)
         messages.extend(tool_messages)
+
+        # Separation of concerns: state tracking belongs to the
+        # deterministic runtime, not to whether the model remembers to
+        # call subgoal_complete. Creating a NEW subgoal is a real,
+        # reducer-visible transition — the model moving on — so any
+        # EARLIER subgoal that already has real progress gets closed here,
+        # regardless of whether the model ever explicitly closes it. One
+        # with no progress yet (e.g. two subgoals declared back-to-back
+        # before any work starts) is correctly left open — see
+        # auto_close_open_subgoals' own guard.
+        if any(m["tool_name"] == "subgoal_create" and not m["content"].startswith(("ERROR", "REJECTED"))
+               for m in tool_messages):
+            auto_closed = auto_close_open_subgoals(run_store, MODEL, iteration, reason="new subgoal created")
+            for sid in auto_closed:
+                print(f"🔒 Auto-closed '{sid}' — runtime detected real progress before the model moved on.")
+
+        messages_before_nudges = len(messages)
 
         wrote_this_turn = any(
             m["tool_name"] in ("write_file", "patch_file") and not m["content"].startswith(("ERROR", "REJECTED"))
@@ -331,7 +350,67 @@ you never act on."""
                 print(f"🧊 Stagnation detected — forcing a re-plan.")
                 messages.append({"role": "user", "content": nudge})
 
+        # Enforced-grammar nudge for subgoal_complete — same pattern as the
+        # confidence checkpoint above, applied to the same problem it
+        # surfaced live: the model reliably creates and works subgoals but
+        # doesn't reliably close them explicitly (see IMPLEMENTATION_LOG.md,
+        # Phase 5). auto_close_open_subgoals above is the deterministic
+        # backstop that guarantees data doesn't depend on this; this nudge
+        # is the behavioral push to get an explicit close when possible —
+        # skipped if something else already claimed this turn's one
+        # enforced-grammar slot, to avoid stacking conflicting formats.
+        if len(messages) == messages_before_nudges:
+            for sid, entry in open_subgoals_with_progress(run_store.run_dir).items():
+                if sid in subgoal_nudge_turns:
+                    continue
+                subgoal_nudge_turns[sid] = iteration
+                print(f"📋 Subgoal checkpoint: '{sid}' has real progress but isn't closed — "
+                      f"asking for an explicit decision.")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"You have real, recorded progress for open subgoal `{sid}` ({entry['goal']}) but "
+                        f"haven't called subgoal_complete for it. Before doing anything else, respond using "
+                        f"EXACTLY this two-line format, as the very first thing in your next message:\n\n"
+                        f"SUBGOAL: {sid}\n"
+                        f"DECISION: <\"complete\" or \"continue\">\n\n"
+                        f"If DECISION is \"complete\", you MUST call subgoal_complete on `{sid}` in this SAME "
+                        f"turn, immediately after these two lines. If DECISION is \"continue\", name the ONE "
+                        f"specific thing still needed before it's actually done — not a vague plan."
+                    ),
+                })
+                break  # one enforced-grammar nudge per turn
+
+        # Grace-period backstop: the two transition triggers above (new
+        # subgoal_create, finish_task) don't fire if the model just keeps
+        # working without either — a real live run hit exactly this, and
+        # the open subgoal's raw detail fell out of the recent-tail window
+        # with nothing compensating for it (no episode ever created),
+        # plausibly why that run never converged. Once the enforced-grammar
+        # nudge above has already given the model one real chance to close
+        # it explicitly, auto-close it a few turns later if it still
+        # hasn't — bounded, not indefinite, and doesn't undercut the nudge
+        # the way auto-closing on every turn would (that would make the
+        # nudge moot before the model even saw it).
+        for sid, nudged_at in list(subgoal_nudge_turns.items()):
+            if iteration - nudged_at >= SUBGOAL_AUTO_CLOSE_GRACE_TURNS:
+                closed = auto_close_open_subgoals(run_store, MODEL, iteration, reason="grace period after nudge")
+                if closed:
+                    for c in closed:
+                        print(f"🔒 Auto-closed '{c}' — grace period after the enforced-grammar nudge elapsed.")
+                break  # auto_close_open_subgoals already handles every eligible subgoal in one pass
+
         if TASK_STATE["done"]:
+            # finish_task is itself a transition — the model considers the
+            # whole task done, so any subgoal still open (with real
+            # progress) is closed here too, same as the new-subgoal
+            # trigger above. Runs regardless of whether the gate below
+            # ends up allowing completion — the model moving to declare
+            # done is the signal, not whether that declaration is honored.
+            auto_closed = auto_close_open_subgoals(run_store, MODEL, iteration, reason="finish_task called")
+            for sid in auto_closed:
+                print(f"🔒 Auto-closed '{sid}' — runtime detected real progress before finish_task.")
+
             gate = evaluate_completion_gate(
                 run_store.run_dir, project_root=get_root(), initial_git_head=initial_git_head,
                 forbidden_paths=forbidden_paths,

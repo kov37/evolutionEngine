@@ -21,12 +21,12 @@ def episodes_dir(run_dir: str) -> str:
 
 
 def create_episode(run_dir: str, subgoal_id: str, goal: str, success_condition: str, conclusion: str,
-                    from_event_id: str, to_event_id: str, model: str) -> dict:
+                    from_event_id: str, to_event_id: str, model: str, auto_closed: bool = False) -> dict:
     summary_text, raw_text = generate_summary(run_dir, from_event_id, to_event_id, goal, conclusion, model=model)
     episode = {
         "subgoal_id": subgoal_id, "goal": goal, "success_condition": success_condition,
         "conclusion": conclusion, "summary": summary_text, "fidelity_ok": check_fidelity(summary_text, raw_text),
-        "from_event_id": from_event_id, "to_event_id": to_event_id,
+        "from_event_id": from_event_id, "to_event_id": to_event_id, "auto_closed": auto_closed,
     }
     path = os.path.join(episodes_dir(run_dir), f"{subgoal_id}.json")
     tmp = path + f".tmp{os.getpid()}"

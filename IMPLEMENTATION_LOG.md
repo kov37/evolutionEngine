@@ -2,6 +2,42 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## Runtime-owned subgoal closure, enforced-grammar nudge, and a real context-compaction comparison
+
+Prompted by the user's "separation of concerns" argument for Phase 5's adoption problem (state tracking belongs to the deterministic runtime, not to whether the model remembers to call a tool) — with one important correction discussed and agreed first: the runtime can't detect that a subgoal's free-text `success_condition` was *semantically* satisfied (same "Enforceable evidence versus semantic claims" limit as everywhere else); what it *can* detect is that the model **moved on** (created the next subgoal, or called `finish_task`) while an earlier subgoal still had unclaimed real progress — a reducer-visible transition, not a semantic judgment.
+
+### What was built
+
+- **`controller/subgoals.py`**: `auto_close_open_subgoals(run_store, model, iteration, reason)` — closes every open subgoal that has real progress since creation (reusing the exact evidence check `subgoal_complete` itself uses), records a synthetic `subgoal_auto_close` tool-call event (never model-invoked), and creates its episode with `auto_closed: true`. An open subgoal with *no* progress is left alone — auto-closing an empty one would produce a garbage episode. Wired into `agent.py` at two transition points: a new `subgoal_create` succeeding (closes any *other* still-open subgoal with progress), and `finish_task` being called (closes whatever's still open, regardless of whether the completion gate ends up allowing the finish).
+- **Enforced-grammar nudge for `subgoal_complete`** (`agent.py`), same pattern as the existing `CONFIDENCE`/`ACTION` checkpoint: the first time an open subgoal has real, recorded progress, the model is forced to answer `SUBGOAL: <id>` / `DECISION: "complete"|"continue"` as the literal first thing in its next message — fires once per subgoal, and is skipped if another enforced-grammar nudge already claimed that turn's one slot.
+- **Grace-period backstop**: if the nudge already fired for a subgoal and `SUBGOAL_AUTO_CLOSE_GRACE_TURNS` (3) turns pass with it still open, auto-close it anyway. Necessary because the two transition triggers don't fire if the model just keeps working without creating a new subgoal or calling `finish_task` — a live run hit exactly this (below).
+
+### A real bug this surfaced: the ledger trusted arguments from a *failed* call
+
+A live run had the model call `subgoal_complete` with an extra, invalid keyword argument. That's a Python-level `TypeError`, caught by `dispatch.py` before the function body ever runs — but `subgoal_ledger()` was scanning event *arguments*, not checking whether the call actually succeeded, so it marked the subgoal completed anyway. The model's real, valid completion attempt one turn later was then rejected as "already marked complete," and that subgoal never got an episode at all. Fixed: `subgoal_ledger()` now skips any `subgoal_complete`/`subgoal_auto_close` event whose `result_preview` starts with `ERROR`/`REJECTED`. Regression test added (`test_ledger_ignores_a_failed_subgoal_complete_call`).
+
+### The context-compaction comparison (what the user asked to see)
+
+Same task (three independent bugs, `add()`/`multiply()`/`is_even()`, explicit subgoal instruction), same model, run three times:
+
+| Run | Turns | Outcome | Real input tokens (Ollama) | Peak compiled-context estimate | Episodes (fidelity_ok) |
+|---|---|---|---|---|---|
+| `append-all` | 15 | succeeded | 93,544 | 4,258 (still climbing) | 3 (3) |
+| `bounded-structured`, pre-fix | 24 | **never finished** — budget exhausted | 128,605 | 3,178 (bounded, but broken) | 1 (1) |
+| `bounded-structured`, post-fix | 16 | succeeded | 86,987 | 2,543 | 3 (3) |
+
+**Pre-fix, compaction actively made things worse.** The ledger bug erased `sg-01`'s episode entirely, and a second, separate issue — the evidence gate's inherent non-specificity — let the model close `sg-02` citing progress that was actually `sg-01`'s `add()` fix (real work happened after `sg-02` was created, just not work *about* `sg-02`; the gate can't tell the difference, same limitation flagged when this mechanism was designed). The resulting episode summary was honest about the mismatch ("`multiply()` was not actually modified in this step... `add()` was patched instead" — `check_fidelity`'s underlying LLM call correctly described what really happened even though the model's own conclusion was wrong), but with one episode missing and the other misleading, the compiled context had almost nothing reliable standing in for `multiply()`/`is_even()` work once it fell out of the 4-turn recent-tail window. The model visibly lost track: re-reading unrelated leftover files from earlier smoke tests, rerunning the same verification command twice, never reaching `finish_task` within budget.
+
+**Post-fix, compaction is a real, measurable win, not just "bounded."** Peak context is 40% lower than `append-all` (2,543 vs 4,258 tokens) and total real tokens spent are 7% *lower* than the uncompacted baseline (86,987 vs 93,544) despite doing the same work — `compiled_context_tokens_by_turn` for `bounded-structured` plateaus and even dips (2,543 → 2,068 → 2,364) as older raw detail gets replaced by compact episode summaries, where `append-all`'s only ever climbs.
+
+**Honest limitation, not fixed**: the evidence gate's non-specificity itself (progress *anywhere* satisfies *any* open subgoal's gate, not just progress relevant to it) is still there — only its worst symptom (a subgoal silently getting zero or a misleading episode with no path to recovery) is addressed, via the ledger fix and the grace-period backstop giving every subgoal *some* closure path. A subgoal can still, in principle, get closed on genuinely irrelevant evidence. Narrowing that would mean either an LLM judge (reintroducing self-report) or constraining `subgoal_create` to structured, path-scoped predicates instead of free text — a real design tradeoff to make deliberately, not a bug to patch reflexively.
+
+### Verification performed
+
+- `controller/test_controller.py` — 3 new tests (`test_ledger_ignores_a_failed_subgoal_complete_call`, `test_open_subgoals_with_progress_excludes_untouched_subgoals`, `test_auto_close_open_subgoals_closes_only_ones_with_progress`, `test_auto_close_open_subgoals_is_idempotent`), full suite still green (22/22).
+- Live run confirming the enforced-grammar nudge works when it wasn't forced to before: the model answered `SUBGOAL: sg-01` / `DECISION: complete` and called `subgoal_complete` correctly on its own; when it didn't repeat that for `sg-02`, the `finish_task`-transition auto-close caught it, producing two correctly-labeled episodes (one explicit, one `auto_closed: true`) in the same run.
+- The three-run compaction comparison above — the first genuinely meaningful one, since Phase 5's earlier live tests never got a reliable episode pipeline to compact against.
+
 ## Phase 5 — Hierarchical retrieval and memory tools
 
 **Status: done**, scoped to what Phase 5's own acceptance tests require. One correction made at the start of this phase: my own prior log entries called the SWE-verifier/adapter work "Phase 6" — in this doc's actual 0-9 numbering, Phase 6 is "SWE trajectory dataset and replay" (ingesting/labeling *existing* traces), not the live `swe/` adapter, which isn't a separately numbered phase at all, just a module in the repo layout. Using accurate names going forward; not editing old commit messages.

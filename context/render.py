@@ -19,8 +19,13 @@ def render_structured_state(state: dict, max_entities: int = 8, max_failures: in
     if episodes:
         lines.append("\nCompleted subgoals:")
         for ep in episodes:
-            fidelity_tag = "" if ep.get("fidelity_ok", True) else " [fidelity check failed — summary may be unreliable]"
-            lines.append(f"  - {ep['subgoal_id']}: {ep['summary']}{fidelity_tag}")
+            tags = []
+            if not ep.get("fidelity_ok", True):
+                tags.append("fidelity check failed — summary may be unreliable")
+            if ep.get("auto_closed"):
+                tags.append("auto-closed by runtime, not explicitly confirmed by you")
+            tag_text = f" [{'; '.join(tags)}]" if tags else ""
+            lines.append(f"  - {ep['subgoal_id']}: {ep['summary']}{tag_text}")
 
     by_path = {}
     for e in state.get("inspected_entities", []):

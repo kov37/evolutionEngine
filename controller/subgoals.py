@@ -19,13 +19,19 @@ in-process bookkeeping that could drift from the durable record.
 from memory.episodes import create_episode
 from memory.events import event_seq, read_events
 
-BOOKKEEPING_TOOLS = {"subgoal_create", "subgoal_complete"}
+BOOKKEEPING_TOOLS = {"subgoal_create", "subgoal_complete", "subgoal_auto_close"}
+
+
+CLOSE_TOOLS = {"subgoal_complete", "subgoal_auto_close"}
 
 
 def subgoal_ledger(run_dir: str) -> dict:
-    """{subgoal_id: {"goal", "success_condition", "created_event_id", "status"}}.
+    """{subgoal_id: {"goal", "success_condition", "created_event_id", "status", "auto_closed"}}.
     IDs are assigned positionally (the Nth subgoal_create call is always
-    sg-0N) so no id needs to be parsed back out of a result string."""
+    sg-0N) so no id needs to be parsed back out of a result string.
+    subgoal_auto_close is a synthetic tool_call agent.py records directly
+    (never model-invoked) when the runtime, not the model, closes a
+    subgoal at a transition point — see auto_close_open_subgoals()."""
     ledger = {}
     counter = 0
     for record in read_events(run_dir):
@@ -37,12 +43,24 @@ def subgoal_ledger(run_dir: str) -> dict:
             counter += 1
             ledger[f"sg-{counter:02d}"] = {
                 "goal": args.get("goal"), "success_condition": args.get("success_condition"),
-                "created_event_id": record["event_id"], "status": "open",
+                "created_event_id": record["event_id"], "status": "open", "auto_closed": False,
             }
-        elif name == "subgoal_complete":
+        elif name in CLOSE_TOOLS:
+            # A live run surfaced this: a subgoal_complete call with a bad
+            # extra argument fails with a TypeError before the function
+            # body even runs (dispatch.py's own error handling), but the
+            # arguments the model TRIED to pass — including subgoal_id —
+            # are still what's recorded on the event. Without this check,
+            # that failed call still marked the subgoal completed, and the
+            # model's real, valid completion attempt one turn later was
+            # then rejected as "already marked complete" — silently
+            # losing a legitimate completion (and its episode) to a typo.
+            if record["payload"].get("result_preview", "").startswith(("ERROR", "REJECTED")):
+                continue
             entry = ledger.get(args.get("subgoal_id"))
             if entry is not None:
                 entry["status"] = "completed"
+                entry["auto_closed"] = (name == "subgoal_auto_close")
     return ledger
 
 
@@ -74,6 +92,67 @@ def has_real_progress_since(run_dir: str, since_event_id: str, exclude_tools=fro
     """Shared by subgoal completion gating and (Phase 4 item 5) the
     cross-subgoal stagnation detector."""
     return most_recent_progress_event_id(run_dir, since_event_id, exclude_tools) is not None
+
+
+def open_subgoals_with_progress(run_dir: str) -> dict:
+    """Open subgoals that already have real progress recorded since
+    creation — candidates for either an explicit subgoal_complete (the
+    enforced-grammar nudge in agent.py prompts for this) or an eventual
+    auto-close at the next transition point. Open subgoals with NO
+    progress yet are excluded — nothing to nudge about or close."""
+    ledger = subgoal_ledger(run_dir)
+    return {
+        sid: entry for sid, entry in ledger.items()
+        if entry["status"] == "open"
+        and most_recent_progress_event_id(run_dir, entry["created_event_id"], exclude_tools=BOOKKEEPING_TOOLS)
+    }
+
+
+def _create_episode_safely(run_store, model, subgoal_id, entry, conclusion, to_event_id, auto_closed=False):
+    """Episode creation is an enrichment, not a correctness gate — the
+    real evidence check already passed by the time this is called. A
+    summarization call failing (model/network hiccup) must not turn a
+    legitimately earned completion into a rejection."""
+    try:
+        create_episode(run_store.run_dir, subgoal_id, entry["goal"], entry["success_condition"], conclusion,
+                        entry["created_event_id"], to_event_id, model, auto_closed=auto_closed)
+    except Exception as e:
+        print(f"⚠️  Episode summary for '{subgoal_id}' failed ({type(e).__name__}: {e}) — "
+              f"completion still stands, just without a summary.")
+
+
+def auto_close_open_subgoals(run_store, model: str, iteration: int, reason: str) -> list:
+    """Called by agent.py's loop at a subgoal transition (a new
+    subgoal_create while an earlier one is still open, or finish_task
+    called with subgoals still open) — separation of concerns per the
+    user's own framing: state tracking belongs to the deterministic
+    runtime, not to whether the model remembers to call subgoal_complete.
+
+    Deliberately does NOT try to detect that a subgoal's free-text
+    success_condition was semantically satisfied — the runtime can't
+    evaluate that any more than it can verify any other model claim (see
+    AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md's "Enforceable evidence versus
+    semantic claims"). It closes on the same weak-but-real signal
+    subgoal_complete's own gate already uses: real progress happened.
+    "Moving on" (creating the next subgoal, or calling finish_task) is
+    itself a reducer-visible transition, not a semantic judgment — that's
+    what's mechanically detected here, not goal satisfaction.
+
+    An open subgoal with NO real progress is left open, not force-closed
+    — auto-closing an empty subgoal would create a garbage episode.
+    Returns the list of subgoal_ids that were auto-closed."""
+    closed = []
+    for subgoal_id, entry in open_subgoals_with_progress(run_store.run_dir).items():
+        to_event_id = most_recent_progress_event_id(run_store.run_dir, entry["created_event_id"],
+                                                     exclude_tools=BOOKKEEPING_TOOLS)
+        conclusion = f"Auto-closed by runtime ({reason}): moved on before an explicit subgoal_complete call."
+        run_store.record_tool_call(
+            iteration=iteration, tool_name="subgoal_auto_close",
+            arguments={"subgoal_id": subgoal_id, "reason": reason}, result_text=conclusion,
+        )
+        _create_episode_safely(run_store, model, subgoal_id, entry, conclusion, to_event_id, auto_closed=True)
+        closed.append(subgoal_id)
+    return closed
 
 
 def make_subgoal_tools(run_store, model: str):
@@ -136,17 +215,7 @@ def make_subgoal_tools(run_store, model: str):
                 f"go do something that produces a real, tool-recorded observation, then call this again."
             )
 
-        # Episode creation is an enrichment, not a correctness gate — the
-        # real evidence check above already passed. A summarization call
-        # failing (model/network hiccup) must not turn a legitimately
-        # earned completion into a rejection.
-        try:
-            create_episode(run_store.run_dir, subgoal_id, entry["goal"], entry["success_condition"], conclusion,
-                            entry["created_event_id"], to_event_id, model)
-        except Exception as e:
-            print(f"⚠️  Episode summary for '{subgoal_id}' failed ({type(e).__name__}: {e}) — "
-                  f"completion still stands, just without a summary.")
-
+        _create_episode_safely(run_store, model, subgoal_id, entry, conclusion, to_event_id)
         return f"'{subgoal_id}' marked complete: {conclusion}"
 
     return subgoal_create, subgoal_complete
