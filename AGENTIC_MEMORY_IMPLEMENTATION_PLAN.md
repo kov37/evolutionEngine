@@ -50,6 +50,71 @@ AgeMem reports average gains from 28.05% to 41.96% for Qwen2.5-7B and from 43.97
 9. **Keep context budgets explicit.** A 32K nominal window is not a requirement to fill 32K tokens.
 10. **Make every policy ablatable.** The runtime must compare append-all, flat summary, hierarchy-only, and learned memory variants.
 
+## Enforceable evidence versus semantic claims
+
+This distinction is fundamental:
+
+> The runtime can verify that observable state changed after a claim. It generally cannot verify that an arbitrary natural-language claim is semantically true.
+
+For example, the runtime cannot deterministically prove that the model has identified the function causing a bug. An LLM judge asked to evaluate that claim would create a second self-report channel, not an independent oracle.
+
+Therefore, the system must use two separate concepts:
+
+### Reducer-visible facts
+
+These are enforceable because they come from tools, parsers, Git, or an external verifier:
+
+- A file or symbol was read.
+- A command ran and returned an exit code.
+- A test passed or failed.
+- A file changed and has a specific diff.
+- A hypothesis prediction was tested and an expected observation occurred.
+- A subgoal produced a new artifact or state transition.
+- The external SWE verifier reported resolved or unresolved.
+- The final diff satisfies mechanical policy checks.
+
+### Model assertions
+
+These are useful for planning and retrieval, but remain untrusted annotations:
+
+- “This is the root cause.”
+- “The patch is complete.”
+- “This file is the only file that matters.”
+- “The test failure is unrelated.”
+
+Store these assertions with provenance and confidence if useful, but never treat them as verified merely because they are well written or because another LLM agrees.
+
+The controller should consequently use names such as `evidence_linked`, `prediction_observed`, and `mechanically_verified`, rather than implying that it has proved semantic truth. An assertion can be promoted to a working hypothesis when it has a falsifiable prediction; it is not promoted to fact until an independent executable check supports it.
+
+The system is still valuable under this limitation: it can enforce that the agent is producing new observable evidence, making bounded changes, testing consequences, and satisfying external checks. It cannot guarantee that every intermediate explanation is correct.
+
+### Mechanical completion gate
+
+The runtime may enforce a gate such as:
+
+```text
+task contract present
+AND repository is at the expected base/working-tree lineage
+AND relevant diff is nonempty
+AND forbidden-file policy passes
+AND required command/test observations exist
+AND targeted verification passes, when available
+AND final diff review was performed
+AND external SWE verifier reports resolved
+```
+
+If targeted or external verification is unavailable, the runtime must emit an explicit `unverified` result rather than infer success. A model assertion can explain why the agent believes the patch is correct, but it cannot satisfy a missing mechanical predicate.
+
+### Generic (pre-Phase-6) implementation of this gate
+
+Two of the eight predicates above ("repository is at the expected base/working-tree lineage" and "forbidden-file policy passes") implicitly assume SWE instance metadata — a known `base_commit`, a known forbidden-file list — that only exists once Phase 6's `swe/` adapter is built. A third ("external SWE verifier reports resolved") is Phase 6 by definition. Until then:
+
+- **Buildable now, exactly as specified**: task contract present; relevant diff is nonempty (`changed_entities` from `memory/reducers.py`); required command/test observations exist (`test_runs`/`shell_runs`); final diff review was performed (a `git_diff`/`diff_files` call before `finish_task`, when the project is a git repo).
+- **Buildable now, in a deliberately narrower form**: repository lineage — capture the git HEAD commit at run start and require it unchanged at completion. This confirms the checkout wasn't swapped out from under the agent mid-run; it does **not** confirm the checkout matches some externally-known intended base commit (that requires instance metadata) — narrower claim, but real and free, since `git_status`/`git_diff` tools already exist. Forbidden-file policy — an optional `forbidden_paths` glob list, checked against `changed_entities`' paths, passed into `run_agent()` rather than derived from instance metadata that doesn't exist generically.
+- **Not buildable until Phase 6**: the external SWE verifier predicate. Falls through to the `unverified` outcome exactly as designed above — not a failure, an honest "we don't know."
+
+Consequence worth stating plainly: until Phase 6, most runs will end `outcome: "unverified"`, not `"resolved"` — including ones that are actually correct, since there is no external oracle to confirm them. That's the intended behavior, not a gap to route around by loosening the gate.
+
 ## Target runtime
 
 ```text
@@ -243,6 +308,7 @@ memory_expand(artifact_id, offset, length)
 subgoal_create(goal, success_condition, parent_id)
 subgoal_complete(subgoal_id, conclusion, evidence_ids)
 hypothesis_record(claim, prediction, falsifier)
+hypothesis_resolve(hypothesis_id, status, evidence_id)  # status in {prediction_observed, prediction_disconfirmed} — never "confirmed"/"rejected"; evidence_id must cite a real event that postdates the hypothesis
 decision_record(action, rationale, evidence_ids)
 ```
 
@@ -288,7 +354,7 @@ Required transitions:
 - Reject alternatives using targeted evidence.
 - Maintain a repository map and relevant code snippets.
 
-Exit gate: one or more evidence-backed change contracts.
+Exit gate: one or more change contracts linked to observed source locations and a falsifiable prediction. This gate does **not** claim that the diagnosis is correct.
 
 ### `patch`
 
@@ -311,7 +377,7 @@ Required transitions:
 - Parse failures into structured evidence.
 - Re-enter localization or patching when results contradict the hypothesis.
 
-Exit gate: targeted behavior passes and no critical blocker remains.
+Exit gate: targeted behavior passes, mechanical checks pass, and no critical blocker remains. This is an observed behavioral result, not proof that the model's explanation was correct.
 
 ### `review`
 
@@ -323,11 +389,11 @@ Required transitions:
 - Check for accidental unrelated changes.
 - Run external SWE verifier.
 
-Exit gate: external verifier agrees, or run is explicitly marked externally unverified.
+Exit gate: external verifier agrees, or the run is explicitly marked externally unverified. The verifier result is authoritative for task success; model confidence and natural-language explanation are not.
 
 ### `finish`
 
-`finish_task` becomes a request, not authority. The runtime should reject completion unless the completion gate passes.
+`finish_task` becomes a request, not authority. The runtime should reject completion unless mechanical completion gates pass. It must not attempt to prove arbitrary claims such as “the identified function caused the bug.”
 
 ## Context compiler policy
 
@@ -426,8 +492,8 @@ Derive labels from observable outcomes, not only model prose:
 
 - `new_evidence`.
 - `hypothesis_created`.
-- `hypothesis_confirmed`.
-- `hypothesis_rejected`.
+- `prediction_observed` (the predicted observation occurred; the broader claim remains provisional).
+- `prediction_disconfirmed` (the predicted observation did not occur or a falsifier fired).
 - `useful_read`.
 - `redundant_read`.
 - `patch_progress`.
@@ -595,7 +661,7 @@ Deliverables:
 
 - Phase state machine.
 - Subgoal DAG.
-- Evidence-backed hypothesis ledger.
+- Evidence-linked hypothesis ledger with explicit untrusted-assertion status.
 - Checkpoints and rollback.
 - Completion gates.
 - Evidence-based stagnation detector.
@@ -606,6 +672,17 @@ Acceptance tests:
 - Repeated diagnosis without state change does not advance the phase.
 - A patch cannot be marked complete without diff and verification checks.
 - A failed test returns control to localization or patching.
+
+**Subgoal completion must inherit the "bounded best-effort patch" escape hatch** from the failure-mode table below, not just the evidence gate. A gate a model can never satisfy is a new paralysis trap — the exact failure this project ruled out before ever reaching SWE-bench. `agent.py`'s existing watchdog already has this fallback ("write your best guess anyway" after N turns with no write); the subgoal-completion gate must not override it with a stricter one that has no forced-progress exit.
+
+**Build order** (cheapest/highest-confidence first; each tested against a real run before the next):
+
+1. Phase state machine — a pure reducer over the existing Phase 2 event log (no new tool calls, can't be gamed by prose).
+2. `finish_task` completion gate — the generic predicates above. Highest value relative to effort: fixes false completion using only what Phase 2/3 already record.
+3. Subgoal tools (`subgoal_create`, `subgoal_complete`) with the weak-but-real evidence gate — the mechanism actually targeting "plan instability."
+4. Hypothesis ledger (`hypothesis_record`, resolution against a cited real event) — `prediction_observed`/`prediction_disconfirmed`, never `confirmed`/`rejected`.
+5. Cross-subgoal stagnation detector — layers on top of, does not replace, the existing per-turn repetition/confidence watchdog.
+6. Checkpoint/restore (stretch) — reuses the `post_content` artifacts Phase 2 already captures on every write, rather than touching Git.
 
 ### Phase 5 — Hierarchical retrieval and memory tools
 
@@ -764,7 +841,7 @@ Promotion rules:
 | Retrieval returns stale code | Tree-hash mismatch | Invalidate and re-read |
 | Model overuses memory tools | Operation-cost metrics | Penalize redundancy; cap calls |
 | Model declares intent but does not act | Tool/state mismatch | Controller advances only on observed effects |
-| Forced patch is premature | No evidence-backed change contract | Require hypothesis/evidence or run experiment |
+| Forced patch is premature | No evidence-linked change contract or no observable state transition | Require a falsifiable prediction, run an experiment, or make a bounded best-effort patch |
 | Environment failure looks like product failure | Error taxonomy | Route to environment-recovery path |
 | Cross-task memory leaks task answers | Provenance/scope checks | Quarantine task-specific artifacts |
 | RL exploits evaluator | Held-out tests and behavior checks | External verifier diversity and adversarial tests |
