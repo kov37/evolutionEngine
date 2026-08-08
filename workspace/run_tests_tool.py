@@ -1,32 +1,57 @@
 #!/usr/bin/env python3
-"""Standalone test-runner utility using unittest's TestLoader/TestRunner APIs.
+"""Standalone test-runner utility. Prefers pytest, falls back to unittest.
 
 Usage:
     python run_tests_tool.py [directory_path]
 
 Exposes `run_tests(path: str = ".") -> tuple[bool, str]` which discovers and runs
-all tests under *path* via unittest, returning a (success, summary) tuple.
+all tests under *path*, returning a (success, summary) tuple.
 
 When executed directly with an optional directory argument (default "."), it prints
 the summary to stdout and exits with code 0 on success, 1 if any test failed or
 errored, and 2 if no tests were discovered at all.
 
-Includes an internal self-test in __main__ that validates core behaviour via a
-throwaway unittest suite containing one passing and one failing test case.
+Originally unittest-only (unittest.TestLoader.discover(), which only collects
+unittest.TestCase subclasses). That silently reports "0 tests discovered" — a
+false negative, not an empty suite — against ANY codebase using pytest's own
+plain `def test_*():` function style, which is most real-world Python
+projects (sympy, django, requests, flask, pytest itself...). Confirmed live:
+a real overnight agent run against sympy never called run_tests even once in
+3,379 turns, instead improvising ad hoc verification scripts via run_shell —
+and this tool genuinely does return "Ran 0 tests" against sympy's real test
+files, so that wasn't tool avoidance, it was the tool being useless on this
+codebase. pytest can ALSO collect unittest.TestCase-based tests, so
+preferring it is strictly more compatible, not a tradeoff — unittest
+discovery is kept only as a fallback for the case pytest isn't installed at
+all in the target project's environment.
+
+Includes an internal self-test in __main__ that validates core behaviour via
+throwaway unittest AND pytest-style test suites, plus the pytest-unavailable
+fallback path.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from io import StringIO
 
+PYTEST_TIMEOUT_SECONDS = 300  # generous vs. run_shell's 15s — this is a
+                               # dedicated, purpose-built call, not a
+                               # general shell command, and the in-process
+                               # unittest path this replaces had NO timeout
+                               # at all (a hang there could hang the whole
+                               # agent loop) — this is strictly safer than
+                               # what it replaces, not a new risk.
+
 
 def run_tests(path: str = ".") -> tuple[bool, str]:
-    """Discover and run all tests under *path* using unittest APIs.
+    """Discover and run all tests under *path*.
 
     Args:
         path: Directory to discover test modules in. Defaults to ".".
@@ -38,6 +63,60 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
             summary  — Short human-readable string such as
                        "Ran 5 tests: 4 passed, 1 failed, 0 errors".
     """
+    pytest_result = _run_via_pytest(path)
+    if pytest_result is not None:
+        return pytest_result
+    return _run_via_unittest(path)
+
+
+def _run_via_pytest(path: str):
+    """None means "pytest itself couldn't run" (not installed, bad
+    invocation) — the caller falls back to unittest discovery in that
+    case. Any other outcome, including a real empty suite, is returned as
+    a normal result; the caller must NOT fall back to unittest just
+    because pytest found nothing, or a genuinely test-free directory
+    would silently get a second (also empty) run for no reason.
+
+    Runs as a subprocess of sys.executable specifically so it uses
+    whichever interpreter/venv this process is already running under —
+    the same one the project's own tests expect."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", path, "-q", "--no-header", "-p", "no:cacheprovider"],
+            capture_output=True, text=True, timeout=PYTEST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return (False, f"Ran 0 tests: pytest timed out after {PYTEST_TIMEOUT_SECONDS}s")
+    except OSError:
+        return None
+
+    output = proc.stdout + "\n" + proc.stderr
+    if "no module named pytest" in output.lower():
+        return None  # pytest genuinely isn't installed here — fall back
+
+    passed, failed, errors = _parse_pytest_summary(output)
+    total = passed + failed + errors
+    if total == 0:
+        return (False, "Ran 0 tests: no tests discovered")
+    return (failed == 0 and errors == 0, f"Ran {total} tests: {passed} passed, {failed} failed, {errors} errors")
+
+
+def _parse_pytest_summary(output: str):
+    """Pulls counts from pytest's own final summary line (e.g. "1 failed,
+    2 passed in 0.03s"). Per-category regexes rather than one combined
+    pattern — pytest's own ordering and presence of each category varies
+    (skipped/xfail/warnings can appear or not) and only the three
+    categories run_tests's own contract already promises are needed."""
+    def _count(word_pattern):
+        m = re.search(rf"(\d+) {word_pattern}", output)
+        return int(m.group(1)) if m else 0
+    return _count("passed"), _count("failed"), _count("errors?")
+
+
+def _run_via_unittest(path: str) -> tuple[bool, str]:
+    """The original implementation — unittest.TestLoader.discover() only
+    finds unittest.TestCase subclasses, so this is now a fallback for
+    projects that don't have pytest installed, not the primary path."""
     loader = unittest.TestLoader()
     suite = loader.discover(start_dir=path, top_level_dir=path)
 
@@ -153,6 +232,95 @@ class TestAllPass(unittest.TestCase):
             )
     finally:
         shutil.rmtree(tmpdir_3, ignore_errors=True)
+
+    # -- Scenario 4: pytest-style bare functions, mixed pass/fail -----------
+    # Regression test for the real bug: unittest.TestLoader.discover()
+    # only collects unittest.TestCase subclasses, so it silently reported
+    # "0 tests discovered" against plain `def test_*():` functions — the
+    # style sympy, django, requests, flask, and pytest itself all use.
+    # Confirmed live: a real overnight agent run against sympy never
+    # called run_tests once in 3,379 turns, because it genuinely returned
+    # nothing useful on that codebase.
+    tmpdir_4 = tempfile.mkdtemp(prefix="run_tests_tool_selftest_4_")
+    try:
+        module_path = os.path.join(tmpdir_4, "test_pytest_style.py")
+        with open(module_path, "w", encoding="utf-8") as f:
+            f.write("""\
+def test_bare_function_passes():
+    assert 1 + 1 == 2
+
+def test_bare_function_fails():
+    assert 1 + 1 == 3
+""")
+        success, summary = run_tests(tmpdir_4)
+        if success is not False:
+            errors.append(
+                f"Scenario 4 FAILED — pytest-style bare functions must be discovered and run "
+                f"(one deliberately fails), got success={success!r}. Summary: {summary}"
+            )
+        if "0 tests discovered" in summary:
+            errors.append(
+                f"Scenario 4 FAILED — this is the exact regression: plain `def test_*():` "
+                f"functions were not discovered at all. Summary: {summary}"
+            )
+        if "1 passed" not in summary or "1 failed" not in summary:
+            errors.append(f"Scenario 4 FAILED — expected 1 passed and 1 failed. Summary: {summary}")
+    finally:
+        shutil.rmtree(tmpdir_4, ignore_errors=True)
+
+    # -- Scenario 5: pytest-style bare functions, all passing ---------------
+    tmpdir_5 = tempfile.mkdtemp(prefix="run_tests_tool_selftest_5_")
+    try:
+        module_path = os.path.join(tmpdir_5, "test_pytest_style_pass.py")
+        with open(module_path, "w", encoding="utf-8") as f:
+            f.write("""\
+def test_one():
+    assert "hello".isalpha()
+
+def test_two():
+    assert sorted([3, 1, 2]) == [1, 2, 3]
+""")
+        success, summary = run_tests(tmpdir_5)
+        if success is not True:
+            errors.append(
+                f"Scenario 5 FAILED — expected success=True (both pytest-style tests pass), "
+                f"got {success!r}. Summary: {summary}"
+            )
+    finally:
+        shutil.rmtree(tmpdir_5, ignore_errors=True)
+
+    # -- Scenario 6: pytest unavailable falls back to unittest discovery ----
+    tmpdir_6 = tempfile.mkdtemp(prefix="run_tests_tool_selftest_6_")
+    try:
+        module_path = os.path.join(tmpdir_6, "test_fallback.py")
+        with open(module_path, "w", encoding="utf-8") as f:
+            f.write("""\
+import unittest
+
+class TestFallback(unittest.TestCase):
+    def test_passes(self):
+        self.assertEqual(2 + 2, 4)
+""")
+        real_run = subprocess.run
+
+        def _pytest_not_installed(args, **kwargs):
+            if len(args) >= 3 and args[1:3] == ["-m", "pytest"]:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="No module named pytest\n")
+            return real_run(args, **kwargs)
+
+        subprocess.run = _pytest_not_installed
+        try:
+            success, summary = run_tests(tmpdir_6)
+        finally:
+            subprocess.run = real_run
+
+        if success is not True:
+            errors.append(
+                f"Scenario 6 FAILED — with pytest unavailable, must fall back to unittest "
+                f"discovery and still find/run the real test, got success={success!r}. Summary: {summary}"
+            )
+    finally:
+        shutil.rmtree(tmpdir_6, ignore_errors=True)
 
     if errors:
         for e in errors:

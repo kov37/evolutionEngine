@@ -14,15 +14,61 @@ just re-stated diagnosis.
 Stateless by design, like memory/reducers.py: every call re-derives the
 subgoal ledger from the run's own event log rather than holding private
 in-process bookkeeping that could drift from the durable record.
+
+Duplicate-subgoal detection (find_duplicate_subgoals / duplicate_subgoal_check)
+was added after a real overnight run (sympy-13878) quantified a failure mode
+distinct from anything the watchdog/repetition-detector/auto-close mechanisms
+above address: the model recreated the SAME subgoal 8 times — 70% of the
+run's 3,379 iterations were spent re-investigating a goal it had already
+scoped and abandoned 6 times before, because nothing carried "you already
+did this" forward across a subgoal's full lifecycle. Turn-level nudges
+("stop investigating, write code") fired correctly every time and didn't
+fix it — the gap isn't in-turn hesitation, it's cross-subgoal amnesia. See
+SWEBENCH_SYMPY13878_OVERNIGHT_FINDINGS.md for the full numbers.
 """
 
-from memory.episodes import create_episode
+import difflib
+import json
+import os
+
+from memory.episodes import create_episode, episodes_dir
 from memory.events import event_seq, read_events
 
 BOOKKEEPING_TOOLS = {"subgoal_create", "subgoal_complete", "subgoal_auto_close"}
 
 
 CLOSE_TOOLS = {"subgoal_complete", "subgoal_auto_close"}
+
+# Lexical, not semantic (difflib.SequenceMatcher, no embedding call) — the
+# duplicates actually observed were near-verbatim goal text, so this is
+# cheap and needs no extra model round-trip. A known limitation: two
+# genuinely different subgoals about the same file/symbol could share
+# enough phrasing to false-positive above this threshold; 0.6 was picked
+# to catch last night's real duplicates (which scored well above it) with
+# some margin, not tuned against a corpus of near-misses.
+DUPLICATE_SIMILARITY_THRESHOLD = 0.6
+
+# How many times a duplicate goal is blocked-with-a-lesson before the
+# runtime stops asking and ends the run instead. 1 means: the FIRST
+# recreation of an already-closed goal is blocked with the prior episode
+# injected as a lesson (a real chance to act on it); if the SAME goal is
+# recreated again after that, the block itself didn't change behavior —
+# the exact "asking nicely didn't work" signal the watchdog and repetition
+# detector already demonstrated live, and burning a 3rd identical cycle is
+# what cost 70% of last night's budget.
+DUPLICATE_MAX_BLOCKS_BEFORE_ESCALATE = 1
+
+# subgoal_create's own rejection message always starts with this exact
+# text (see duplicate_subgoal_check below) — used to find prior blocked
+# attempts directly in the raw event log. subgoal_ledger() deliberately
+# excludes rejected creates (they never became real subgoals), so a
+# blocked attempt can't be counted by re-deriving the ledger the way
+# find_duplicate_subgoals does for the lesson text; escalation has to
+# count the rejections themselves, read straight from the event log, or a
+# goal that keeps getting blocked and recreated would never actually
+# escalate — each blocked attempt would vanish and the count would never
+# grow past the original single closed match.
+_DUPLICATE_REJECTION_PREFIX = "REJECTED: this goal has already been attempted"
 
 
 def subgoal_ledger(run_dir: str) -> dict:
@@ -40,6 +86,12 @@ def subgoal_ledger(run_dir: str) -> dict:
         name = record["payload"]["tool_name"]
         args = record["payload"].get("arguments", {})
         if name == "subgoal_create":
+            # Same class of bug the CLOSE_TOOLS check below already fixes:
+            # a call rejected by the duplicate-goal gate (or any other
+            # future rejection) must not consume a slot or appear as a
+            # phantom open subgoal — it never became real work.
+            if record["payload"].get("result_preview", "").startswith(("ERROR", "REJECTED")):
+                continue
             counter += 1
             ledger[f"sg-{counter:02d}"] = {
                 "goal": args.get("goal"), "success_condition": args.get("success_condition"),
@@ -155,6 +207,92 @@ def auto_close_open_subgoals(run_store, model: str, iteration: int, reason: str)
     return closed
 
 
+def _goal_similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, (a or "").lower().strip(), (b or "").lower().strip()).ratio()
+
+
+def find_duplicate_subgoals(run_dir: str, goal_text: str, threshold: float = DUPLICATE_SIMILARITY_THRESHOLD) -> list:
+    """Closed (completed or auto-closed) subgoals whose goal text is a
+    near-duplicate of goal_text, oldest first. Open subgoals are never
+    flagged — recreating a subgoal that's still actively open is a
+    different situation (already handled by auto-close on the next
+    transition), not a re-scoping-from-scratch loop."""
+    ledger = subgoal_ledger(run_dir)
+    matches = [
+        (sid, entry) for sid, entry in ledger.items()
+        if entry["status"] == "completed" and _goal_similarity(entry["goal"], goal_text) >= threshold
+    ]
+    return sorted(matches, key=lambda pair: pair[0])
+
+
+def _episode_lesson(run_dir: str, subgoal_id: str, entry: dict) -> str:
+    summary = None
+    try:
+        with open(os.path.join(episodes_dir(run_dir), f"{subgoal_id}.json"), "r", encoding="utf-8") as f:
+            summary = json.load(f).get("summary")
+    except (OSError, json.JSONDecodeError):
+        pass
+    tag = "already completed for real" if not entry["auto_closed"] else "abandoned without finishing"
+    return f"{subgoal_id} ({tag}): {summary or entry['goal']}"
+
+
+def _prior_duplicate_blocks(run_dir: str, goal_text: str, threshold: float = DUPLICATE_SIMILARITY_THRESHOLD) -> int:
+    """How many times subgoal_create has already been rejected as a
+    duplicate of a goal similar to goal_text — read straight from raw
+    tool_call events (see _DUPLICATE_REJECTION_PREFIX's docstring for why
+    the ledger can't be used for this)."""
+    count = 0
+    for record in read_events(run_dir):
+        if record.get("event_type") != "tool_call" or record["payload"]["tool_name"] != "subgoal_create":
+            continue
+        if not record["payload"].get("result_preview", "").startswith(_DUPLICATE_REJECTION_PREFIX):
+            continue
+        if _goal_similarity(record["payload"].get("arguments", {}).get("goal"), goal_text) >= threshold:
+            count += 1
+    return count
+
+
+def duplicate_subgoal_check(run_dir: str, goal_text: str) -> dict:
+    """{"blocked": bool, "escalate": bool, "message": str|None}. Called
+    from subgoal_create itself, BEFORE this call's own result is recorded
+    — "escalate" here is a best-effort hint for how to phrase the
+    rejection (does this block sound like a last warning?), not the
+    authoritative decision. agent.py makes that decision separately, via
+    should_escalate_duplicate, AFTER the rejection is recorded — see that
+    function for why the two need to count differently."""
+    matches = find_duplicate_subgoals(run_dir, goal_text)
+    if not matches:
+        return {"blocked": False, "escalate": False, "message": None}
+
+    lessons = "\n".join(f"  - {_episode_lesson(run_dir, sid, entry)}" for sid, entry in matches)
+    escalate = _prior_duplicate_blocks(run_dir, goal_text) >= DUPLICATE_MAX_BLOCKS_BEFORE_ESCALATE
+    if not escalate:
+        instruction = (
+            "Do not re-investigate from scratch. Re-read the lesson(s) above and act directly — call "
+            "patch_file/write_file now, or state the ONE specific fact you're missing that those attempts "
+            "didn't already establish. This goal will not be blocked-and-explained again — recreating it "
+            "again after this will end the run."
+        )
+    else:
+        instruction = (
+            "This exact goal has now been blocked more than once without your behavior changing — "
+            "re-investigating again will not help. The run is ending rather than repeating this cycle further."
+        )
+    message = f"this goal has already been attempted {len(matches)} time(s) before:\n{lessons}\n{instruction}"
+    return {"blocked": True, "escalate": escalate, "message": message}
+
+
+def should_escalate_duplicate(run_dir: str, goal_text: str) -> bool:
+    """Called by agent.py AFTER a subgoal_create call has already been
+    rejected as a duplicate and recorded — a separate, authoritative
+    check from duplicate_subgoal_check's own "escalate" hint, which runs
+    BEFORE recording and so is always one block behind. Counting from the
+    same post-recording event log both callers would otherwise disagree
+    on keeps the threshold meaning one consistent thing: total times this
+    goal has been blocked, including the one that JUST happened."""
+    return _prior_duplicate_blocks(run_dir, goal_text) > DUPLICATE_MAX_BLOCKS_BEFORE_ESCALATE
+
+
 def make_subgoal_tools(run_store, model: str):
     """Returns (subgoal_create, subgoal_complete), closures bound to one
     run — mirrors docker_verify_tools.make_run_shell_in_container's
@@ -182,6 +320,9 @@ def make_subgoal_tools(run_store, model: str):
             concrete — subgoal_complete on this subgoal is rejected unless
             real work happened after this call, not just more reasoning.
         """
+        check = duplicate_subgoal_check(run_store.run_dir, goal)
+        if check["blocked"]:
+            return f"REJECTED: {check['message']}"
         ledger = subgoal_ledger(run_store.run_dir)
         sid = f"sg-{len(ledger) + 1:02d}"
         return f"Created {sid}: {goal} (success condition: {success_condition})"

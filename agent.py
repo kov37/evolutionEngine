@@ -23,7 +23,8 @@ from context.compiler import compile_context
 from controller.completion import current_git_head, evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
 from controller.progress import detect_patch_reversion, stagnation_nudge
-from controller.subgoals import auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress
+from controller.subgoals import (auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress,
+                                  should_escalate_duplicate)
 from memory.store import RunStore
 from memory.tools import make_memory_tools
 from registry import load_registry
@@ -317,6 +318,34 @@ you never act on."""
             auto_closed = auto_close_open_subgoals(run_store, MODEL, iteration, reason="new subgoal created")
             for sid in auto_closed:
                 print(f"🔒 Auto-closed '{sid}' — runtime detected real progress before the model moved on.")
+
+        # Duplicate-subgoal escalation — quantified live on the sympy-13878
+        # overnight run: the model recreated the identical subgoal 8 times
+        # (70% of the whole run) because nothing carried "you already
+        # scoped and abandoned this" forward. subgoal_create's own
+        # duplicate_subgoal_check blocks the 1st recreation with the prior
+        # attempt's episode injected as a lesson — a real chance to act on
+        # it. If a 2ND recreation of the SAME goal still happens after
+        # that, blocking-and-nudging has already been tried and failed
+        # once; re-deriving the same check here (stateless, same event
+        # log) and ending the run beats burning the rest of the budget on
+        # a 3rd identical cycle. Deliberately NOT another nudge — the
+        # watchdog/repetition-detector nudges above already proved, live,
+        # that asking nicely doesn't reliably change this behavior.
+        for call in msg.tool_calls:
+            if call.function.name != "subgoal_create":
+                continue
+            if should_escalate_duplicate(run_store.run_dir, call.function.arguments.get("goal", "")):
+                print("\n" + "=" * 60)
+                print("🛑 DUPLICATE SUBGOAL ESCALATION: this goal has been recreated after already being "
+                      "blocked once — ending the run rather than repeating the cycle again.")
+                print("=" * 60)
+                run_store.record_task_finished(
+                    iteration=iteration, outcome="stuck_duplicate_subgoal",
+                    summary=f"Repeatedly recreated the same subgoal without executing it: "
+                            f"{call.function.arguments.get('goal', '')[:200]}",
+                )
+                return False
 
         # Enforced-grammar nudge for "action instability" — a live run
         # surfaced a new failure mode distinct from the already-documented

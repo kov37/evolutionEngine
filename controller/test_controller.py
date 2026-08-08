@@ -21,7 +21,8 @@ from controller.completion import evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
 from controller.phases import derive_phase
 from controller.progress import detect_patch_reversion, stagnation_nudge
-from controller.subgoals import (auto_close_open_subgoals, make_subgoal_tools, open_subgoals_with_progress,
+from controller.subgoals import (auto_close_open_subgoals, duplicate_subgoal_check, find_duplicate_subgoals,
+                                  make_subgoal_tools, open_subgoals_with_progress, should_escalate_duplicate,
                                   subgoal_ledger)
 from memory.episodes import list_episodes
 from memory.store import RunStore
@@ -359,6 +360,84 @@ def test_auto_close_open_subgoals_is_idempotent(tmp_dir):
     assert second == [], "an already-completed subgoal must not be closed again"
 
 
+def test_find_duplicate_subgoals_ignores_open_and_matches_closed(tmp_dir):
+    store = _new_store(tmp_dir)
+    create, _ = _make_subgoal_tools_for_test(store)
+    goal = "Add _cdf method to ArcsinDistribution in crv_types.py"
+    _call_and_record(store, 1, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    store.record_tool_call(iteration=2, tool_name="read_file", arguments={"path": "crv_types.py"}, result_text="ok")
+    assert auto_close_open_subgoals(store, TEST_MODEL, iteration=3, reason="test") == ["sg-01"]
+
+    # A second, still-OPEN subgoal with near-identical wording, recorded
+    # directly (bypassing subgoal_create's own duplicate check, which is
+    # tested separately below) — must not be matched. Only CLOSED entries
+    # are candidates; an open one is already handled by auto-close.
+    store.record_tool_call(iteration=4, tool_name="subgoal_create", arguments={"goal": goal, "success_condition": "x"},
+                            result_text="Created sg-02: ... (success condition: ...)")
+
+    matches = find_duplicate_subgoals(store.run_dir, goal)
+    assert [sid for sid, _ in matches] == ["sg-01"], "only the CLOSED sg-01 should match, not open sg-02"
+
+
+def test_duplicate_subgoal_check_blocks_first_recreation_with_lesson(tmp_dir):
+    store = _new_store(tmp_dir)
+    create, _ = _make_subgoal_tools_for_test(store)
+    goal = "Add _cdf method to ArcsinDistribution"
+    _call_and_record(store, 1, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    store.record_tool_call(iteration=2, tool_name="read_file", arguments={"path": "crv_types.py"}, result_text="ok")
+    auto_close_open_subgoals(store, TEST_MODEL, iteration=3, reason="test")
+
+    check = duplicate_subgoal_check(store.run_dir, goal)
+    assert check["blocked"] is True
+    assert check["escalate"] is False, "first recreation should be blocked with a lesson, not escalated yet"
+    assert "sg-01" in check["message"]
+    assert "stubbed episode summary" in check["message"], "the prior episode's own summary must be injected as the lesson"
+
+    result = _call_and_record(store, 4, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    assert result.startswith("REJECTED: this goal has already been attempted")
+    assert list(subgoal_ledger(store.run_dir).keys()) == ["sg-01"], \
+        "a rejected duplicate create must not consume a new sg-NN slot"
+
+
+def test_duplicate_subgoal_check_ignores_unrelated_goals(tmp_dir):
+    store = _new_store(tmp_dir)
+    create, _ = _make_subgoal_tools_for_test(store)
+    _call_and_record(store, 1, create, "subgoal_create",
+                      {"goal": "Add _cdf method to ArcsinDistribution", "success_condition": "cdf works"})
+    store.record_tool_call(iteration=2, tool_name="read_file", arguments={"path": "crv_types.py"}, result_text="ok")
+    auto_close_open_subgoals(store, TEST_MODEL, iteration=3, reason="test")
+
+    result = _call_and_record(store, 4, create, "subgoal_create",
+                               {"goal": "Fix the off-by-one error in the pagination helper",
+                                "success_condition": "tests pass"})
+    assert "sg-02" in result, "an unrelated goal must not be blocked as a duplicate"
+
+
+def test_should_escalate_duplicate_after_second_block(tmp_dir):
+    # Regression test for the exact bug this mechanism exists to catch:
+    # escalation must be counted from raw REJECTED events, not the
+    # ledger — the ledger excludes rejected creates by design, so a
+    # count derived from it can never grow past the original 1 closed
+    # match, and escalation would never fire no matter how many times
+    # the same goal gets blocked and recreated.
+    store = _new_store(tmp_dir)
+    create, _ = _make_subgoal_tools_for_test(store)
+    goal = "Add _cdf method to ArcsinDistribution"
+    _call_and_record(store, 1, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    store.record_tool_call(iteration=2, tool_name="read_file", arguments={"path": "crv_types.py"}, result_text="ok")
+    auto_close_open_subgoals(store, TEST_MODEL, iteration=3, reason="test")
+
+    r1 = _call_and_record(store, 4, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    assert r1.startswith("REJECTED")
+    assert should_escalate_duplicate(store.run_dir, goal) is False, \
+        "the 1st blocked recreation is a real chance to act on the lesson, not an escalation yet"
+
+    r2 = _call_and_record(store, 5, create, "subgoal_create", {"goal": goal, "success_condition": "cdf works"})
+    assert r2.startswith("REJECTED")
+    assert should_escalate_duplicate(store.run_dir, goal) is True, \
+        "a 2nd recreation of the SAME goal means blocking it once already didn't change anything"
+
+
 # ---- hypotheses.py ----
 
 def test_hypothesis_resolve_requires_real_postdating_evidence(tmp_dir):
@@ -474,6 +553,10 @@ def _run_self_test():
         test_open_subgoals_with_progress_excludes_untouched_subgoals,
         test_auto_close_open_subgoals_closes_only_ones_with_progress,
         test_auto_close_open_subgoals_is_idempotent,
+        test_find_duplicate_subgoals_ignores_open_and_matches_closed,
+        test_duplicate_subgoal_check_blocks_first_recreation_with_lesson,
+        test_duplicate_subgoal_check_ignores_unrelated_goals,
+        test_should_escalate_duplicate_after_second_block,
         test_hypothesis_resolve_requires_real_postdating_evidence,
         test_hypothesis_resolve_rejects_bad_status,
         test_stagnation_nudge_fires_after_threshold,
