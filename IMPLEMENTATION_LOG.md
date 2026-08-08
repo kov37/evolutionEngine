@@ -8,6 +8,31 @@ Not part of the plan; found because Phase 0/1's live smoke test hit it directly.
 
 Fix: on exact-match failure, retry with runs of whitespace in `search` turned into a flexible `\s+` pattern. If that finds exactly one location, use it; if it finds zero or more than one, still reject (never silently guess which occurrence). Exact matches take the same code path as before — no behavior change when the model gets it right. Added `kernel/test_io_tools.py` (exact-match, fallback, ambiguous-rejection, genuinely-not-found cases). Re-ran the same smoke-test task against the real model after the fix: same whitespace mistake, now recovered — `WON: True` in 5 turns instead of exhausting a 6-turn budget on an unfixed bug.
 
+## Phase 2 — Automatic materialized state
+
+**Status: done**, scoped down from the plan's full list. Built: repository/entity reducer (reads + writes, with staleness), test reducer, shell-command reducer with a structured failure taxonomy, and a lightweight git-call passthrough. **Deliberately not built**: hypothesis/evidence-claim extraction — nothing in the current pipeline produces a claim to track (that needs either parsing free model prose, which design principle 6 explicitly rules out, or an explicit `memory_*` tool call, which is Phase 5), and SWE verifier fields (fail-to-pass/pass-to-pass/resolved) — no verifier is wired up until Phase 6's `swe/` adapter replaces the deleted `evolve/swebench/` scaffolding. Phase/subgoal state is Phase 4's controller, also not here.
+
+### What was built
+
+- **`memory/reducers.py`** — `reduce_state(run_dir)`, a pure function over `memory.events.read_events()` (plus the run's own `artifacts/` directory for full tool-result text — that still counts as "the event log," not live external state). Produces `inspected_entities`, `changed_entities`, `test_runs`, `shell_runs`, `git_calls`, and `failures`. Entity tracking is scoped to tools with one unambiguous target path (`read_file`, `search_file`, `write_file`, `patch_file`) — `grep_dir`/`list_dir`/`list_symbols`/`git_status`/`git_diff` operate on a whole directory, not one entity, and aren't folded into entity state (they're still in the raw event log, just not structured here).
+- **Stale-evidence invalidation**: a write to path `P` marks every prior `inspected_entities`/`changed_entities` record for `P` as `stale: True`, purely from event order — no content-hash comparison needed for this property to hold.
+- **Structured failure taxonomy**: `product_failure`, `test_environment_failure`, `patch_application_failure`, `missing_dependency_failure`, `timeout_or_resource_failure`, `unknown_failure`. `run_tests` failures are exact (parses `workspace/run_tests_tool.py`'s own deterministic `"Ran N tests: P passed, F failed, E errors"` format). `run_shell` classification is pattern-based on stdout/stderr (`ModuleNotFoundError` → missing dependency, `SyntaxError` → environment, `AssertionError`/`Traceback` → product) and honestly documented as heuristic, not a real per-framework parser — an "unknown_failure" fallback is safer than a wrong specific label.
+- **`agent.py` / `memory/store.py`**: `RunStore.record_tool_call()` gained an optional `post_content` parameter. `agent.py`'s tool-call recorder now reads a file's actual on-disk content immediately after a successful `write_file`/`patch_file`, while it's still there, and stores it as an artifact linked to the event (`post_content_artifact_id`). This exists so `changed_entities` has real post-write content without ever reading the project's filesystem at *reconstruction* time — the plan's own "before/after hash, diff" deliverable, captured at record time so it survives even if the underlying checkout is later deleted.
+- **`RunStore.record_task_finished()`** now also writes `state.json` (via `reduce_state`), alongside the existing `metrics.json` — the run directory finally matches Phase 0's originally-planned layout, populated only once something actually produces the data (no placeholder file written earlier with nothing in it).
+- **`memory/test_reducers.py`** — self-test covering all four of Phase 2's stated acceptance criteria directly: a synthetic trajectory produces expected state, editing a file invalidates prior file facts, a failed test creates a machine-readable failure record, and `reduce_state()` is a pure function of the run directory (called twice, same result).
+- **`memory/report.py`**: `--expand` now also accepts a raw `artifact_id` (`sha256:...`), not just an `event_id` — needed to inspect a `post_content_artifact_id`, which isn't an event's own primary artifact.
+
+### Verification performed
+
+- `python3 memory/test_reducers.py` — 6/6 new self-tests pass.
+- `python3 memory/test_memory.py`, `kernel/test_io_tools.py`, `verification/test_bypasses.py` — all still pass (no regressions).
+- Applied `reduce_state()` to the two real runs already recorded from Phase 0/1's smoke tests — correctly reconstructed both `patch_file` failures (pre-fix run) and the successful write (post-fix run) purely from their event logs, including catching that the pre-fix run's `cat -A` shell error correctly falls back to `unknown_failure` rather than a wrong specific label.
+- One more live run against the real model (a second scratch bug, `multiply()` returning `a + b`) exercised the full pipeline end-to-end, including the new `post_content` capture and `state.json` write-on-finish — the model hit the *same* whitespace-mismatch pattern a third time, and this run's `patch_file` call succeeded silently via the fallback from the prior fix. Verified the captured `post_content_artifact_id` byte-for-byte against the real file on disk afterward.
+
+### Not yet done
+
+Phase 3 (bounded context compiler — first phase where the model's actual prompt starts changing; nothing through Phase 2 changes what the model sees), Phase 4 (SWE controller, subgoal DAG, evidence-gated completion), and the `swe/` adapter (Phase 6, needed before any of this can be validated against a real SWE-bench trajectory again).
+
 ## Phase 0 + 1 — Baseline instrumentation + lossless event/artifact store
 
 **Status: done.** Scoped exactly to the plan's own "First implementation ticket" section: event/artifact recording only, current `agent.py` behavior unchanged, no RL/embeddings/summarization/new controller.

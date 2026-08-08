@@ -54,12 +54,12 @@ class RunStore:
             input_tokens=input_tokens, output_tokens=output_tokens, latency_ms=latency_ms,
         )
 
-    def record_tool_call(self, iteration, tool_name, arguments, result_text):
+    def record_tool_call(self, iteration, tool_name, arguments, result_text, post_content=None):
         artifact_id = store_artifact(self.artifacts_dir, result_text)
-        return self.events.append(
-            "tool_call", iteration=iteration, artifact_id=artifact_id,
-            payload={"tool_name": tool_name, "arguments": arguments, "result_preview": result_text[:500]},
-        )
+        payload = {"tool_name": tool_name, "arguments": arguments, "result_preview": result_text[:500]}
+        if post_content is not None:
+            payload["post_content_artifact_id"] = store_artifact(self.artifacts_dir, post_content)
+        return self.events.append("tool_call", iteration=iteration, artifact_id=artifact_id, payload=payload)
 
     def record_task_finished(self, iteration, outcome, summary=None):
         self.events.append("task_finished", payload={"outcome": outcome, "summary": summary}, iteration=iteration)
@@ -70,6 +70,15 @@ class RunStore:
         metrics = compute_metrics(self.run_dir)
         with open(os.path.join(self.run_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+
+        # Phase 2: materialized state, purely derived from the event log
+        # (memory/reducers.py) — imported here, not at module level, so
+        # Phase 0/1's store.py has no hard dependency on Phase 2 existing.
+        from memory.reducers import reduce_state
+        state = reduce_state(self.run_dir)
+        with open(os.path.join(self.run_dir, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+
         return metrics
 
 

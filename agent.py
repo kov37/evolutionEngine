@@ -8,6 +8,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 """
 
 import argparse
+import os
 import re
 import time
 
@@ -181,8 +182,21 @@ you never act on."""
             continue
 
         def _record_tool_call(tool_name, arguments, full_result, _iteration=iteration):
+            # Phase 2's changed-entity reducer needs real before/after file
+            # content to compute a diff. The event log can't get that at
+            # reconstruction time (the file may have moved on, or the run
+            # may be against a checkout that no longer exists) — so it's
+            # captured here, now, while the file is still on disk and this
+            # write just succeeded.
+            post_content = None
+            if tool_name in ("write_file", "patch_file") and not full_result.startswith(("ERROR", "REJECTED")):
+                try:
+                    with open(os.path.join(get_root(), arguments.get("path", "")), "r", encoding="utf-8") as f:
+                        post_content = f.read()
+                except OSError:
+                    post_content = None
             run_store.record_tool_call(iteration=_iteration, tool_name=tool_name, arguments=arguments,
-                                        result_text=full_result)
+                                        result_text=full_result, post_content=post_content)
 
         tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, recorder=_record_tool_call)
         messages.extend(tool_messages)

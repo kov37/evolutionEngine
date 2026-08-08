@@ -54,14 +54,22 @@ def print_trajectory(run_id: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("run_id")
-    parser.add_argument("--expand", help="Print the full artifact for one event_id, not just its preview")
+    parser.add_argument(
+        "--expand",
+        help="Print a full artifact — either an event_id (expands that event's main artifact_id) "
+             "or a literal artifact_id ('sha256:...', e.g. a tool_call's post_content_artifact_id)",
+    )
     args = parser.parse_args()
 
     if args.expand:
         run_dir = _run_dir(args.run_id)
-        target = next((r for r in read_events(run_dir) if r.get("event_id") == args.expand), None)
-        if target is None or not target.get("artifact_id"):
-            raise SystemExit(f"event '{args.expand}' not found or has no artifact")
-        print(load_artifact(os.path.join(run_dir, "artifacts"), target["artifact_id"]))
+        if args.expand.startswith("sha256:"):
+            artifact_id = args.expand
+        else:
+            target = next((r for r in read_events(run_dir) if r.get("event_id") == args.expand), None)
+            if target is None or not target.get("artifact_id"):
+                raise SystemExit(f"event '{args.expand}' not found or has no artifact")
+            artifact_id = target["artifact_id"]
+        print(load_artifact(os.path.join(run_dir, "artifacts"), artifact_id))
     else:
         print_trajectory(args.run_id)
