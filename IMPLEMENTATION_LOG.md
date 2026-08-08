@@ -2,6 +2,12 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## Side fix — `patch_file` whitespace-tolerant fallback
+
+Not part of the plan; found because Phase 0/1's live smoke test hit it directly. `kernel/io_tools.py:patch_file()` required the model's `search` string to match file content byte-for-byte, including whitespace. The smoke-test run (see below) failed twice in a row on exactly this: the model wrote three spaces before a trailing `# comment` where the file actually had two — same failure signature as `SWEBENCH_ANALYSIS_PARALYSIS_FINDINGS.md`'s `pylint-4551` runs.
+
+Fix: on exact-match failure, retry with runs of whitespace in `search` turned into a flexible `\s+` pattern. If that finds exactly one location, use it; if it finds zero or more than one, still reject (never silently guess which occurrence). Exact matches take the same code path as before — no behavior change when the model gets it right. Added `kernel/test_io_tools.py` (exact-match, fallback, ambiguous-rejection, genuinely-not-found cases). Re-ran the same smoke-test task against the real model after the fix: same whitespace mistake, now recovered — `WON: True` in 5 turns instead of exhausting a 6-turn budget on an unfixed bug.
+
 ## Phase 0 + 1 — Baseline instrumentation + lossless event/artifact store
 
 **Status: done.** Scoped exactly to the plan's own "First implementation ticket" section: event/artifact recording only, current `agent.py` behavior unchanged, no RL/embeddings/summarization/new controller.
