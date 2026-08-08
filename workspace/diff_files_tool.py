@@ -112,15 +112,9 @@ def _run_self_test() -> None:
 
         # Assert the expected markers are present.
         lines = diff_result.splitlines()
-        found_minus_beta = any(
-            "-beta" in line for line in lines
-        ), "Expected '-beta' (removed line)"
-        found_plus_changed = any(
-            "+changed" in line for line in lines
-        ), "Expected '+changed' (modified/added line)"
-        found_plus_delta = any(
-            "+delta" in line for line in lines
-        ), "Expected '+delta' (added line)"
+        found_minus_beta = any("-beta" in line for line in lines)
+        found_plus_changed = any("+changed" in line for line in lines)
+        found_plus_delta = any("+delta" in line for line in lines)
 
         assert found_minus_beta, f"Missing removed marker: {diff_result}"
         assert found_plus_changed, f"Missing changed marker: {diff_result}"

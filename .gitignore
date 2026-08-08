@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Regeneratable build/eval output, not source:
+evolve/swebench_venv/     # `pip install swebench` in a fresh venv rebuilds this (339M)
+logs/build_images/        # swebench harness's own Docker build log spew (cwd-relative)
+logs/run_evaluation/       # swebench harness's own eval log spew (cwd-relative)

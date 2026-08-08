@@ -13,14 +13,34 @@ proven workspace script into a permanent tool for every goal after it.
 registry.py uses this to sandbox those arguments to os.getcwd() at call
 time — the tool's own code doesn't implement confinement itself; that's a
 trusted-code concern, not something to ask the model to get right per-tool.
+
+`target_filename` + `expected_params` + `checker_name` (see
+VERIFICATION_ASSESSMENT.md findings 1-2, 3, 6) are what registry.verify()
+now checks a candidate against, instead of accepting "some file exited 0
+and defines a callable with the right name" as proof. `checker_name` is a
+key into verification/checkers.py's CHECKERS dict — a module outside
+workspace/ the model's tools can never reach — and registry.verify() runs
+it, in a fresh subprocess (never in-process), as an independent behavioral
+test against the candidate's actual function, ignoring whatever the
+candidate's own self-test asserted about itself. A NAME rather than the
+live checker function is what's threaded through: passing an actual
+function object here would mean it has to cross into the verification
+subprocess somehow, which defeats the point — the subprocess looks
+checkers up from its own trusted import instead. The self-test in
+GRADUATION_CONTRACT below remains useful as fast local dev feedback for
+the model while it iterates, but it is no longer what promotion is
+decided on.
 """
+
+from verification.checkers import CHECKERS  # only to validate entries below at import time
 
 GRADUATION_CONTRACT = """
 GRADUATION CONTRACT (required):
 - Running the script directly with zero command-line arguments must execute
   an internal self-test and exit with code 0 only if every assertion in it
-  passes, non-zero otherwise. This is the only verification the harness
-  runs — there is no separate test runner.
+  passes, non-zero otherwise. This is fast local feedback while you iterate —
+  it is NOT what promotion is decided on; a trusted, independent checker
+  outside your control verifies the actual behavior separately afterward.
 - Expose the core logic as a plain, directly-callable function (not just
   reachable via __main__), with exactly the name and signature specified
   below, so it can be reused as a tool by future goals.
@@ -30,6 +50,8 @@ CURRICULUM = [
     {
         "name": "search_text",
         "function_name": "search_file",
+        "target_filename": "search_text.py",
+        "expected_params": ["pattern", "filepath"],
         "path_params": ["filepath"],
         "description": "Search a file line-by-line for a substring pattern; returns (line_number, line_text) for every match.",
         "goal": f"""
@@ -50,6 +72,8 @@ CURRICULUM = [
     {
         "name": "list_symbols",
         "function_name": "list_symbols",
+        "target_filename": "list_symbols.py",
+        "expected_params": ["path"],
         "path_params": ["path"],
         "description": "Parse a Python file's AST and list every top-level function/class definition with its kind and line number.",
         "goal": f"""
@@ -70,6 +94,8 @@ CURRICULUM = [
     {
         "name": "list_dir",
         "function_name": "list_dir",
+        "target_filename": "list_dir_tool.py",
+        "expected_params": ["root"],
         "path_params": ["root"],
         "description": "Recursively list every file and subdirectory beneath a root path, as (kind, relative_path) tuples.",
         "goal": f"""
@@ -90,6 +116,8 @@ CURRICULUM = [
     {
         "name": "diff_files",
         "function_name": "diff_files",
+        "target_filename": "diff_files_tool.py",
+        "expected_params": ["path_a", "path_b"],
         "path_params": ["path_a", "path_b"],
         "description": "Compute a unified diff between two files, as a string, so a change can be inspected before or after it's applied.",
         "goal": f"""
@@ -109,6 +137,8 @@ CURRICULUM = [
     {
         "name": "run_tests",
         "function_name": "run_tests",
+        "target_filename": "run_tests_tool.py",
+        "expected_params": ["path"],
         "path_params": ["path"],
         "description": "Discover and run a unittest test suite under a directory, returning (success, summary) instead of raw subprocess text a caller has to parse.",
         "goal": f"""
@@ -128,6 +158,8 @@ CURRICULUM = [
     {
         "name": "web_search",
         "function_name": "web_search",
+        "target_filename": "web_search_tool.py",
+        "expected_params": ["query", "max_results"],
         "description": "Search the live web via the Tavily API and return the top results (title, url, short content snippet) as a formatted string.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone web-search utility named `web_search_tool.py`, calling the Tavily Search API.
@@ -148,6 +180,8 @@ CURRICULUM = [
     {
         "name": "fetch",
         "function_name": "fetch",
+        "target_filename": "fetch_tool.py",
+        "expected_params": ["url"],
         "description": "Retrieve the full content of one known URL (as markdown) via the Firecrawl API — the retrieval counterpart to web_search's discovery.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone page-fetching utility named `fetch_tool.py`, calling the Firecrawl scrape API.
@@ -170,6 +204,8 @@ CURRICULUM = [
     {
         "name": "grep_dir",
         "function_name": "grep_dir",
+        "target_filename": "grep_dir_tool.py",
+        "expected_params": ["pattern", "root"],
         "path_params": ["root"],
         "description": "Recursively search every file under a directory for a substring pattern, returning (relative_path, line_number, line_text) for every match.",
         "goal": f"""
@@ -192,6 +228,8 @@ CURRICULUM = [
     {
         "name": "git_status",
         "function_name": "git_status",
+        "target_filename": "git_status_tool.py",
+        "expected_params": ["root"],
         "path_params": ["root"],
         "description": "List every changed/untracked/staged file in a git working tree as (status_code, path) pairs, via `git status --porcelain=v1`.",
         "goal": f"""
@@ -213,6 +251,8 @@ CURRICULUM = [
     {
         "name": "git_diff",
         "function_name": "git_diff",
+        "target_filename": "git_diff_tool.py",
+        "expected_params": ["root"],
         "path_params": ["root"],
         "description": "Return the full diff of a git working tree against HEAD (staged and unstaged combined) as a string, via `git diff HEAD`.",
         "goal": f"""
@@ -231,3 +271,9 @@ CURRICULUM = [
         """,
     },
 ]
+
+for _entry in CURRICULUM:
+    _entry["checker_name"] = _entry["name"] if _entry["name"] in CHECKERS else None
+    if _entry.get("target_filename") and _entry["checker_name"] is None:
+        raise RuntimeError(f"curriculum entry '{_entry['name']}' has a target_filename but no matching checker")
+del _entry

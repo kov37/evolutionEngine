@@ -11,7 +11,8 @@ from registry import load_registry, verify, verify_and_promote, is_promoted
 MODEL = "qwen3.6:35b-mlx"
 
 
-def run_recursive_engine(master_goal, tools, function_name=None, iteration_budget=5):
+def run_recursive_engine(master_goal, tools, function_name=None, iteration_budget=5,
+                          expected_params=None, checker_name=None, expected_filename=None):
     RUN_STATE["goal_met"] = False
     RUN_STATE["target_file"] = None
     tool_map = {fn.__name__: fn for fn in tools}
@@ -25,7 +26,7 @@ tools available to you.
   or any other directory name pointing at that root itself, or you will create an unwanted nested directory.
 - Use write_file to create a brand new file or to fully rewrite one.
 - Use patch_file only for a small surgical edit to a file that already exists; `search` must match the existing text exactly, including whitespace — call read_file first if you're not certain of the current contents.
-- Use list_workspace to check what already exists, and run_shell to run tests or install anything you need.
+- Use list_workspace to check what already exists.
 - Writing a .py file is automatically run in a sandbox immediately afterward and you will be told whether it executed cleanly. Keep iterating until it does.
 - The file must be directly runnable Python — do not substitute explanation or commentary for working code."""
 
@@ -57,17 +58,16 @@ tools available to you.
         if RUN_STATE["goal_met"]:
             if function_name:
                 module_path = os.path.join(get_root(), RUN_STATE["target_file"])
-                ok, err = verify(module_path, function_name)
+                ok, err = verify(module_path, function_name, expected_params, checker_name, expected_filename)
                 if not ok:
                     print(f"⚠️  '{RUN_STATE['target_file']}' ran cleanly, but doesn't satisfy the goal: {err}")
                     RUN_STATE["goal_met"] = False
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"'{RUN_STATE['target_file']}' ran without error, but it does not define a "
-                            f"callable function named `{function_name}` as the objective requires — "
-                            f"{err}. Running cleanly is not enough; the file must expose exactly that "
-                            f"function. Continue working."
+                            f"'{RUN_STATE['target_file']}' ran without error, but it does not satisfy the "
+                            f"objective — {err}. Running cleanly is not enough; the required filename, "
+                            f"signature, and independent behavioral check all have to pass. Continue working."
                         ),
                     })
                     continue
@@ -82,8 +82,18 @@ tools available to you.
 
 
 if __name__ == "__main__":
-    tools = load_registry()
-    print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
+    all_tools = load_registry()
+    # run_shell is deliberately excluded from the curriculum bootstrap tool
+    # set: it shells out with shell=True and is only confined to the
+    # sandbox root by cwd, not by an actual restriction on what the command
+    # can reach (../state/registry_manifest.json, ../registry.py, etc. are
+    # all reachable). Handing that to the model during the loop that
+    # decides what gets promoted is exactly the privilege promotion is
+    # supposed to gate. See VERIFICATION_ASSESSMENT.md finding 4.
+    # agent.py (real, human-directed tasks — not part of the promotion
+    # pipeline) is unaffected and keeps it.
+    tools = [t for t in all_tools if t.__name__ != "run_shell"]
+    print(f"🧰 Loaded {len(tools)} tool(s) for bootstrapping (run_shell excluded): {[fn.__name__ for fn in tools]}")
 
     for entry in CURRICULUM:
         if entry.get("function_name") and is_promoted(entry["name"]):
@@ -91,17 +101,23 @@ if __name__ == "__main__":
             continue
 
         print(f"\n{'#' * 60}\n# GOAL: {entry['name']}\n{'#' * 60}")
-        won = run_recursive_engine(entry["goal"], tools, function_name=entry.get("function_name"))
+        won = run_recursive_engine(
+            entry["goal"], tools, function_name=entry.get("function_name"),
+            expected_params=entry.get("expected_params"), checker_name=entry.get("checker_name"),
+            expected_filename=entry.get("target_filename"),
+        )
 
         if won and entry.get("function_name"):
             module_path = os.path.join(get_root(), RUN_STATE["target_file"])
             ok, err = verify_and_promote(
                 entry["name"], module_path, entry["function_name"],
                 entry.get("description", ""), entry.get("path_params"),
+                expected_params=entry.get("expected_params"), checker_name=entry.get("checker_name"),
+                expected_filename=entry.get("target_filename"),
             )
             if ok:
                 print(f"🧬 Promoted '{entry['name']}' — available as a tool to every goal after this one.")
-                tools = load_registry()
+                tools = [t for t in load_registry() if t.__name__ != "run_shell"]
                 print(f"🧰 Registry now has {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
             else:
                 print(f"⚠️  Won the goal but promotion failed: {err}")

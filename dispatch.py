@@ -36,6 +36,14 @@ def dispatch_tool_calls(tool_calls, tool_map):
                 result = f"ERROR: bad arguments for {call.function.name}: {e}"
             except ValueError as e:
                 result = f"REJECTED: {e}"
+            except Exception as e:
+                # A graduated tool can raise anything (list_dir_tool.py raising
+                # FileNotFoundError on a hallucinated path is what surfaced this in
+                # practice) — the docstring above already promised "never raises,"
+                # but only TypeError/ValueError were actually caught. Same fix two
+                # independent self-edit generations found in evolve/'s isolated
+                # experiments earlier; applying it here for real.
+                result = f"ERROR: unexpected exception in {call.function.name}: {type(e).__name__}: {e}"
 
         if not isinstance(result, str):
             result = str(result)
