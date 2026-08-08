@@ -45,11 +45,15 @@ class RunStore:
             json.dump(self.run_record, f, indent=2)
         os.replace(tmp, path)
 
-    def record_model_call(self, iteration, prompt_preview, response_text, input_tokens, output_tokens, latency_ms):
+    def record_model_call(self, iteration, prompt_preview, response_text, input_tokens, output_tokens, latency_ms,
+                           compiled_context_tokens_estimate=None):
         response_text = response_text or ""
         artifact_id = store_artifact(self.artifacts_dir, response_text) if response_text else None
+        payload = {"response_preview": response_text[:500]}
+        if compiled_context_tokens_estimate is not None:
+            payload["compiled_context_tokens_estimate"] = compiled_context_tokens_estimate
         return self.events.append(
-            "model_call", payload={"response_preview": response_text[:500]}, iteration=iteration,
+            "model_call", payload=payload, iteration=iteration,
             artifact_id=artifact_id, prompt_preview=(prompt_preview or "")[:500],
             input_tokens=input_tokens, output_tokens=output_tokens, latency_ms=latency_ms,
         )
@@ -97,6 +101,7 @@ def compute_metrics(run_dir: str) -> dict:
     tool_call_counts = {}
     write_calls = 0
     max_iteration = 0
+    compiled_context_tokens_by_turn = []
 
     for record in read_events(run_dir):
         if record.get("event_type") == "corrupt_event":
@@ -107,6 +112,9 @@ def compute_metrics(run_dir: str) -> dict:
             total_input_tokens += record.get("input_tokens") or 0
             total_output_tokens += record.get("output_tokens") or 0
             total_latency_ms += record.get("latency_ms") or 0
+            estimate = record["payload"].get("compiled_context_tokens_estimate")
+            if estimate is not None:
+                compiled_context_tokens_by_turn.append(estimate)
         elif record["event_type"] == "tool_call":
             tool_calls += 1
             payload = record["payload"]
@@ -130,6 +138,14 @@ def compute_metrics(run_dir: str) -> dict:
         "write_calls": write_calls,
         "turns_to_first_write": _turns_to_first_write(run_dir),
         "max_iteration": max_iteration,
+        # Phase 3's own "context-size metrics" deliverable: the estimator's
+        # per-turn view of what was actually sent (not what accumulated in
+        # `messages` — that's total_input_tokens above, from Ollama itself).
+        # Peak, not just final, matters for policy comparison — a policy
+        # that stays flat vs. one that grows then gets trimmed look
+        # identical at the last turn but very different across the run.
+        "compiled_context_tokens_by_turn": compiled_context_tokens_by_turn,
+        "peak_compiled_context_tokens_estimate": max(compiled_context_tokens_by_turn, default=0),
     }
 
 

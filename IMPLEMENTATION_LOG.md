@@ -2,6 +2,33 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## Phase 3 — Bounded context compiler and policy baselines
+
+**Status: done**, scoped to 3 of the plan's 4 named policies. `append-all` (the current behavior, mathematically unchanged) and `sliding-window` are baselines; `bounded-structured` is the real new mechanism (task contract + Phase 2's `reduce_state()` output + a short recent tail, each budgeted). **Not built**: `flat-summary` and `hierarchy` — both need an LLM-generated summary keyed to subgoal boundaries, and subgoals are Phase 4's controller, which doesn't exist yet. Building a summarization policy against invented boundaries now would mean redoing it once Phase 4 provides real ones.
+
+### What this changes, and what it doesn't
+
+This is the first phase where the model's actual prompt can change — but the *default* doesn't: `agent.py`'s `memory_policy` param already existed (Phase 0, metadata-only until now) and still defaults to `"append-all"`, whose policy function returns `system_and_task + tail` — the exact same list `agent.py` sent before this phase existed, not an approximation of it. Nothing about default behavior changed; `bounded-structured`/`sliding-window` are opt-in via the existing param, per the plan's own design principle 10 ("make every policy ablatable" — starting from a real, unmodified baseline, not a reconstructed one).
+
+### What was built
+
+- **`context/budget.py`** — token *estimation* only (chars/4 — no tokenizer vendored; real usage is still measured exactly via Ollama's `prompt_eval_count`, this only drives assembly-time trim decisions) and the four budgets this compiler actually uses (`system_policy`, `task_contract`, `structured_state`, `recent_tail`). The plan's own initial 32K table also lists `retrieved_evidence` (Phase 5, doesn't exist) and a separate `action/verification instructions` line (already inside `agent.py`'s system prompt, not a separate section) — both skipped rather than reserved as unused budget lines.
+- **`context/render.py`** — `render_structured_state()`, turning Phase 2's `reduce_state()` output into a compact text block: files touched (deduped by path, changed-entities take precedence over inspected, stale ones flagged and sorted last — "penalize stale evidence," applied directly), recent test runs, recent failures with taxonomy — each with an `event_id`/`artifact_id` reference back to raw evidence, never the raw tool output itself inline. That's the concrete mechanism behind "exclude redundant raw tool output": the model gets *that a file was read and what happened*, not the file's full previously-seen contents replayed again.
+- **`context/policies.py`** — `group_into_turns()` is the one genuinely important correctness piece here: a tool-role message is only ever valid immediately after the assistant message whose `tool_calls` it answers, so every policy keeps or drops **whole turn blocks**, never splits mid-pairing (which would send Ollama an invalid request). `policy_sliding_window` keeps the last N whole turns; `policy_bounded_structured` keeps task contract + rendered state (computed fresh from the run's *own* live event log, mid-run — `reduce_state()` doesn't care whether the run is finished) + a recent tail trimmed turn-block-at-a-time to fit budget, never truncating the state block itself.
+- **`context/compiler.py`** — `compile_context(memory_policy, messages, run_dir)`, the one call site `agent.py` now goes through every turn instead of passing `messages` directly to `chat()`.
+- **`agent.py` / `memory/store.py`** — `record_model_call()` gained an optional `compiled_context_tokens_estimate`, and `compute_metrics()` now reports `compiled_context_tokens_by_turn` and `peak_compiled_context_tokens_estimate` — Phase 3's own "context-size metrics" deliverable, actually comparable across policies now.
+- **`context/test_context.py`** — covers Phase 3's four stated acceptance tests directly: context stays bounded over 200 synthetic turns (sliding-window and bounded-structured both stay under 1/5 of append-all's size; append-all is *expected* to grow — that's the point of keeping it as a baseline), the task contract survives byte-identical under all three policies, a test failure recorded at turn 3 still appears in the rendered state at turn 200 (because `reduce_state()` folds the *entire* event log every call, not just the recent tail — state doesn't decay with turn count the way pure sliding-window detail does), and every `ref=` in the rendered state block resolves to a real event.
+
+### Verification performed
+
+- `python3 context/test_context.py` — 7/7, including the 200-synthetic-turn acceptance tests.
+- Full existing suite (`memory/test_memory.py`, `memory/test_reducers.py`, `kernel/test_io_tools.py`, `verification/test_bypasses.py`) — all still green.
+- Two live runs against the real model, same task (a `subtract()` sign bug), one under the default `append-all` and one explicitly under `bounded-structured` — both completed correctly (`WON: True`), and the `patch_file` whitespace-fallback fix caught the same recurring mistake pattern in both. On a task this short (4-5 turns), the two policies' `compiled_context_tokens_by_turn` look nearly identical — expected and worth being upfront about: `bounded-structured`'s 4-turn recent window covers almost the entire run at this length, so there's nothing yet to compact. The real divergence is what the 200-turn synthetic test demonstrates; a live task long enough to show it live doesn't exist yet without SWE-bench back (Phase 6).
+
+### Not yet done
+
+Phase 4 (SWE controller, subgoal DAG, evidence-gated completion — the actual mechanism expected to fix "plan instability," and the first phase that gives `bounded-structured` real subgoal boundaries instead of a fixed recent-turn count), `flat-summary`/`hierarchy` policies (blocked on Phase 4), retrieval (Phase 5), and the `swe/` adapter (Phase 6) needed to validate any of this against a real multi-file SWE-bench trajectory again.
+
 ## Side fix — `patch_file` whitespace-tolerant fallback
 
 Not part of the plan; found because Phase 0/1's live smoke test hit it directly. `kernel/io_tools.py:patch_file()` required the model's `search` string to match file content byte-for-byte, including whitespace. The smoke-test run (see below) failed twice in a row on exactly this: the model wrote three spaces before a trailing `# comment` where the file actually had two — same failure signature as `SWEBENCH_ANALYSIS_PARALYSIS_FINDINGS.md`'s `pylint-4551` runs.

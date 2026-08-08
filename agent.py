@@ -18,6 +18,8 @@ import kernel.io_tools as io_tools
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, finish_task
 from kernel.sandbox import get_root, set_root
+from context.budget import estimate_tokens
+from context.compiler import compile_context
 from memory.store import RunStore
 from registry import load_registry
 
@@ -158,8 +160,10 @@ you never act on."""
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
+        compiled_messages = compile_context(memory_policy, messages, run_dir=run_store.run_dir)
+
         call_started = time.monotonic()
-        response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+        response = chat(model=MODEL, messages=compiled_messages, tools=tools, think=False)
         latency_ms = int((time.monotonic() - call_started) * 1000)
         msg = response.message
         messages.append(msg)
@@ -168,6 +172,7 @@ you never act on."""
             iteration=iteration, prompt_preview=(messages[-2]["content"] if len(messages) >= 2 else ""),
             response_text=msg.content, input_tokens=response.prompt_eval_count,
             output_tokens=response.eval_count, latency_ms=latency_ms,
+            compiled_context_tokens_estimate=estimate_tokens(compiled_messages),
         )
 
         if msg.content:
