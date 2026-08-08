@@ -12,6 +12,14 @@ import os
 from memory.schema import make_event_record, new_event_id, validate_event_record
 
 
+def event_seq(event_id: str) -> int:
+    """The numeric ordinal inside an event_id ('evt-000042' -> 42) — event
+    IDs are sequential per run, so this is what controller/ modules compare
+    against to answer "did anything happen after event X" without needing
+    timestamps or a separate ordering scheme."""
+    return int(event_id.split("-")[1])
+
+
 def read_events(run_dir: str):
     """Yield event records in write order. A line that fails to parse or
     validate is reported via a synthetic 'corrupt_event' record instead of

@@ -20,6 +20,10 @@ from kernel.control import TASK_STATE, finish_task
 from kernel.sandbox import get_root, set_root
 from context.budget import estimate_tokens
 from context.compiler import compile_context
+from controller.completion import current_git_head, evaluate_completion_gate
+from controller.hypotheses import make_hypothesis_tools
+from controller.progress import stagnation_nudge
+from controller.subgoals import make_subgoal_tools
 from memory.store import RunStore
 from registry import load_registry
 
@@ -102,10 +106,10 @@ def _live_model_options(model: str) -> dict:
     return options
 
 
-def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memory_policy="append-all"):
+def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memory_policy="append-all",
+              forbidden_paths=None):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
-    tool_map = {fn.__name__: fn for fn in tools}
 
     run_store = RunStore(
         task_id=task_id or f"adhoc-{int(time.time())}", task_text=task, model=MODEL,
@@ -113,6 +117,20 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memo
         memory_policy=memory_policy, iteration_budget=iteration_budget,
     )
     print(f"🗂️  Recording run '{run_store.run_id}' to {run_store.run_dir}")
+
+    initial_git_head = current_git_head(get_root())
+    print(f"🌿 Initial git HEAD: {initial_git_head[:12] if initial_git_head else '(not a git repo)'}")
+
+    # Phase 4 controller tools — bound to this run's store since their
+    # evidence gates need to read this run's own event log. Ordinary tool
+    # functions otherwise: dispatch_tool_calls records them exactly like
+    # read_file/write_file, so controller/subgoals.py's and
+    # controller/hypotheses.py's ledgers are always rebuildable from the
+    # same event log as everything else.
+    subgoal_create, subgoal_complete = make_subgoal_tools(run_store)
+    hypothesis_record, hypothesis_resolve = make_hypothesis_tools(run_store)
+    tools = tools + [subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve]
+    tool_map = {fn.__name__: fn for fn in tools}
 
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -124,8 +142,8 @@ it with the directory's own name — doing so creates an unwanted nested directo
 real file.
 
 You have a full toolbelt: read_file, write_file, patch_file, list_workspace, run_shell, search_file,
-list_symbols, list_dir, diff_files, run_tests, grep_dir, git_status, git_diff, web_search, fetch, and
-finish_task.
+list_symbols, list_dir, diff_files, run_tests, grep_dir, git_status, git_diff, web_search, fetch,
+subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve, and finish_task.
 
 - Use patch_file for small surgical edits; `search` must match the existing text exactly — call read_file
   first if you're not certain of the current contents.
@@ -137,7 +155,16 @@ finish_task.
 - Use web_search to find information or documentation, fetch to read a specific URL's full content.
 - Files you write are NOT automatically executed — this isn't a throwaway sandbox, so verify your own work
   explicitly with run_tests or run_shell rather than assuming a write succeeded because it didn't error.
+- If the fix touches more than one file or step, call subgoal_create for EACH piece before starting the
+  first one — state your whole plan, not just the next action. subgoal_complete is REJECTED unless you've
+  actually done something (a read, a write, a test) since creating that subgoal; restating your reasoning
+  does not satisfy it.
+- Use hypothesis_record before testing a belief, and hypothesis_resolve afterward citing the real result
+  that showed whether it held — not from reasoning alone.
 - When — and only when — the task is fully complete, call finish_task with a short summary of what you did.
+  finish_task is a REQUEST, not a guarantee — it will be REJECTED unless you've actually changed a file, run
+  a test or command afterward with no new failure, and reviewed the final diff (git_diff/diff_files). If
+  rejected, the reason names exactly what's missing — address that specific thing, don't just re-explain.
   Returning plain text without calling finish_task does not end the task; you are expected to keep working.
 
 CRITICAL RULE — DO NOT SKIP THIS: The MOMENT you can name the specific file, function, and line that
@@ -285,10 +312,41 @@ you never act on."""
                     ),
                 })
 
+            # Layers on top of the two mechanisms above, doesn't replace
+            # them: those fire on "no successful WRITE" (built for, and
+            # tested against, single-symbol stalling). This fires on "no
+            # successful ANYTHING" — a broader, more severe stall (not even
+            # a new read or a declared subgoal) that those can't see,
+            # e.g. re-litigating the same file across many turns without
+            # ever advancing to the next part of a multi-file fix.
+            nudge = stagnation_nudge(run_store.run_dir, iteration)
+            if nudge:
+                print(f"🧊 Stagnation detected — forcing a re-plan.")
+                messages.append({"role": "user", "content": nudge})
+
         if TASK_STATE["done"]:
-            print(f"\n✅ DONE: {TASK_STATE['summary']}")
-            run_store.record_task_finished(iteration=iteration, outcome="finished", summary=TASK_STATE["summary"])
-            return True
+            gate = evaluate_completion_gate(
+                run_store.run_dir, project_root=get_root(), initial_git_head=initial_git_head,
+                forbidden_paths=forbidden_paths,
+            )
+            if not gate["allowed"]:
+                print(f"\n🚫 finish_task REJECTED: {'; '.join(gate['reasons'])}")
+                TASK_STATE["done"] = False
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"finish_task was rejected: {'; '.join(gate['reasons'])}. This is not a request for "
+                        f"more explanation — it means a specific, checkable condition wasn't met. Address it "
+                        f"directly, then call finish_task again."
+                    ),
+                })
+            else:
+                print(f"\n✅ DONE ({gate['outcome']}): {TASK_STATE['summary']}")
+                for reason in gate["reasons"]:
+                    print(f"   - {reason}")
+                run_store.record_task_finished(iteration=iteration, outcome=gate["outcome"],
+                                                summary=TASK_STATE["summary"])
+                return True
 
     print("\n" + "=" * 60)
     print(f"❌ INCOMPLETE: finish_task was not called within {iteration_budget} iterations.")

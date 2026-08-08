@@ -2,6 +2,51 @@
 
 Running record of what's actually been built against `AGENTIC_MEMORY_IMPLEMENTATION_PLAN.md`, in the order it happened — not a design doc, a build log. Each entry says what changed, why, and how it was verified.
 
+## Phase 4 — Evidence-gated controller (phase machine, completion gate, subgoals, hypotheses, stagnation detector)
+
+**Status: done**, items 1-5 of the build order added to the plan doc (`controller/completion.py` §"Generic (pre-Phase-6) implementation"). Item 6 (checkpoint/restore) is the explicit stretch item and **not built** — deferred, not silently dropped.
+
+### The central design constraint, and how it's enforced everywhere here
+
+Per the plan doc's "Enforceable evidence versus semantic claims": nothing here can verify that a model's claim is *true*, only that memory/reducers.py's `reduce_state()` shows something real happened. Every gate in `controller/` follows the same shape — a **weak-but-real** check, not a semantic one:
+
+- `controller/phases.py`'s `derive_phase()` — pure reducer over `reduce_state()`, no new tool call, can't be gamed by prose.
+- `controller/subgoals.py`'s `subgoal_complete()` — rejects unless a real, non-bookkeeping tool call succeeded *after* the subgoal was created (`has_real_progress_since()`). Doesn't check whether the subgoal's actual claim is correct — only that something happened.
+- `controller/hypotheses.py`'s `hypothesis_resolve()` — uses the doc's `prediction_observed`/`prediction_disconfirmed` vocabulary (never `confirmed`/`rejected`), and requires citing a real `evidence_id` that postdates the hypothesis. Doesn't verify the citation actually supports the claim — only that it's a real, later event.
+- `controller/completion.py`'s `evaluate_completion_gate()` — the generic (pre-Phase-6) implementation of the doc's 8-predicate gate; outcome is `"unverified"` on every generic pass, never `"resolved"` (reserved for Phase 6's external verifier).
+
+All four are **stateless**, matching `memory/reducers.py`'s own design: every call re-derives its ledger from the run's own event log rather than holding private in-process bookkeeping. `subgoal_create`/`subgoal_complete`/`hypothesis_record`/`hypothesis_resolve` are ordinary tool functions (closures bound to one `RunStore`, same factory pattern as `docker_verify_tools.make_run_shell_in_container`) — `dispatch_tool_calls` records them exactly like `read_file`, so nothing extra was needed to make their ledgers reconstructable.
+
+### What was built
+
+- **`controller/phases.py`** — `derive_phase()`: `orient → reproduce → localize → patch → verify → review`, derived from `reduce_state()`'s existing lists. `finish` deliberately isn't derived here — `agent.py` already knows synchronously via `TASK_STATE`.
+- **`controller/completion.py`** — `evaluate_completion_gate()`, gating `finish_task` for the first time (previously: any call succeeded unconditionally). Generic predicates: `changed_entities` non-empty, a test/command ran after the last write, the *most recent* such check didn't fail, the diff was reviewed. Plus the two cheap substitutes added to the plan doc: `current_git_head()` unchanged since run start, and an optional `forbidden_paths` glob param.
+- **`controller/subgoals.py`** — `subgoal_create`/`subgoal_complete`. Creation is cheap (the model stating its own plan — HiAgent's own ablation found this is where most of the benefit comes from); completion is evidence-gated as described above. IDs are assigned positionally from the event log (`sg-01`, `sg-02`, …), not parsed back out of a result string.
+- **`controller/hypotheses.py`** — `hypothesis_record`/`hypothesis_resolve`, same citation-gate pattern.
+- **`controller/progress.py`** — `stagnation_nudge()`, a *second*, broader stall signal layered on top of (not replacing) `agent.py`'s existing repetition/confidence-checkpoint/watchdog mechanisms, which fire on "no successful **write**" and were built for single-symbol stalling. This fires on "no successful **anything**" (not even a new read or a declared subgoal) — the cross-subgoal stall the existing mechanisms can't see.
+- **`agent.py`** — wires all of the above in: captures `initial_git_head` at run start, builds the four new tools bound to `run_store`, adds them to the toolbelt, adds the stagnation check alongside the existing watchdog block, and replaces the old unconditional `if TASK_STATE["done"]: return True` with the gate — a rejection resets `TASK_STATE["done"]` and injects a message naming exactly what's missing, mirroring `patch_file`'s ERROR/REJECTED convention. System prompt updated to describe the new tools and that `finish_task` can be rejected.
+- **`controller/test_controller.py`** — 18 self-tests covering Phase 4's four stated acceptance criteria directly, plus the two real bugs below as explicit regression tests.
+
+### Two real bugs a live run caught (and fixed) — the payoff of testing against the actual model, not just synthetic cases
+
+A live run against a genuine two-function bug (`add()`/`multiply()`, wrong operators) surfaced two real gate bugs within the first attempt:
+
+1. **A superseded failure blocked completion forever.** The model tried `python` (not installed — `/bin/sh: python: command not found`), then correctly switched to `python3` and passed. The gate's first version checked "did *any* failure happen since the last write" — the long-since-corrected `python` failure kept rejecting `finish_task` for the rest of the run. Fixed: judge only the *most recent* verification event, ordered by real event sequence (`memory/events.event_seq`), not by `iteration` (which can't distinguish multiple events in the same turn). This is precisely the "bounded best-effort" paralysis trap the plan doc's failure-mode table warns about — caught in practice, not hypothetically.
+2. **A *failed* diff-review call satisfied the diff-review predicate.** The model called `git_diff` against a non-git scratch directory; it errored (`not inside a git working tree`); the gate counted the attempt as review performed regardless. Fixed: require the diff-review tool call to have *succeeded*, with re-reading every changed path afterward accepted as an equivalent substitute (since `git_diff` is unusable outside a git repo and `diff_files` needs a second file to compare against — without a substitute the predicate would be unsatisfiable for a plain, non-git project).
+
+Both are now explicit regression tests (`test_completion_gate_ignores_superseded_earlier_failure`, `test_completion_gate_rejects_failed_diff_review_call` / `test_completion_gate_accepts_reread_as_diff_review_substitute`).
+
+### Verification performed
+
+- `python3 controller/test_controller.py` — 18/18, covering `derive_phase` transitions, all of `evaluate_completion_gate`'s predicates (including the two regression cases above), subgoal creation/rejection/double-completion, hypothesis citation gating, and stagnation-nudge firing/reset.
+- Full existing suite (`memory/`, `context/`, `kernel/`, `verification/`) — all still green, no regressions.
+- Three live runs against the real model: the first caught both bugs above; the second (after the fix) completed cleanly with the `python`→`python3` self-correction correctly not blocking completion; a third, with a task explicitly asking for subgoal use, produced a fully clean trace — two subgoals declared upfront, each independently fixed and verified, both `subgoal_complete` calls correctly allowed, `finish_task` passed on the first attempt with `outcome: "unverified"`.
+- **Honest limitation, not glossed over**: the second live run (no explicit subgoal prompting beyond the system prompt's mention) solved both bugs as a single combined edit rather than declaring separate subgoals — tool *adoption* isn't guaranteed by a system-prompt mention alone, only tool *behavior* is guaranteed once called. The third run's explicit task-level nudge did produce full adoption, but this isn't something the completion gate or evidence checks can force the way they force evidence quality.
+
+### Not yet done
+
+Item 6 (checkpoint/restore, reusing the `post_content` artifacts Phase 2 already captures — deferred, not blocking). Phase 5 (hierarchical retrieval, `memory_expand`/`memory_recall` tools). Phase 6 (`swe/` adapter — real `base_commit` lineage, real forbidden-file policy from instance metadata, and the external SWE verifier that would finally let `outcome` be `"resolved"` instead of always `"unverified"`). The actual headline question — does this fix "plan instability" on a real multi-file SWE-bench instance like `pylint-4551` — still can't be answered until Phase 6 exists to run that comparison for real.
+
 ## Phase 3 — Bounded context compiler and policy baselines
 
 **Status: done**, scoped to 3 of the plan's 4 named policies. `append-all` (the current behavior, mathematically unchanged) and `sliding-window` are baselines; `bounded-structured` is the real new mechanism (task contract + Phase 2's `reduce_state()` output + a short recent tail, each budgeted). **Not built**: `flat-summary` and `hierarchy` — both need an LLM-generated summary keyed to subgoal boundaries, and subgoals are Phase 4's controller, which doesn't exist yet. Building a summarization policy against invented boundaries now would mean redoing it once Phase 4 provides real ones.
