@@ -15,7 +15,7 @@ from memory.events import event_seq, read_events
 VALID_STATUSES = ("prediction_observed", "prediction_disconfirmed")
 
 
-def _hypothesis_ledger(run_dir: str) -> dict:
+def hypothesis_ledger(run_dir: str) -> dict:
     ledger = {}
     counter = 0
     for record in read_events(run_dir):
@@ -57,7 +57,7 @@ def make_hypothesis_tools(run_store):
             WRONG, e.g. "the test still fails the same way after that
             change".
         """
-        ledger = _hypothesis_ledger(run_store.run_dir)
+        ledger = hypothesis_ledger(run_store.run_dir)
         hid = f"hyp-{len(ledger) + 1:02d}"
         return f"Recorded {hid}: {claim} (predicts: {prediction})"
 
@@ -78,7 +78,7 @@ def make_hypothesis_tools(run_store):
         if status not in VALID_STATUSES:
             return f"ERROR: status must be one of {VALID_STATUSES}, got '{status}'."
 
-        ledger = _hypothesis_ledger(run_store.run_dir)
+        ledger = hypothesis_ledger(run_store.run_dir)
         entry = ledger.get(hypothesis_id)
         if entry is None:
             return f"ERROR: unknown hypothesis_id '{hypothesis_id}' — call hypothesis_record first."

@@ -146,6 +146,20 @@ def compute_metrics(run_dir: str) -> dict:
         # identical at the last turn but very different across the run.
         "compiled_context_tokens_by_turn": compiled_context_tokens_by_turn,
         "peak_compiled_context_tokens_estimate": max(compiled_context_tokens_by_turn, default=0),
+        **_episode_metrics(run_dir),
+    }
+
+
+def _episode_metrics(run_dir: str) -> dict:
+    """Phase 5's own 'retrieval and summary fidelity metrics' deliverable."""
+    from memory.episodes import list_episodes
+
+    episodes = list_episodes(run_dir)
+    fidelity_failures = [e["subgoal_id"] for e in episodes if not e.get("fidelity_ok", True)]
+    return {
+        "episodes_created": len(episodes),
+        "episodes_fidelity_ok": len(episodes) - len(fidelity_failures),
+        "episodes_fidelity_failed": fidelity_failures,
     }
 
 

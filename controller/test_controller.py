@@ -16,12 +16,33 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import memory.summaries as summaries_module
 from controller.completion import evaluate_completion_gate
 from controller.hypotheses import make_hypothesis_tools
 from controller.phases import derive_phase
 from controller.progress import stagnation_nudge
 from controller.subgoals import make_subgoal_tools
 from memory.store import RunStore
+
+TEST_MODEL = "qwen3.6:35b-mlx"
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+def _make_subgoal_tools_for_test(store):
+    """Since Phase 5, subgoal_complete triggers a real episode-summary LLM
+    call on success. That's Phase 5's own concern (covered by
+    memory/test_phase5.py) — stubbed here so these tests stay fast and
+    deterministic, testing only the evidence gate this file is about."""
+    return make_subgoal_tools(store, model=TEST_MODEL)
 
 
 def _new_store(tmp_dir):
@@ -191,7 +212,7 @@ def test_completion_gate_rejects_forbidden_path(tmp_dir):
 
 def test_subgoal_complete_rejected_without_progress(tmp_dir):
     store = _new_store(tmp_dir)
-    create, complete = make_subgoal_tools(store)
+    create, complete = _make_subgoal_tools_for_test(store)
 
     _call_and_record(store, 1, create, "subgoal_create", {"goal": "find the bug", "success_condition": "root cause named"})
     result = _call_and_record(store, 2, complete, "subgoal_complete",
@@ -201,7 +222,7 @@ def test_subgoal_complete_rejected_without_progress(tmp_dir):
 
 def test_subgoal_complete_allowed_after_real_progress(tmp_dir):
     store = _new_store(tmp_dir)
-    create, complete = make_subgoal_tools(store)
+    create, complete = _make_subgoal_tools_for_test(store)
 
     _call_and_record(store, 1, create, "subgoal_create", {"goal": "find the bug", "success_condition": "root cause named"})
     store.record_tool_call(iteration=2, tool_name="read_file", arguments={"path": "utils.py"},
@@ -213,7 +234,7 @@ def test_subgoal_complete_allowed_after_real_progress(tmp_dir):
 
 def test_subgoal_complete_rejects_unknown_and_double_completion(tmp_dir):
     store = _new_store(tmp_dir)
-    create, complete = make_subgoal_tools(store)
+    create, complete = _make_subgoal_tools_for_test(store)
 
     result = complete(subgoal_id="sg-99", conclusion="x", evidence_ids="")
     assert result.startswith("ERROR: unknown subgoal_id")
@@ -227,7 +248,7 @@ def test_subgoal_complete_rejects_unknown_and_double_completion(tmp_dir):
 
 def test_subgoal_ids_are_sequential(tmp_dir):
     store = _new_store(tmp_dir)
-    create, _ = make_subgoal_tools(store)
+    create, _ = _make_subgoal_tools_for_test(store)
     r1 = _call_and_record(store, 1, create, "subgoal_create", {"goal": "a", "success_condition": "x"})
     r2 = _call_and_record(store, 2, create, "subgoal_create", {"goal": "b", "success_condition": "y"})
     assert "sg-01" in r1 and "sg-02" in r2
@@ -289,6 +310,9 @@ def _run_self_test():
     test_derive_phase_progression()
     print("OK   test_derive_phase_progression")
 
+    original_chat = summaries_module.chat
+    summaries_module.chat = lambda **kwargs: _FakeResponse("stubbed episode summary")
+
     tests_needing_tmp_dir = [
         test_completion_gate_rejects_with_no_changes,
         test_completion_gate_rejects_without_verification_after_write,
@@ -308,14 +332,17 @@ def _run_self_test():
         test_stagnation_nudge_fires_after_threshold,
         test_stagnation_nudge_resets_on_new_progress,
     ]
-    for test_fn in tests_needing_tmp_dir:
-        tmp_dir = tempfile.mkdtemp(prefix="controller_test_")
-        try:
-            test_fn(tmp_dir)
-            print(f"OK   {test_fn.__name__}")
-        finally:
-            os.environ.pop("EVOLUTION_RUNS_ROOT", None)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        for test_fn in tests_needing_tmp_dir:
+            tmp_dir = tempfile.mkdtemp(prefix="controller_test_")
+            try:
+                test_fn(tmp_dir)
+                print(f"OK   {test_fn.__name__}")
+            finally:
+                os.environ.pop("EVOLUTION_RUNS_ROOT", None)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+    finally:
+        summaries_module.chat = original_chat
 
     print("\nAll controller/ self-tests passed.")
 

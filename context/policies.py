@@ -56,6 +56,7 @@ def policy_bounded_structured(system_and_task, tail, run_dir=None, recent_turns=
     the rendered state at turn 200 even though it long ago fell out of
     the recent tail — state doesn't decay with turn count the way a pure
     sliding window does; only raw play-by-play detail does."""
+    from memory.episodes import list_episodes
     from memory.reducers import reduce_state
 
     blocks = group_into_turns(tail)
@@ -63,7 +64,7 @@ def policy_bounded_structured(system_and_task, tail, run_dir=None, recent_turns=
 
     state_text = ""
     if run_dir:
-        state_text = render_structured_state(reduce_state(run_dir))
+        state_text = render_structured_state(reduce_state(run_dir), episodes=list_episodes(run_dir))
 
     budget = TOKEN_BUDGETS["structured_state"] + TOKEN_BUDGETS["recent_tail"]
     while recent_blocks and estimate_tokens(state_text) + estimate_tokens(recent_blocks) > budget and len(recent_blocks) > 1:

@@ -13,8 +13,14 @@ limit — the plan's "penalize stale evidence" instruction, applied.
 """
 
 
-def render_structured_state(state: dict, max_entities: int = 8, max_failures: int = 6) -> str:
+def render_structured_state(state: dict, max_entities: int = 8, max_failures: int = 6, episodes=None) -> str:
     lines = ["## Current state (derived automatically from tool calls so far — not model self-report)"]
+
+    if episodes:
+        lines.append("\nCompleted subgoals:")
+        for ep in episodes:
+            fidelity_tag = "" if ep.get("fidelity_ok", True) else " [fidelity check failed — summary may be unreliable]"
+            lines.append(f"  - {ep['subgoal_id']}: {ep['summary']}{fidelity_tag}")
 
     by_path = {}
     for e in state.get("inspected_entities", []):

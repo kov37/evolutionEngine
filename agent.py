@@ -25,6 +25,7 @@ from controller.hypotheses import make_hypothesis_tools
 from controller.progress import stagnation_nudge
 from controller.subgoals import make_subgoal_tools
 from memory.store import RunStore
+from memory.tools import make_memory_tools
 from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
@@ -121,15 +122,16 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memo
     initial_git_head = current_git_head(get_root())
     print(f"🌿 Initial git HEAD: {initial_git_head[:12] if initial_git_head else '(not a git repo)'}")
 
-    # Phase 4 controller tools — bound to this run's store since their
-    # evidence gates need to read this run's own event log. Ordinary tool
-    # functions otherwise: dispatch_tool_calls records them exactly like
-    # read_file/write_file, so controller/subgoals.py's and
-    # controller/hypotheses.py's ledgers are always rebuildable from the
-    # same event log as everything else.
-    subgoal_create, subgoal_complete = make_subgoal_tools(run_store)
+    # Phase 4 controller tools + Phase 5 memory tools — bound to this run's
+    # store since their evidence gates / retrieval need to read this run's
+    # own event log. Ordinary tool functions otherwise: dispatch_tool_calls
+    # records them exactly like read_file/write_file, so every ledger is
+    # always rebuildable from the same event log as everything else.
+    subgoal_create, subgoal_complete = make_subgoal_tools(run_store, model=MODEL)
     hypothesis_record, hypothesis_resolve = make_hypothesis_tools(run_store)
-    tools = tools + [subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve]
+    memory_status, memory_recall, memory_expand = make_memory_tools(run_store)
+    tools = tools + [subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve,
+                      memory_status, memory_recall, memory_expand]
     tool_map = {fn.__name__: fn for fn in tools}
 
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
@@ -143,7 +145,8 @@ real file.
 
 You have a full toolbelt: read_file, write_file, patch_file, list_workspace, run_shell, search_file,
 list_symbols, list_dir, diff_files, run_tests, grep_dir, git_status, git_diff, web_search, fetch,
-subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve, and finish_task.
+subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve, memory_status, memory_recall,
+memory_expand, and finish_task.
 
 - Use patch_file for small surgical edits; `search` must match the existing text exactly — call read_file
   first if you're not certain of the current contents.
@@ -161,6 +164,10 @@ subgoal_create, subgoal_complete, hypothesis_record, hypothesis_resolve, and fin
   does not satisfy it.
 - Use hypothesis_record before testing a belief, and hypothesis_resolve afterward citing the real result
   that showed whether it held — not from reasoning alone.
+- Use memory_status if you're unsure what's already been established (current phase, open subgoals/
+  hypotheses, most recent failure). Use memory_recall to search past subgoal summaries and files touched
+  instead of re-reading something you suspect you've already looked at. Use memory_expand with a ref=
+  you saw in memory_recall or the current-state summary to pull back the full, untruncated detail behind it.
 - When — and only when — the task is fully complete, call finish_task with a short summary of what you did.
   finish_task is a REQUEST, not a guarantee — it will be REJECTED unless you've actually changed a file, run
   a test or command afterward with no new failure, and reviewed the final diff (git_diff/diff_files). If
