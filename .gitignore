@@ -6,3 +6,8 @@ __pycache__/
 evolve/swebench_venv/     # `pip install swebench` in a fresh venv rebuilds this (339M)
 logs/build_images/        # swebench harness's own Docker build log spew (cwd-relative)
 logs/run_evaluation/       # swebench harness's own eval log spew (cwd-relative)
+
+# Per-run recordings from memory/store.py (RunStore) — local instrumentation
+# output, not source. Phase 6 will build a deliberate export/ingest path for
+# a curated subset of these; nothing here is meant to be committed wholesale.
+.evolution/

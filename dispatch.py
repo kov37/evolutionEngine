@@ -19,10 +19,16 @@ capped.
 MAX_MESSAGE_CONTENT_CHARS = 4000
 
 
-def dispatch_tool_calls(tool_calls, tool_map):
+def dispatch_tool_calls(tool_calls, tool_map, recorder=None):
     """Execute every tool call in one model turn. Returns a list of
     {"role": "tool", ...} messages ready to append to the conversation.
-    Never raises — tool errors become an ERROR/REJECTED string in content."""
+    Never raises — tool errors become an ERROR/REJECTED string in content.
+
+    recorder, if given, is called as recorder(tool_name, arguments, full_result)
+    once per call, with the FULL untruncated result — before the truncation
+    below ever happens. Optional and defaults to None so harness.py's call
+    site (which has no run store) is completely unaffected; only agent.py
+    passes one. See memory/store.py's RunStore.record_tool_call."""
     messages = []
     for call in tool_calls:
         fn = tool_map.get(call.function.name)
@@ -49,6 +55,9 @@ def dispatch_tool_calls(tool_calls, tool_map):
             result = str(result)
 
         print(result)
+
+        if recorder is not None:
+            recorder(call.function.name, call.function.arguments, result)
 
         content = result
         if len(content) > MAX_MESSAGE_CONTENT_CHARS:

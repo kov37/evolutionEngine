@@ -9,13 +9,15 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 
 import argparse
 import re
+import time
 
-from ollama import chat
+from ollama import chat, show as ollama_show
 
 import kernel.io_tools as io_tools
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, finish_task
 from kernel.sandbox import get_root, set_root
+from memory.store import RunStore
 from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
@@ -70,10 +72,44 @@ def _diagnosed_symbols(text: str) -> set:
     return set(BACKTICK_SYMBOL_PATTERN.findall(text))
 
 
-def run_agent(task, tools, iteration_budget=ITERATION_BUDGET):
+def _live_model_options(model: str) -> dict:
+    """Read the model's ACTUAL configured parameters from Ollama at run
+    start, rather than hardcoding a guess into this file — the plan's
+    "test model settings independently" step needs run.json to reflect
+    reality even if the Modelfile changes later. `ollama.show()`'s
+    `.parameters` is plain text ("name<spaces>value" per line), not a
+    dict, so it's parsed here. Notably: num_ctx does NOT appear here for
+    qwen3.6:35b-mlx as of this writing — it isn't set in the Modelfile,
+    so the effective context window is whatever Ollama defaults to, not
+    necessarily the 32K this project has been assuming."""
+    options = {"think": False}  # the one option agent.py's chat() call actually sets explicitly
+    try:
+        raw = ollama_show(model).parameters or ""
+        for line in raw.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                name, value = parts
+                try:
+                    value = float(value) if "." in value else int(value)
+                except ValueError:
+                    pass
+                options[name] = value
+    except Exception as e:
+        options["_show_error"] = str(e)
+    return options
+
+
+def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, task_id=None, memory_policy="append-all"):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
     tool_map = {fn.__name__: fn for fn in tools}
+
+    run_store = RunStore(
+        task_id=task_id or f"adhoc-{int(time.time())}", task_text=task, model=MODEL,
+        model_options=_live_model_options(MODEL), project_root=get_root(),
+        memory_policy=memory_policy, iteration_budget=iteration_budget,
+    )
+    print(f"🗂️  Recording run '{run_store.run_id}' to {run_store.run_dir}")
 
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -121,9 +157,17 @@ you never act on."""
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
+        call_started = time.monotonic()
         response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+        latency_ms = int((time.monotonic() - call_started) * 1000)
         msg = response.message
         messages.append(msg)
+
+        run_store.record_model_call(
+            iteration=iteration, prompt_preview=(messages[-2]["content"] if len(messages) >= 2 else ""),
+            response_text=msg.content, input_tokens=response.prompt_eval_count,
+            output_tokens=response.eval_count, latency_ms=latency_ms,
+        )
 
         if msg.content:
             print(f"🧠 {msg.content}")
@@ -136,7 +180,11 @@ you never act on."""
             })
             continue
 
-        tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map)
+        def _record_tool_call(tool_name, arguments, full_result, _iteration=iteration):
+            run_store.record_tool_call(iteration=_iteration, tool_name=tool_name, arguments=arguments,
+                                        result_text=full_result)
+
+        tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, recorder=_record_tool_call)
         messages.extend(tool_messages)
 
         wrote_this_turn = any(
@@ -220,11 +268,13 @@ you never act on."""
 
         if TASK_STATE["done"]:
             print(f"\n✅ DONE: {TASK_STATE['summary']}")
+            run_store.record_task_finished(iteration=iteration, outcome="finished", summary=TASK_STATE["summary"])
             return True
 
     print("\n" + "=" * 60)
     print(f"❌ INCOMPLETE: finish_task was not called within {iteration_budget} iterations.")
     print("=" * 60)
+    run_store.record_task_finished(iteration=iteration_budget, outcome="budget_exhausted")
     return False
 
 
