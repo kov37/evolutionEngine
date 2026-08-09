@@ -4,7 +4,7 @@
     "function_name": "search_file",
     "description": "Search a file line-by-line for a substring pattern; returns (line_number, line_text) for every match.",
     "path_params": [
-      "filepath"
+      "path"
     ]
   },
   "list_symbols": {

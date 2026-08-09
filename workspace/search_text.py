@@ -2,7 +2,7 @@
 """Standalone text-search utility.
 
 Usage:
-    python search_text.py <pattern> <filepath>
+    python search_text.py <pattern> <path>
 
 Exits 0 if at least one matching line is found, non-zero otherwise.
 """
@@ -12,15 +12,15 @@ import sys
 import tempfile
 
 
-def search_file(pattern: str, filepath: str) -> list[tuple[int, str]]:
-    """Scan *filepath* line by line and return every 1-indexed line that
+def search_file(pattern: str, path: str) -> list[tuple[int, str]]:
+    """Scan *path* line by line and return every 1-indexed line that
     contains *pattern* together with its content.
 
     Returns a list of ``(line_number, line_content)`` tuples.
     ``line_content`` still carries its trailing newline if the file had one.
     """
     results: list[tuple[int, str]] = []
-    with open(filepath, "r", encoding="utf-8") as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
             if pattern in line:
                 results.append((lineno, line))
@@ -111,14 +111,14 @@ if __name__ == "__main__":
         sys.exit(0)
     elif len(sys.argv) == 3:
         pattern = sys.argv[1]
-        filepath = sys.argv[2]
-        results = search_file(pattern, filepath)
+        path = sys.argv[2]
+        results = search_file(pattern, path)
         for lineno, content in results:
             print(f"Line {lineno}: {content}", end="")
         sys.exit(0 if results else 1)
     else:
         print(
-            f"Usage: python {sys.argv[0]} <pattern> <filepath>",
+            f"Usage: python {sys.argv[0]} <pattern> <path>",
             file=sys.stderr,
         )
         sys.exit(2)
