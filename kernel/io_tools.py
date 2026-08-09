@@ -7,6 +7,7 @@ module should stay small and easy to audit by eye.
 """
 
 import ast
+import difflib
 import os
 import re
 import subprocess
@@ -157,6 +158,39 @@ def write_file(path: str, content: str) -> str:
     return _test_after_write(full_path)
 
 
+def _find_closest_match_hint(content: str, search: str, max_lines_scanned: int = 3000) -> str:
+    """Best-effort fuzzy-match hint appended to a failed patch_file search.
+    A near-miss (stale whitespace, one changed line, a slightly-off quote)
+    is the common case for a failed search — pointing at the closest real
+    block saves a wasted read_file/patch_file round-trip instead of leaving
+    the model to guess blind. Returns "" if the file's too large to scan
+    cheaply or nothing found is close enough to be useful noise-free."""
+    content_lines = content.splitlines()
+    search_lines = search.splitlines()
+    if not search_lines or len(content_lines) > max_lines_scanned:
+        return ""
+
+    window = len(search_lines)
+    best_ratio = 0.0
+    best_start = None
+    for start in range(0, max(1, len(content_lines) - window + 1)):
+        candidate = "\n".join(content_lines[start:start + window])
+        ratio = difflib.SequenceMatcher(None, search, candidate).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_start = start
+
+    if best_start is None or best_ratio < 0.6:
+        return ""
+
+    snippet = "\n".join(content_lines[best_start:best_start + window])
+    return (
+        f"\n\nClosest match found (lines {best_start + 1}-{best_start + window}, "
+        f"{best_ratio:.0%} similar) — compare it against your search text for the "
+        f"exact difference:\n{snippet}"
+    )
+
+
 def patch_file(path: str, search: str, replace: str) -> str:
     """Surgically replace one exact substring inside a file that already
     exists in the workspace. Use this for small, targeted edits instead of
@@ -179,7 +213,11 @@ def patch_file(path: str, search: str, replace: str) -> str:
     replace = _strip_code_fences(replace)
 
     if search not in content:
-        return f"ERROR: search text was not found verbatim in '{path}'. Call read_file to see the exact current contents, then retry."
+        hint = _find_closest_match_hint(content, search)
+        return (
+            f"ERROR: search text was not found verbatim in '{path}'. "
+            f"Call read_file to see the exact current contents, then retry.{hint}"
+        )
 
     new_content = content.replace(search, replace, 1)
     valid, err = validate_python_syntax(full_path, new_content)
