@@ -20,7 +20,7 @@
     "function_name": "list_dir",
     "description": "Recursively list every file and subdirectory beneath a root path, as (kind, relative_path) tuples.",
     "path_params": [
-      "root"
+      "path"
     ]
   },
   "diff_files": {
@@ -57,7 +57,7 @@
     "function_name": "grep_dir",
     "description": "Recursively search every file under a directory for a substring pattern, returning (relative_path, line_number, line_text) for every match.",
     "path_params": [
-      "root"
+      "path"
     ]
   },
   "git_status": {
@@ -65,7 +65,7 @@
     "function_name": "git_status",
     "description": "List every changed/untracked/staged file in a git working tree as (status_code, path) pairs, via `git status --porcelain=v1`.",
     "path_params": [
-      "root"
+      "path"
     ]
   },
   "git_diff": {
@@ -73,7 +73,7 @@
     "function_name": "git_diff",
     "description": "Return the full diff of a git working tree against HEAD (staged and unstaged combined) as a string, via `git diff HEAD`.",
     "path_params": [
-      "root"
+      "path"
     ]
   }
 }

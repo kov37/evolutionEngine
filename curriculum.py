@@ -95,8 +95,8 @@ CURRICULUM = [
         "name": "list_dir",
         "function_name": "list_dir",
         "target_filename": "list_dir_tool.py",
-        "expected_params": ["root"],
-        "path_params": ["root"],
+        "expected_params": ["path"],
+        "path_params": ["path"],
         "description": "Recursively list every file and subdirectory beneath a root path, as (kind, relative_path) tuples.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone recursive directory-listing utility named `list_dir_tool.py`.
@@ -105,7 +105,7 @@ CURRICULUM = [
         - Accepts a root directory path.
         - Recursively walks every file and subdirectory beneath that root.
         - For each entry, determines its kind ('file' or 'dir') and its path relative to the root, using forward slashes regardless of platform.
-        - Exposes this as `list_dir(root: str) -> list[tuple[str, str]]`, returning (kind, relative_path) tuples sorted alphabetically by relative_path.
+        - Exposes this as `list_dir(path: str) -> list[tuple[str, str]]`, returning (kind, relative_path) tuples sorted alphabetically by relative_path.
         - When run as a script with a root path argument, prints one line per entry in the form `<kind>: <relative_path>`, and exits 0. If the root does not exist, prints an error to stderr and exits non-zero.
 
         {GRADUATION_CONTRACT}
@@ -205,8 +205,8 @@ CURRICULUM = [
         "name": "grep_dir",
         "function_name": "grep_dir",
         "target_filename": "grep_dir_tool.py",
-        "expected_params": ["pattern", "root"],
-        "path_params": ["root"],
+        "expected_params": ["pattern", "path"],
+        "path_params": ["path"],
         "description": "Recursively search every file under a directory for a substring pattern, returning (relative_path, line_number, line_text) for every match.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone recursive-search utility named `grep_dir_tool.py` — the multi-file counterpart to the existing single-file search_file tool.
@@ -217,7 +217,7 @@ CURRICULUM = [
         - For each file, attempts to read it as UTF-8 text; if that raises UnicodeDecodeError (a binary file), skip that file silently rather than erroring.
         - Within each readable file, finds every line containing the pattern, and records (path relative to root, using forward slashes, 1-indexed line number, line content).
         - Caps the total number of matches returned at 200 — if more than 200 matches exist, return only the first 200 and append one final entry noting how many were omitted, so a huge hit count doesn't flood the caller.
-        - Exposes this as `grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]`.
+        - Exposes this as `grep_dir(pattern: str, path: str = ".") -> list[tuple[str, int, str]]`.
         - When run as a script with a pattern and optional root argument, prints one line per match in the form `<relative_path>:<line_number>: <line_text>`, and exits 0 if at least one match was found, 1 otherwise.
 
         {GRADUATION_CONTRACT}
@@ -229,8 +229,8 @@ CURRICULUM = [
         "name": "git_status",
         "function_name": "git_status",
         "target_filename": "git_status_tool.py",
-        "expected_params": ["root"],
-        "path_params": ["root"],
+        "expected_params": ["path"],
+        "path_params": ["path"],
         "description": "List every changed/untracked/staged file in a git working tree as (status_code, path) pairs, via `git status --porcelain=v1`.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone git-status utility named `git_status_tool.py`. This shells out to the real `git` binary via subprocess — do not reimplement git's diff/status logic in Python, git already provides a stable machine-readable interface for exactly this.
@@ -240,7 +240,7 @@ CURRICULUM = [
         - Runs `git status --porcelain=v1` with that directory as the subprocess `cwd`.
         - If the command fails because the directory is not inside a git working tree (git's stderr will say so, or the exit code is non-zero for that reason), return the string "ERROR: not a git repository." rather than raising.
         - Otherwise, parses each line of the porcelain output into a (status_code, path) tuple — the status_code is the two-character code at the start of each line (e.g. " M", "??", "A "), and the path is the rest of the line after the code and the following space, with surrounding whitespace stripped.
-        - Exposes this as `git_status(root: str = ".") -> list[tuple[str, str]]`, returning an empty list if there are no changes (a clean working tree is not an error).
+        - Exposes this as `git_status(path: str = ".") -> list[tuple[str, str]]`, returning an empty list if there are no changes (a clean working tree is not an error).
         - When run as a script with an optional root argument, prints one line per entry as `<status_code> <path>`, and exits 0 whether or not there are changes (a clean tree is success, not failure) — exits 2 only if root is not a git repository.
 
         {GRADUATION_CONTRACT}
@@ -252,8 +252,8 @@ CURRICULUM = [
         "name": "git_diff",
         "function_name": "git_diff",
         "target_filename": "git_diff_tool.py",
-        "expected_params": ["root"],
-        "path_params": ["root"],
+        "expected_params": ["path"],
+        "path_params": ["path"],
         "description": "Return the full diff of a git working tree against HEAD (staged and unstaged combined) as a string, via `git diff HEAD`.",
         "goal": f"""
         CRITICAL OBJECTIVE: Build a standalone git-diff utility named `git_diff_tool.py`. This shells out to the real `git` binary via subprocess — do not reimplement diff logic in Python.
@@ -262,7 +262,7 @@ CURRICULUM = [
         - Accepts a root directory (default ".").
         - Runs `git diff HEAD` with that directory as the subprocess `cwd` (this shows staged and unstaged changes combined against the last commit). Pass `--no-color` explicitly so output is never contaminated with ANSI escape codes regardless of the user's git config.
         - If the command fails because the directory is not inside a git working tree, or there is no HEAD commit yet (a brand new repo with no commits), return a string starting with "ERROR:" describing which of those it was, rather than raising.
-        - Exposes this as `git_diff(root: str = ".") -> str`, returning the raw diff text — an empty string means there are no differences from HEAD (that is success, not an error).
+        - Exposes this as `git_diff(path: str = ".") -> str`, returning the raw diff text — an empty string means there are no differences from HEAD (that is success, not an error).
         - When run as a script with an optional root argument, prints the diff (if any) and exits 0 whether or not there are changes — exits 2 only on the error conditions above.
 
         {GRADUATION_CONTRACT}

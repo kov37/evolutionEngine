@@ -14,8 +14,8 @@ import shutil
 from pathlib import Path
 
 
-def grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]:
-    """Recursively search files under *root* for *pattern*.
+def grep_dir(pattern: str, path: str = ".") -> list[tuple[str, int, str]]:
+    """Recursively search files under *path* for *pattern*.
 
     Returns a list of ``(relative_path, 1-indexed_line_number, line_text)``
     tuples.  At most 200 matches are returned; if more exist the last entry
@@ -25,7 +25,7 @@ def grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]:
     ----------
     pattern : str
         Substring to search for in each file's lines.
-    root : str
+    path : str
         Root directory to walk (default ``"."``).
 
     Returns
@@ -34,11 +34,11 @@ def grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]:
         Match tuples: (relative_path_with_forward_slashes, line_number,
         stripped_line_text).
     """
-    root = os.path.abspath(root)
+    path = os.path.abspath(path)
     results: list[tuple[str, int, str]] = []
     omit_notice_index = None  # index to overwrite if we hit the cap
 
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(path):
         # Skip .git directories entirely (in-place mutation of dirnames).
         dirnames[:] = [
             d for d in dirnames if d != ".git"
@@ -55,7 +55,7 @@ def grep_dir(pattern: str, root: str = ".") -> list[tuple[str, int, str]]:
                 continue
 
             # Compute relative path using forward slashes.
-            rel_path = os.path.relpath(fpath, root).replace(os.sep, "/")
+            rel_path = os.path.relpath(fpath, path).replace(os.sep, "/")
 
             for lineno_0, line in enumerate(lines, start=1):
                 if pattern in line:
@@ -138,7 +138,7 @@ def _self_test() -> bool:
             fh.write("nothing special here\n")
 
         # --- assertions ---------------------------------------------------
-        matches = grep_dir(marker, root=tmp_root)
+        matches = grep_dir(marker, path=tmp_root)
         assert len(matches) == 2, (
             f"Expected exactly 2 matches but got {len(matches)}"
         )
@@ -159,7 +159,7 @@ def _self_test() -> bool:
             )
 
         # Pattern known not to exist → empty list.
-        no_match = grep_dir("XYZNONEXISTENT_abc123", root=tmp_root)
+        no_match = grep_dir("XYZNONEXISTENT_abc123", path=tmp_root)
         assert no_match == [], (
             f"Expected [] for non-existent pattern but got {no_match}"
         )
@@ -181,9 +181,9 @@ def main() -> int:
         ok = _self_test()
         return 0 if ok else 1
     pattern = sys.argv[1]
-    root = sys.argv[2] if len(sys.argv) > 2 else "."
+    target = sys.argv[2] if len(sys.argv) > 2 else "."
 
-    matches = grep_dir(pattern, root=root)
+    matches = grep_dir(pattern, path=target)
     for path, lineno, text in matches:
         print(f"{path}:{lineno}: {text}")
     return 0 if matches else 1

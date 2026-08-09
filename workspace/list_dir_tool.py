@@ -19,12 +19,12 @@ import shutil
 from typing import List, Tuple
 
 
-def list_dir(root: str) -> List[Tuple[str, str]]:
-    """Walk *root* recursively and return sorted (kind, relative_path) tuples.
+def list_dir(path: str) -> List[Tuple[str, str]]:
+    """Walk *path* recursively and return sorted (kind, relative_path) tuples.
 
     Parameters
     ----------
-    root : str
+    path : str
         Path to the directory to walk.
 
     Returns
@@ -33,9 +33,9 @@ def list_dir(root: str) -> List[Tuple[str, str]]:
         Each tuple is ('dir' | 'file', <relative_path_using_forward_slashes>).
         Sorted alphabetically by the relative-path string.
     """
-    root = os.path.abspath(root)
-    if not os.path.isdir(root):
-        raise FileNotFoundError(f"Root directory does not exist: {root}")
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"Root directory does not exist: {path}")
 
     results: List[Tuple[str, str]] = []
 
@@ -49,14 +49,14 @@ def list_dir(root: str) -> List[Tuple[str, str]]:
         for name in entries:
             full_path = os.path.join(dirpath, name)
             if os.path.isdir(full_path):
-                rel = os.path.relpath(full_path, root).replace(os.sep, "/")
+                rel = os.path.relpath(full_path, path).replace(os.sep, "/")
                 results.append(("dir", rel))
                 _walk(full_path)
             elif os.path.isfile(full_path):
-                rel = os.path.relpath(full_path, root).replace(os.sep, "/")
+                rel = os.path.relpath(full_path, path).replace(os.sep, "/")
                 results.append(("file", rel))
 
-    _walk(root)
+    _walk(path)
     results.sort(key=lambda t: t[1])
     return results
 

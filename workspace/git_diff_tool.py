@@ -16,8 +16,8 @@ import tempfile
 import shutil
 
 
-def git_diff(root: str = ".") -> str:
-    """Run `git diff HEAD --no-color` in *root* and return the raw diff text.
+def git_diff(path: str = ".") -> str:
+    """Run `git diff HEAD --no-color` in *path* and return the raw diff text.
 
     Returns
     -------
@@ -26,15 +26,15 @@ def git_diff(root: str = ".") -> str:
         means there are no differences from HEAD (success, not an error).
 
     Raises / returns error markers on the following conditions:
-        - ``root`` is not inside a git working tree       → "ERROR:" msg
-        - ``root`` has no commits yet (no HEAD commit)   → "ERROR:" msg
+        - ``path`` is not inside a git working tree       → "ERROR:" msg
+        - ``path`` has no commits yet (no HEAD commit)   → "ERROR:" msg
     """
     try:
         result = subprocess.run(
             ["git", "diff", "HEAD", "--no-color"],
             capture_output=True,
             text=True,
-            cwd=root,
+            cwd=path,
             timeout=30,
         )
     except (FileNotFoundError, OSError) as exc:
@@ -51,7 +51,7 @@ def git_diff(root: str = ".") -> str:
 
     if "not a git repository" in stderr_lower:
         return (
-            f"ERROR: '{os.path.abspath(root)}' is not inside a git working tree"
+            f"ERROR: '{os.path.abspath(path)}' is not inside a git working tree"
         )
 
     # Additional heuristics for edge-case errors that mean "no HEAD / fresh repo":
@@ -68,7 +68,7 @@ def git_diff(root: str = ".") -> str:
             or "ambiguous argument" in stderr_lower
         )
     ):
-        return f"ERROR: '{os.path.abspath(root)}' has no HEAD commit yet (fresh repo)"
+        return f"ERROR: '{os.path.abspath(path)}' has no HEAD commit yet (fresh repo)"
 
     # If git returned non-zero but we can't classify it — still treat as error.
     if stderr:
@@ -79,8 +79,8 @@ def git_diff(root: str = ".") -> str:
 
 def main() -> int:
     """Entry point when run as a script.  Prints the diff and exits accordingly."""
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
-    diff_text = git_diff(root)
+    path = sys.argv[1] if len(sys.argv) > 1 else "."
+    diff_text = git_diff(path)
 
     if diff_text.startswith("ERROR:"):
         print(diff_text, file=sys.stderr)

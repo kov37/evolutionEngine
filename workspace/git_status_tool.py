@@ -8,8 +8,8 @@ import tempfile
 import shutil
 
 
-def git_status(root: str = ".") -> list[tuple[str, str]]:
-    """Run ``git status --porcelain=v1`` in *root* and return parsed entries.
+def git_status(path: str = ".") -> list[tuple[str, str]]:
+    """Run ``git status --porcelain=v1`` in *path* and return parsed entries.
 
     Returns a list of ``(status_code, path)`` tuples.
     Returns ``"ERROR: not a git repository."`` when the directory is not under
@@ -18,7 +18,7 @@ def git_status(root: str = ".") -> list[tuple[str, str]]:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain=v1"],
-            cwd=root,
+            cwd=path,
             capture_output=True,
             text=True,
         )
@@ -138,14 +138,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Print git-status entries.")
     parser.add_argument(
-        "root", nargs="?", default=".",
+        "path", nargs="?", default=".",
         help="Root directory to inspect (default: current directory).",
     )
     args = parser.parse_args()
 
-    root_dir = args.root
-
-    result = git_status(root_dir)
+    result = git_status(args.path)
     if result == "ERROR: not a git repository.":
         print("ERROR: not a git repository.")
         sys.exit(2)
