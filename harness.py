@@ -10,6 +10,11 @@ from registry import load_registry, verify, verify_and_promote, is_promoted
 
 MODEL = "qwen3.6:35b-mlx"
 
+# Chosen for latency, not memory — throughput collapses well before the
+# memory ceiling on this hardware (215 tok/s at num_ctx=262144 vs.
+# 1,489 tok/s here). See REFACTORING_LEARNINGS.md findings #19-21.
+NUM_CTX = 65536
+
 
 def run_recursive_engine(master_goal, tools, function_name=None, iteration_budget=5,
                           expected_params=None, checker_name=None, expected_filename=None):
@@ -38,7 +43,8 @@ tools available to you.
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
-        response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+        response = chat(model=MODEL, messages=messages, tools=tools, think=False,
+                         options={"num_ctx": NUM_CTX})
         msg = response.message
         messages.append(msg)
 

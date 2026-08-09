@@ -21,6 +21,11 @@ from registry import load_registry
 MODEL = "qwen3.6:35b-mlx"
 ITERATION_BUDGET = 20
 
+# Chosen for latency, not memory — throughput collapses well before the
+# memory ceiling on this hardware (215 tok/s at num_ctx=262144 vs.
+# 1,489 tok/s here). See REFACTORING_LEARNINGS.md findings #19-21.
+NUM_CTX = 65536
+
 # A transient Ollama-side hiccup (e.g. "XML syntax error... element <function>
 # closed by </parameter>", a malformed-tool-call response from the model that
 # the server can't parse) must not crash the whole run outright — confirmed
@@ -75,7 +80,8 @@ finish_task.
         last_error = None
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
             try:
-                response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+                response = chat(model=MODEL, messages=messages, tools=tools, think=False,
+                                 options={"num_ctx": NUM_CTX})
                 break
             except Exception as e:
                 last_error = e
