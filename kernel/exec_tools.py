@@ -15,6 +15,7 @@ import subprocess
 from kernel.sandbox import get_root
 
 SHELL_TIMEOUT_SECONDS = 15
+MAX_SHELL_TIMEOUT_SECONDS = 120  # a hallucinated huge value shouldn't be able to hang a run indefinitely
 MAX_OUTPUT_CHARS = 4000
 
 
@@ -24,21 +25,26 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]"
 
 
-def run_shell(command: str) -> str:
+def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
     """Run a shell command with its working directory confined to the
     workspace, and report exit code, stdout, and stderr. Use this to run
     tests, install a package, or invoke a tool you already wrote.
 
     Args:
       command: The shell command to execute, e.g. 'python3 search_text.py foo bar.txt'.
+      timeout: Max seconds to let the command run before killing it and
+        reporting TIMEOUT. Default 15. Raise this for a genuinely slow
+        command (e.g. a full test suite); capped at 120s regardless of
+        what's requested.
     """
+    timeout = max(1, min(timeout, MAX_SHELL_TIMEOUT_SECONDS))
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=SHELL_TIMEOUT_SECONDS, cwd=get_root(),
+            timeout=timeout, cwd=get_root(),
         )
     except subprocess.TimeoutExpired:
-        return f"TIMEOUT after {SHELL_TIMEOUT_SECONDS}s — command likely hung."
+        return f"TIMEOUT after {timeout}s — command likely hung."
 
     return (
         f"Exit code: {result.returncode}\n"
