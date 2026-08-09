@@ -85,19 +85,41 @@ def _test_after_write(full_path: str) -> str:
     )
 
 
-def read_file(path: str) -> str:
-    """Read and return the exact current contents of a file in the workspace.
-    Always check this before patch_file — its search text must match verbatim.
+def read_file(path: str, offset: int = 1, limit: int = None) -> str:
+    """Read and return the exact current contents of a file in the workspace,
+    optionally windowed to a range of lines. Always check this before
+    patch_file — its search text must match verbatim (a windowed read still
+    returns exact, verbatim content for those lines, not a summary).
+
+    For a large file, prefer offset/limit over re-reading the whole thing
+    repeatedly — pass just the section you actually need.
 
     Args:
       path: Filename to read, e.g. 'patch_validator.py'.
+      offset: 1-indexed line number to start reading from. Default 1 (the
+        start of the file).
+      limit: Maximum number of lines to return, starting at offset. Default
+        None, meaning read to the end of the file.
     """
     full_path = _resolve(path)
     if not os.path.exists(full_path):
         return f"ERROR: '{path}' does not exist in the workspace."
     with open(full_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return f"--- {path} ({len(content)} chars) ---\n{content}"
+        lines = f.readlines()
+
+    total_lines = len(lines)
+    if offset < 1:
+        offset = 1
+    start_idx = offset - 1
+    if total_lines and start_idx >= total_lines:
+        return f"ERROR: offset {offset} is past the end of '{path}' ({total_lines} lines total)."
+    end_idx = total_lines if limit is None else min(total_lines, start_idx + limit)
+    content = "".join(lines[start_idx:end_idx])
+
+    window_note = ""
+    if offset != 1 or end_idx != total_lines:
+        window_note = f" [lines {offset}-{end_idx} of {total_lines}]"
+    return f"--- {path}{window_note} ({len(content)} chars) ---\n{content}"
 
 
 def list_workspace() -> str:
