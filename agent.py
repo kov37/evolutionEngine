@@ -8,6 +8,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 """
 
 import argparse
+import time
 
 from ollama import chat
 
@@ -19,6 +20,16 @@ from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
 ITERATION_BUDGET = 20
+
+# A transient Ollama-side hiccup (e.g. "XML syntax error... element <function>
+# closed by </parameter>", a malformed-tool-call response from the model that
+# the server can't parse) must not crash the whole run outright — confirmed
+# live, twice, in this project's real history: a first fix (5 retries, 30s
+# backoff cap) still wasn't enough on a real overnight run, so the retry
+# count and backoff cap here are the values that actually held up, not a
+# fresh guess. Exponential, capped, so a genuinely dead server still gives up
+# in reasonable time rather than retrying forever.
+MAX_CHAT_RETRIES = 20
 
 
 def run_agent(task, tools, iteration_budget=ITERATION_BUDGET):
@@ -60,7 +71,22 @@ finish_task.
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
-        response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+        response = None
+        last_error = None
+        for attempt in range(1, MAX_CHAT_RETRIES + 1):
+            try:
+                response = chat(model=MODEL, messages=messages, tools=tools, think=False)
+                break
+            except Exception as e:
+                last_error = e
+                print(f"⚠️  chat() failed (attempt {attempt}/{MAX_CHAT_RETRIES}): {type(e).__name__}: {e}")
+                if attempt < MAX_CHAT_RETRIES:
+                    time.sleep(min(120, 2 ** attempt))
+        if response is None:
+            print(f"\n❌ chat() failed {MAX_CHAT_RETRIES} times in a row — ending run cleanly rather than "
+                  f"crashing. Last error: {last_error}")
+            return False
+
         msg = response.message
         messages.append(msg)
 
