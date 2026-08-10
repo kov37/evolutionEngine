@@ -8,6 +8,7 @@ returning (relative_path, line_number, line_text) tuples.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import shutil
@@ -20,6 +21,13 @@ def grep_dir(pattern: str, path: str = "."):
     erroring — the common case of pointing grep_dir at one known file works
     the way you'd expect, not an empty result with no explanation.
 
+    *pattern* is a regex (Python ``re`` syntax, e.g. ``class .*Distribution``
+    or ``foo|bar``) — matched with ``re.search`` against each line, same as
+    real ``grep``. A pattern that fails to compile as regex (e.g. an
+    unescaped bracket meant literally) falls back to plain substring
+    matching instead of erroring, so a simple literal string still works
+    either way.
+
     Returns a list of ``(relative_path, 1-indexed_line_number, line_text)``
     tuples.  At most 200 matches are returned; if more exist the last entry
     is a special note about how many were omitted.
@@ -27,7 +35,8 @@ def grep_dir(pattern: str, path: str = "."):
     Parameters
     ----------
     pattern : str
-        Substring to search for in each file's lines.
+        Regex to search for in each file's lines (falls back to a plain
+        substring match if *pattern* isn't valid regex).
     path : str
         Directory to walk, or a single file to search directly (default
         ``"."``).
@@ -44,6 +53,15 @@ def grep_dir(pattern: str, path: str = "."):
 
     if not os.path.exists(path):
         return f"ERROR: '{original_path}' does not exist."
+
+    try:
+        matcher = re.compile(pattern)
+        line_matches = lambda line: matcher.search(line) is not None
+    except re.error:
+        # Not valid regex (e.g. an unescaped literal bracket) — fall back to
+        # a plain substring check rather than erroring on a reasonable
+        # literal-string search.
+        line_matches = lambda line: pattern in line
 
     results: list[tuple[str, int, str]] = []
     omit_notice_index = None  # index to overwrite if we hit the cap
@@ -78,7 +96,7 @@ def grep_dir(pattern: str, path: str = "."):
             rel_path = os.path.relpath(fpath, base_for_relpath).replace(os.sep, "/")
 
             for lineno_0, line in enumerate(lines, start=1):
-                if pattern in line:
+                if line_matches(line):
                     match_info: tuple[str, int, str] = (
                         rel_path,
                         lineno_0,
@@ -204,6 +222,29 @@ def _self_test() -> bool:
         missing = grep_dir(marker, path=os.path.join(tmp_root, "does_not_exist"))
         assert isinstance(missing, str) and missing.startswith("ERROR:"), (
             f"Expected an ERROR string for a nonexistent path but got {missing!r}"
+        )
+
+        # Regex support — the exact failure mode found live against
+        # sympy-13878: a pipe-alternation pattern must actually match, not
+        # silently return [] because "|" was treated as a literal character.
+        regex_matches = grep_dir(r"a_sub/b\.txt line 4 does not exist|" + marker, path=tmp_root)
+        assert len(regex_matches) == 2, (
+            f"Expected alternation pattern to match both real occurrences, got {regex_matches}"
+        )
+
+        # Regex anchors/wildcards must work too, not be treated as literal chars.
+        anchor_matches = grep_dir(r"^line \d$", path=f1_path)
+        assert len(anchor_matches) == 5, (
+            f"Expected 5 single-digit 'line N' matches via regex anchors, got {anchor_matches}"
+        )
+
+        # A pattern that ISN'T valid regex must fall back to a literal
+        # substring search instead of erroring.
+        with open(os.path.join(tmp_root, "bracket.txt"), "w", encoding="utf-8") as fh:
+            fh.write("value = arr[unclosed\n")
+        literal_matches = grep_dir("arr[unclosed", path=os.path.join(tmp_root, "bracket.txt"))
+        assert len(literal_matches) == 1, (
+            f"Invalid-regex pattern should fall back to literal substring match, got {literal_matches}"
         )
 
     finally:
