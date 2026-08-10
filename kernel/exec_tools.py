@@ -10,6 +10,8 @@ at a real project via --project, run_shell can run anything in that
 project — that's the explicit tradeoff of pointing it there.
 """
 
+import os
+import signal
 import subprocess
 
 from kernel.sandbox import get_root
@@ -38,16 +40,25 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
         what's requested.
     """
     timeout = max(1, min(timeout, MAX_SHELL_TIMEOUT_SECONDS))
+    proc = subprocess.Popen(
+        command, shell=True, cwd=get_root(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,  # own process group, so a timeout can kill the whole tree
+    )
     try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=get_root(),
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # subprocess.run's own timeout only kills the shell process itself,
+        # not anything it spawned — a real orphaned pytest process was found
+        # live, still running 46 CPU-minutes after being reported TIMEOUT.
+        # Killing the whole process group (not just proc.pid) actually ends
+        # every descendant.
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait()
         return f"TIMEOUT after {timeout}s — command likely hung."
 
     return (
-        f"Exit code: {result.returncode}\n"
-        f"STDOUT:\n{_truncate(result.stdout)}\n"
-        f"STDERR:\n{_truncate(result.stderr)}"
+        f"Exit code: {proc.returncode}\n"
+        f"STDOUT:\n{_truncate(stdout)}\n"
+        f"STDERR:\n{_truncate(stderr)}"
     )

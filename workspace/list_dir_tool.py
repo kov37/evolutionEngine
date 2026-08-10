@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Recursive directory-listing utility.
 
-Exposes ``list_dir(root: str) -> list[tuple[str, str]]`` which walks an
+Exposes ``list_dir(path: str) -> list[tuple[str, str]]`` which walks an
 entire directory tree and returns ``(kind, relative_path)`` tuples sorted
 alphabetically by *relative_path* (using forward-slash separators).
+Skips ``.git`` — a real, repeatedly-observed problem otherwise: pointed at
+a git repo's root, this tool used to dump hundreds of `.git/objects/...`
+entries before a single real project file, on every single run.
 
 When executed as ``python list_dir_tool.py <dir>`` it prints one line per
 entry in the form ``<kind>: <relative_path>`` and exits 0.
@@ -47,6 +50,8 @@ def list_dir(path: str) -> List[Tuple[str, str]]:
             return
 
         for name in entries:
+            if name == ".git":
+                continue
             full_path = os.path.join(dirpath, name)
             if os.path.isdir(full_path):
                 rel = os.path.relpath(full_path, path).replace(os.sep, "/")
@@ -98,6 +103,17 @@ def _run_self_test() -> None:
 
         assert entries == expected_entries, (
             f"Expected {expected_entries}\nGot         {entries}"
+        )
+
+        # .git must be skipped entirely — repeatedly observed live dumping
+        # hundreds of .git/objects/... entries before any real project file.
+        os.makedirs(os.path.join(tmp_root, ".git", "objects"))
+        with open(os.path.join(tmp_root, ".git", "config"), "w") as fh:
+            fh.write("")
+        entries_with_git = list_dir(tmp_root)
+        assert entries_with_git == expected_entries, (
+            f".git should be skipped entirely, got extra entries: "
+            f"{set(entries_with_git) - set(expected_entries)}"
         )
 
         # Verify error path for non-existent root.

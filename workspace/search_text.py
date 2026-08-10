@@ -8,21 +8,33 @@ Exits 0 if at least one matching line is found, non-zero otherwise.
 """
 
 import os
+import re
 import sys
 import tempfile
 
 
 def search_file(pattern: str, path: str) -> list[tuple[int, str]]:
     """Scan *path* line by line and return every 1-indexed line that
-    contains *pattern* together with its content.
+    matches *pattern*, together with its content.
+
+    *pattern* is a regex (Python ``re`` syntax), matched with ``re.search``
+    against each line, same as real ``grep``. A pattern that fails to
+    compile as regex falls back to plain substring matching, so a simple
+    literal string still works either way.
 
     Returns a list of ``(line_number, line_content)`` tuples.
     ``line_content`` still carries its trailing newline if the file had one.
     """
+    try:
+        matcher = re.compile(pattern)
+        line_matches = lambda line: matcher.search(line) is not None
+    except re.error:
+        line_matches = lambda line: pattern in line
+
     results: list[tuple[int, str]] = []
     with open(path, "r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
-            if pattern in line:
+            if line_matches(line):
                 results.append((lineno, line))
     return results
 
@@ -94,6 +106,25 @@ def _run_self_test() -> None:
         assert len(multi_results) == 2, "Expected 2 matches for 'abc'"
         assert multi_results[0][0] == 1, "First match should be on line 1"
         assert multi_results[1][0] == 3, "Second match should be on line 3"
+
+        # ------------------------------------------------------------------ #
+        # 6) Regex support — alternation, anchors, and invalid-regex fallback.
+        # ------------------------------------------------------------------ #
+        regex_results = search_file("abc|ghi", multi_path)
+        assert len(regex_results) == 3, f"Expected 3 alternation matches, got {len(regex_results)}"
+
+        anchor_results = search_file("^def$", multi_path)
+        assert len(anchor_results) == 1 and anchor_results[0][0] == 2, (
+            f"Expected exactly 1 anchored match on line 2, got {anchor_results}"
+        )
+
+        with open(multi_path, "a", encoding="utf-8") as fh:
+            fh.write("value = arr[unclosed\n")
+        literal_results = search_file("arr[unclosed", multi_path)
+        assert len(literal_results) == 1, (
+            f"Invalid-regex pattern should fall back to literal substring match, got {literal_results}"
+        )
+
         os.unlink(multi_path)
 
     finally:
