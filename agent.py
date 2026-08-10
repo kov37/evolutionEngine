@@ -14,6 +14,7 @@ from ollama import chat
 
 import kernel.io_tools as io_tools
 import sidecar
+import worker
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, finish_task
 from kernel.sandbox import get_root, set_root
@@ -25,7 +26,11 @@ ITERATION_BUDGET = 20
 # Chosen for latency, not memory — throughput collapses well before the
 # memory ceiling on this hardware (215 tok/s at num_ctx=262144 vs.
 # 1,489 tok/s here). See REFACTORING_LEARNINGS.md findings #19-21.
-NUM_CTX = 65536
+# Lowered from 65536 to 32768 when the orchestrator-worker pattern was
+# introduced (qwen3.5:9b running concurrently as the compression worker) —
+# leaves more headroom for the second model to stay resident alongside this
+# one without either getting pushed toward GPU offload.
+NUM_CTX = 32768
 
 # A transient Ollama-side hiccup (e.g. "XML syntax error... element <function>
 # closed by </parameter>", a malformed-tool-call response from the model that
@@ -38,7 +43,7 @@ NUM_CTX = 65536
 MAX_CHAT_RETRIES = 20
 
 
-def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False):
+def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False, worker_enabled=False):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
     tool_map = {fn.__name__: fn for fn in tools}
@@ -114,9 +119,19 @@ finish_task.
 
         if sidecar_enabled:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
-                sidecar_log.append(
-                    sidecar.summarize_call(call.function.name, call.function.arguments, tmsg["content"])
-                )
+                if worker_enabled:
+                    # Orchestrator-worker pattern: qwen3.5:9b compresses the
+                    # raw result into a real semantic summary instead of
+                    # sidecar.py's mechanical name+args+length line. See
+                    # worker.py — falls back to the mechanical summary on
+                    # any worker failure, so this never blocks the
+                    # orchestrator's own progress.
+                    entry = worker.compress_tool_result(
+                        call.function.name, call.function.arguments, tmsg["content"]
+                    )
+                else:
+                    entry = sidecar.summarize_call(call.function.name, call.function.arguments, tmsg["content"])
+                sidecar_log.append(entry)
             # Rebuilt fresh every iteration from the immutable base prompt,
             # not appended to in place — keeps this idempotent regardless of
             # how many times the loop runs, and keeps the sidecar pinned at
@@ -144,7 +159,15 @@ if __name__ == "__main__":
         "--sidecar", action="store_true",
         help="Enable the automated activity-log sidecar (see sidecar.py) pinned to the system prompt.",
     )
+    parser.add_argument(
+        "--worker", action="store_true",
+        help="Requires --sidecar. Use qwen3.5:9b (see worker.py) to compress each tool result into a "
+             "real semantic summary for the sidecar, instead of the mechanical name+args+length line.",
+    )
     args = parser.parse_args()
+
+    if args.worker and not args.sidecar:
+        raise SystemExit("❌ --worker requires --sidecar (there's nowhere to put the compressed summary otherwise).")
 
     if args.project:
         try:
@@ -162,6 +185,6 @@ if __name__ == "__main__":
     print(f"📁 Operating in: {get_root()}")
     print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
     if args.sidecar:
-        print("🗒️  Automated activity-log sidecar: ENABLED")
+        print(f"🗒️  Automated activity-log sidecar: ENABLED{' + qwen3.5:9b worker compression' if args.worker else ' (mechanical)'}")
 
-    run_agent(task, tools, sidecar_enabled=args.sidecar)
+    run_agent(task, tools, sidecar_enabled=args.sidecar, worker_enabled=args.worker)
