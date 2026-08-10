@@ -14,19 +14,25 @@ heuristic) means: no extra executive-function burden on the orchestrator
 parsing code to maintain — one general-purpose prompt handles any tool's
 output.
 
-Confirmed live before building this: both models fit resident simultaneously
-on this hardware (qwen3.6:35b-mlx ~21GB + qwen3.5:9b ~5.7GB, well under the
-36GB unified memory ceiling), so this is real concurrent orchestrator+worker
-execution, not a sequential swap.
+Runs locally (this Mac), confirmed live: both models fit resident
+simultaneously (~21GB + ~5.7GB, well under the 36GB ceiling), with no
+meaningful compute contention once Ollama's own daemon is healthy.
+Briefly moved to legion.local (a separate physical machine, RTX 4070) to
+free local headroom during a long run where the orchestrator's context
+had grown to 30GB+ — reverted after finding the network round-trip made a
+single compression call take 5+ minutes in practice (vs. ~1-2s local),
+which made the whole pipeline impractically slow. Local latency is the
+worse tradeoff to accept than that.
 
 Never blocks or crashes the orchestrator: any worker failure (timeout,
-malformed response, model not loaded) falls back to sidecar.py's mechanical
-summary, so a worker hiccup degrades gracefully to Arm A's original
-behavior instead of stalling the run.
+malformed response, model not loaded) falls back to sidecar.py's
+mechanical summary, so a worker hiccup degrades gracefully to Arm A's
+original behavior instead of stalling the run.
 """
 
 from ollama import chat
 
+import fact_extraction
 import sidecar
 
 WORKER_MODEL = "qwen3.5:9b"
@@ -58,7 +64,7 @@ UPDATED summary that replaces it entirely.
 Be concise — a short dense paragraph, not a list. Keep facts that are still relevant (files/ \
 classes/functions found, what's done, what's still needed); drop or merge anything superseded \
 or no longer useful. Do not just append the new information — actually integrate it.
-
+{grounding_block}
 Previous summary:
 {previous_summary}
 
@@ -66,6 +72,19 @@ What just happened (tool: {tool_name}, args: {arguments}):
 {result_content}
 
 Updated summary:"""
+
+# Appended into CONTEXT_SUMMARY_PROMPT only when fact_extraction found real,
+# verified names in this call's content — grounds the model's paraphrase
+# against confirmed facts instead of letting it free-recall class/function
+# names from memory, the exact failure mode behind two unverified
+# "discrepancy" claims the worker made live in earlier testing (a PDF
+# normalization-coefficient claim, a docstring-mismatch claim — neither
+# ever independently checked against the real source).
+GROUNDING_BLOCK_TEMPLATE = """
+VERIFIED facts in this result (extracted mechanically, not by you — these names are guaranteed \
+real, use them exactly as given rather than recalling similar-sounding names from memory): \
+{facts}
+"""
 
 
 def _call_worker(prompt: str):
@@ -113,10 +132,20 @@ def summarize_context(previous_summary: str, tool_name: str, arguments: dict, re
     than compress_tool_result's one-entry-per-call approach. On worker
     failure, keeps the previous summary unchanged (the only sensible
     fallback here — there's no mechanical equivalent for "re-synthesize
-    everything," unlike compress_tool_result's per-call fallback)."""
+    everything," unlike compress_tool_result's per-call fallback).
+
+    Grounds the re-synthesis against fact_extraction's mechanically-verified
+    class/function names when the result looks like code, instead of
+    letting the model paraphrase from memory alone — see
+    GROUNDING_BLOCK_TEMPLATE for why."""
+    facts = fact_extraction.extract_code_facts(result_content)
+    if facts:
+        print(f"📌 [grounding] {facts}")
+    grounding_block = GROUNDING_BLOCK_TEMPLATE.format(facts=facts) if facts else ""
     prompt = CONTEXT_SUMMARY_PROMPT.format(
         previous_summary=previous_summary or "(nothing yet — this is the first update)",
         tool_name=tool_name, arguments=arguments, result_content=result_content,
+        grounding_block=grounding_block,
     )
     summary, error = _call_worker(prompt)
     if summary is not None:
@@ -137,6 +166,7 @@ def _self_test() -> bool:
     ctx_prompt_first = CONTEXT_SUMMARY_PROMPT.format(
         previous_summary="(nothing yet — this is the first update)",
         tool_name="read_file", arguments={"path": "a.py"}, result_content="def f(): pass",
+        grounding_block="",
     )
     assert "nothing yet" in ctx_prompt_first
     assert "def f(): pass" in ctx_prompt_first
@@ -144,9 +174,21 @@ def _self_test() -> bool:
     ctx_prompt_update = CONTEXT_SUMMARY_PROMPT.format(
         previous_summary="Explored a.py, found function f().",
         tool_name="read_file", arguments={"path": "b.py"}, result_content="def g(): pass",
+        grounding_block="",
     )
     assert "Explored a.py, found function f()." in ctx_prompt_update
     assert "def g(): pass" in ctx_prompt_update
+
+    # Grounding block: real facts must actually appear in the built prompt,
+    # not just be extracted and discarded.
+    real_facts = fact_extraction.extract_code_facts("class DagumDistribution(SingleContinuousDistribution):\n    def pdf(self, x):\n        pass\n")
+    grounded_prompt = CONTEXT_SUMMARY_PROMPT.format(
+        previous_summary="", tool_name="read_file", arguments={"path": "c.py"},
+        result_content="class DagumDistribution(SingleContinuousDistribution):\n    def pdf(self, x):\n        pass\n",
+        grounding_block=GROUNDING_BLOCK_TEMPLATE.format(facts=real_facts),
+    )
+    assert "VERIFIED facts" in grounded_prompt
+    assert "DagumDistribution" in grounded_prompt
 
     return True
 
