@@ -131,6 +131,7 @@ finish_task.
                     )
                 else:
                     entry = sidecar.summarize_call(call.function.name, call.function.arguments, tmsg["content"])
+                print(f"🗒️  [{len(sidecar_log) + 1}] {entry}")
                 sidecar_log.append(entry)
             # Rebuilt fresh every iteration from the immutable base prompt,
             # not appended to in place — keeps this idempotent regardless of
