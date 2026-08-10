@@ -85,11 +85,30 @@ finish_task.
     for iteration in range(1, iteration_budget + 1):
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
+        # The summary is appended fresh here, for this call only — never
+        # baked into `messages` itself. `messages` stays 100% append-only
+        # and byte-stable across calls, so Ollama's prefix cache gets full
+        # reuse on it; only this trailing block (small) plus whatever's
+        # genuinely new this turn needs fresh processing. Putting a
+        # genuinely-reworded summary in messages[0] instead (tried first)
+        # invalidates the cache for the ENTIRE prompt on every call, since
+        # cache matching requires an unbroken identical prefix from
+        # position 0 — confirmed live: prompt-eval time grew from ~2s to
+        # 87s over 15 iterations before this fix.
+        if context_summary_enabled and context_summary:
+            messages_for_call = messages + [{
+                "role": "system",
+                "content": "## Running summary (current state — replaces any earlier version, not a log)\n"
+                            + context_summary,
+            }]
+        else:
+            messages_for_call = messages
+
         response = None
         last_error = None
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
             try:
-                response = chat(model=MODEL, messages=messages, tools=tools, think=False,
+                response = chat(model=MODEL, messages=messages_for_call, tools=tools, think=False,
                                  options={"num_ctx": NUM_CTX})
                 break
             except Exception as e:
@@ -131,16 +150,14 @@ finish_task.
             # several "explored crv_types.py" notes into one) instead of
             # just accumulating independent per-call entries the way the
             # sidecar_enabled branch below does. See worker.summarize_context.
+            # Injected as a trailing message for the NEXT call (top of the
+            # loop), not written into `messages` itself — see the comment
+            # there for why.
             for call, tmsg in zip(msg.tool_calls, tool_messages):
                 context_summary = worker.summarize_context(
                     context_summary, call.function.name, call.function.arguments, tmsg["content"]
                 )
             print(f"🗒️  [summary updated] {context_summary}")
-            messages[0]["content"] = (
-                system_prompt
-                + "\n\n## Running summary (replaced after each tool call — this is the current "
-                  "state, not a log of past entries)\n" + context_summary
-            )
         elif sidecar_enabled:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
                 if worker_enabled:
