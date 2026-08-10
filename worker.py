@@ -44,14 +44,36 @@ Result:
 
 One-sentence summary:"""
 
+# Different shape from COMPRESSION_PROMPT: that one compresses ONE call in
+# isolation, appended to a growing list (sidecar.render_sidecar). This one
+# re-synthesizes a SINGLE holistic summary each time — given the previous
+# summary plus what just happened, produce an updated summary that REPLACES
+# it, not a new entry alongside it. Lets the worker deduplicate/reorganize
+# across calls (e.g. collapse five separate "explored crv_types.py" notes
+# into one), which a pure append-only list can never do.
+CONTEXT_SUMMARY_PROMPT = """You are maintaining a running summary of an ongoing coding task, \
+updated after each tool call. Given the previous summary and what just happened, produce an \
+UPDATED summary that replaces it entirely.
 
-def compress_tool_result(tool_name: str, arguments: dict, result_content: str) -> str:
-    """Ask the worker model for a one-sentence semantic summary of a tool
-    call's result. Falls back to sidecar.summarize_call's mechanical
-    summary on any worker failure."""
-    prompt = COMPRESSION_PROMPT.format(
-        tool_name=tool_name, arguments=arguments, result_content=result_content
-    )
+Be concise — a short dense paragraph, not a list. Keep facts that are still relevant (files/ \
+classes/functions found, what's done, what's still needed); drop or merge anything superseded \
+or no longer useful. Do not just append the new information — actually integrate it.
+
+Previous summary:
+{previous_summary}
+
+What just happened (tool: {tool_name}, args: {arguments}):
+{result_content}
+
+Updated summary:"""
+
+
+def _call_worker(prompt: str):
+    """Shared retry loop for a single worker prompt. Returns the stripped
+    response text, or None (with the last error printed to stderr) if every
+    attempt failed — callers decide their own fallback, since "keep the old
+    summary" and "fall back to a mechanical per-call note" are different
+    recoveries for different callers."""
     last_error = None
     for attempt in range(1, WORKER_TIMEOUT_RETRIES + 1):
         try:
@@ -61,15 +83,45 @@ def compress_tool_result(tool_name: str, arguments: dict, result_content: str) -
                 think=False,
                 options={"num_ctx": WORKER_NUM_CTX},
             )
-            summary = (response.message.content or "").strip()
-            if summary:
-                return summary
+            text = (response.message.content or "").strip()
+            if text:
+                return text, None
             last_error = "worker returned empty content"
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
+    return None, last_error
+
+
+def compress_tool_result(tool_name: str, arguments: dict, result_content: str) -> str:
+    """Ask the worker model for a one-sentence semantic summary of a tool
+    call's result. Falls back to sidecar.summarize_call's mechanical
+    summary on any worker failure."""
+    prompt = COMPRESSION_PROMPT.format(
+        tool_name=tool_name, arguments=arguments, result_content=result_content
+    )
+    summary, error = _call_worker(prompt)
+    if summary is not None:
+        return summary
 
     fallback = sidecar.summarize_call(tool_name, arguments, result_content)
-    return f"{fallback} [worker compression failed: {last_error}]"
+    return f"{fallback} [worker compression failed: {error}]"
+
+
+def summarize_context(previous_summary: str, tool_name: str, arguments: dict, result_content: str) -> str:
+    """Ask the worker model to produce an UPDATED holistic summary given the
+    previous one plus what just happened — replaces the whole thing, rather
+    than compress_tool_result's one-entry-per-call approach. On worker
+    failure, keeps the previous summary unchanged (the only sensible
+    fallback here — there's no mechanical equivalent for "re-synthesize
+    everything," unlike compress_tool_result's per-call fallback)."""
+    prompt = CONTEXT_SUMMARY_PROMPT.format(
+        previous_summary=previous_summary or "(nothing yet — this is the first update)",
+        tool_name=tool_name, arguments=arguments, result_content=result_content,
+    )
+    summary, error = _call_worker(prompt)
+    if summary is not None:
+        return summary
+    return previous_summary + f"\n[note: summary update failed this turn — {error}]"
 
 
 def _self_test() -> bool:
@@ -81,11 +133,26 @@ def _self_test() -> bool:
     )
     assert "read_file" in prompt
     assert "def f(): pass" in prompt
+
+    ctx_prompt_first = CONTEXT_SUMMARY_PROMPT.format(
+        previous_summary="(nothing yet — this is the first update)",
+        tool_name="read_file", arguments={"path": "a.py"}, result_content="def f(): pass",
+    )
+    assert "nothing yet" in ctx_prompt_first
+    assert "def f(): pass" in ctx_prompt_first
+
+    ctx_prompt_update = CONTEXT_SUMMARY_PROMPT.format(
+        previous_summary="Explored a.py, found function f().",
+        tool_name="read_file", arguments={"path": "b.py"}, result_content="def g(): pass",
+    )
+    assert "Explored a.py, found function f()." in ctx_prompt_update
+    assert "def g(): pass" in ctx_prompt_update
+
     return True
 
 
 if __name__ == "__main__":
     import sys
     ok = _self_test()
-    print("OK   worker.compress_tool_result (prompt construction only)" if ok else "FAILED")
+    print("OK   worker.compress_tool_result/summarize_context (prompt construction only)" if ok else "FAILED")
     sys.exit(0 if ok else 1)

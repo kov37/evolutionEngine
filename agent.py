@@ -43,11 +43,13 @@ NUM_CTX = 32768
 MAX_CHAT_RETRIES = 20
 
 
-def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False, worker_enabled=False):
+def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False, worker_enabled=False,
+              context_summary_enabled=False):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
     tool_map = {fn.__name__: fn for fn in tools}
     sidecar_log = []
+    context_summary = ""
 
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -100,6 +102,11 @@ finish_task.
                   f"crashing. Last error: {last_error}")
             return False
 
+        prompt_eval_s = (response.prompt_eval_duration or 0) / 1e9
+        eval_s = (response.eval_duration or 0) / 1e9
+        print(f"📏 prompt_tokens={response.prompt_eval_count} ({prompt_eval_s:.1f}s) "
+              f"output_tokens={response.eval_count} ({eval_s:.1f}s)")
+
         msg = response.message
         messages.append(msg)
 
@@ -117,7 +124,24 @@ finish_task.
         tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map)
         messages.extend(tool_messages)
 
-        if sidecar_enabled:
+        if context_summary_enabled:
+            # Whole-context re-synthesis: ONE holistic summary, REPLACED
+            # each call rather than appended to a growing list — lets the
+            # worker deduplicate/reorganize across calls (e.g. collapse
+            # several "explored crv_types.py" notes into one) instead of
+            # just accumulating independent per-call entries the way the
+            # sidecar_enabled branch below does. See worker.summarize_context.
+            for call, tmsg in zip(msg.tool_calls, tool_messages):
+                context_summary = worker.summarize_context(
+                    context_summary, call.function.name, call.function.arguments, tmsg["content"]
+                )
+            print(f"🗒️  [summary updated] {context_summary}")
+            messages[0]["content"] = (
+                system_prompt
+                + "\n\n## Running summary (replaced after each tool call — this is the current "
+                  "state, not a log of past entries)\n" + context_summary
+            )
+        elif sidecar_enabled:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
                 if worker_enabled:
                     # Orchestrator-worker pattern: qwen3.5:9b compresses the
@@ -165,10 +189,17 @@ if __name__ == "__main__":
         help="Requires --sidecar. Use qwen3.5:9b (see worker.py) to compress each tool result into a "
              "real semantic summary for the sidecar, instead of the mechanical name+args+length line.",
     )
+    parser.add_argument(
+        "--context-summary", action="store_true",
+        help="Alternative to --sidecar/--worker's append-only list: qwen3.5:9b maintains ONE holistic "
+             "summary, re-synthesized (not appended to) after every tool call. See worker.summarize_context.",
+    )
     args = parser.parse_args()
 
     if args.worker and not args.sidecar:
         raise SystemExit("❌ --worker requires --sidecar (there's nowhere to put the compressed summary otherwise).")
+    if args.context_summary and (args.sidecar or args.worker):
+        raise SystemExit("❌ --context-summary replaces --sidecar/--worker, not combined with them — pick one mode.")
 
     if args.project:
         try:
@@ -185,7 +216,10 @@ if __name__ == "__main__":
 
     print(f"📁 Operating in: {get_root()}")
     print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
-    if args.sidecar:
+    if args.context_summary:
+        print("🗒️  Whole-context summary mode: ENABLED (qwen3.5:9b re-synthesizes one holistic summary)")
+    elif args.sidecar:
         print(f"🗒️  Automated activity-log sidecar: ENABLED{' + qwen3.5:9b worker compression' if args.worker else ' (mechanical)'}")
 
-    run_agent(task, tools, sidecar_enabled=args.sidecar, worker_enabled=args.worker)
+    run_agent(task, tools, sidecar_enabled=args.sidecar, worker_enabled=args.worker,
+              context_summary_enabled=args.context_summary)
