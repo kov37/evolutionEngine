@@ -13,6 +13,7 @@ import time
 from ollama import chat
 
 import kernel.io_tools as io_tools
+import sidecar
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, finish_task
 from kernel.sandbox import get_root, set_root
@@ -37,10 +38,11 @@ NUM_CTX = 65536
 MAX_CHAT_RETRIES = 20
 
 
-def run_agent(task, tools, iteration_budget=ITERATION_BUDGET):
+def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False):
     TASK_STATE["done"] = False
     TASK_STATE["summary"] = None
     tool_map = {fn.__name__: fn for fn in tools}
+    sidecar_log = []
 
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -107,7 +109,19 @@ finish_task.
             })
             continue
 
-        messages.extend(dispatch_tool_calls(msg.tool_calls, tool_map))
+        tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map)
+        messages.extend(tool_messages)
+
+        if sidecar_enabled:
+            for call, tmsg in zip(msg.tool_calls, tool_messages):
+                sidecar_log.append(
+                    sidecar.summarize_call(call.function.name, call.function.arguments, tmsg["content"])
+                )
+            # Rebuilt fresh every iteration from the immutable base prompt,
+            # not appended to in place — keeps this idempotent regardless of
+            # how many times the loop runs, and keeps the sidecar pinned at
+            # the very top of the prompt (messages[0]) every single call.
+            messages[0]["content"] = system_prompt + sidecar.render_sidecar(sidecar_log)
 
         if TASK_STATE["done"]:
             print(f"\n✅ DONE: {TASK_STATE['summary']}")
@@ -126,6 +140,10 @@ if __name__ == "__main__":
         "--project", default=None,
         help="Directory to confine the agent to. Defaults to evolutionEngine/workspace.",
     )
+    parser.add_argument(
+        "--sidecar", action="store_true",
+        help="Enable the automated activity-log sidecar (see sidecar.py) pinned to the system prompt.",
+    )
     args = parser.parse_args()
 
     if args.project:
@@ -143,5 +161,7 @@ if __name__ == "__main__":
 
     print(f"📁 Operating in: {get_root()}")
     print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")
+    if args.sidecar:
+        print("🗒️  Automated activity-log sidecar: ENABLED")
 
-    run_agent(task, tools)
+    run_agent(task, tools, sidecar_enabled=args.sidecar)
