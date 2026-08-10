@@ -14,8 +14,11 @@ import shutil
 from pathlib import Path
 
 
-def grep_dir(pattern: str, path: str = ".") -> list[tuple[str, int, str]]:
-    """Recursively search files under *path* for *pattern*.
+def grep_dir(pattern: str, path: str = "."):
+    """Recursively search files under *path* for *pattern*. If *path* is a
+    single file rather than a directory, searches just that file instead of
+    erroring — the common case of pointing grep_dir at one known file works
+    the way you'd expect, not an empty result with no explanation.
 
     Returns a list of ``(relative_path, 1-indexed_line_number, line_text)``
     tuples.  At most 200 matches are returned; if more exist the last entry
@@ -26,19 +29,36 @@ def grep_dir(pattern: str, path: str = ".") -> list[tuple[str, int, str]]:
     pattern : str
         Substring to search for in each file's lines.
     path : str
-        Root directory to walk (default ``"."``).
+        Directory to walk, or a single file to search directly (default
+        ``"."``).
 
     Returns
     -------
     list[tuple[str, int, str]]
         Match tuples: (relative_path_with_forward_slashes, line_number,
-        stripped_line_text).
+        stripped_line_text). On error, a string starting with "ERROR:"
+        instead.
     """
+    original_path = path
     path = os.path.abspath(path)
+
+    if not os.path.exists(path):
+        return f"ERROR: '{original_path}' does not exist."
+
     results: list[tuple[str, int, str]] = []
     omit_notice_index = None  # index to overwrite if we hit the cap
 
-    for dirpath, dirnames, filenames in os.walk(path):
+    if os.path.isfile(path):
+        # A single file, not a directory: search just this file. Mimic
+        # os.walk()'s per-directory tuple shape so the loop below is
+        # unchanged either way.
+        walk_iter = [(os.path.dirname(path), [], [os.path.basename(path)])]
+        base_for_relpath = os.path.dirname(path)
+    else:
+        walk_iter = os.walk(path)
+        base_for_relpath = path
+
+    for dirpath, dirnames, filenames in walk_iter:
         # Skip .git directories entirely (in-place mutation of dirnames).
         dirnames[:] = [
             d for d in dirnames if d != ".git"
@@ -55,7 +75,7 @@ def grep_dir(pattern: str, path: str = ".") -> list[tuple[str, int, str]]:
                 continue
 
             # Compute relative path using forward slashes.
-            rel_path = os.path.relpath(fpath, path).replace(os.sep, "/")
+            rel_path = os.path.relpath(fpath, base_for_relpath).replace(os.sep, "/")
 
             for lineno_0, line in enumerate(lines, start=1):
                 if pattern in line:
@@ -162,6 +182,28 @@ def _self_test() -> bool:
         no_match = grep_dir("XYZNONEXISTENT_abc123", path=tmp_root)
         assert no_match == [], (
             f"Expected [] for non-existent pattern but got {no_match}"
+        )
+
+        # A single FILE path (not a directory) — must search that file
+        # directly instead of silently returning []. This is the exact
+        # gap found live against sympy-13878: the model pointed grep_dir at
+        # one known file and got an unexplained empty result 9 times in a
+        # row before giving up and switching tools.
+        file_matches = grep_dir(marker, path=f1_path)
+        assert len(file_matches) == 1, (
+            f"Expected exactly 1 match searching a single file but got {file_matches}"
+        )
+        assert file_matches[0][0] == "a.txt", (
+            f"Expected relative path 'a.txt' but got {file_matches[0][0]!r}"
+        )
+        assert file_matches[0][1] == 6, (
+            f"Expected line 6 but got {file_matches[0][1]}"
+        )
+
+        # A path that doesn't exist at all → clear error, not silent [].
+        missing = grep_dir(marker, path=os.path.join(tmp_root, "does_not_exist"))
+        assert isinstance(missing, str) and missing.startswith("ERROR:"), (
+            f"Expected an ERROR string for a nonexistent path but got {missing!r}"
         )
 
     finally:
