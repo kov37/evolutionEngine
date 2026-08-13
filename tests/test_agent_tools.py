@@ -69,6 +69,25 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(metrics["events"], 1)
         self.assertEqual(metrics["worker_failures"], 1)
 
+    def test_context_worker_waits_for_repeated_error_signal(self):
+        calls = []
+
+        def fake_chat(**kwargs):
+            calls.append(kwargs)
+            return _FakeResponse('{"phase":"repair","new_facts":[],"relevant_facts":[],'
+                                 '"duplicate_action":true,"stagnating":true,'
+                                 '"recommended_action":"patch_file","confidence":0.9}')
+
+        context = NoveltyContext(chat_fn=fake_chat, worker_interval=100)
+        context.observe(1, "list_dir", {"path": "missing"}, "ERROR: missing")
+        context.collect(wait=False)
+        self.assertEqual(calls, [])
+        context.observe(2, "list_dir", {"path": "missing"}, "ERROR: missing")
+        judgment = context.collect(wait=True)
+        context.close()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(judgment.source, "4b")
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])

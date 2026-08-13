@@ -214,8 +214,18 @@ class NoveltyContext:
         if completed:
             self.collect(wait=False)
         with self._lock:
+            recent = self.events[-4:]
+            repeated_error = (
+                result.startswith(("ERROR", "REJECTED"))
+                and sum(e.result.startswith(("ERROR", "REJECTED")) for e in recent) >= 2
+            )
+            repeated_action = sum(e.result_fingerprint == event.result_fingerprint for e in recent) >= 2
+            validation_failure = validation and result.startswith(("ERROR", "REJECTED"))
+            # The worker is reserved for evidence that local deterministic
+            # signals cannot resolve cheaply. A first error or routine edit
+            # should not start competing Ollama inference beside the 35B call.
             should_process = (
-                mutation or validation or result.startswith(("ERROR", "REJECTED"))
+                repeated_error or repeated_action or validation_failure
                 or len(self.events) % self.worker_interval == 0
             )
             if not should_process:
