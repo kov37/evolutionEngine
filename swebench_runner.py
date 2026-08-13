@@ -102,7 +102,7 @@ def _run_tests(project: Path, test_patch: str) -> dict:
 
 
 def run(mode: str, iterations: int, primary_model: str | None = None,
-        worker_model: str | None = None) -> dict:
+        worker_model: str | None = None, action_critic: bool = False) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -126,8 +126,11 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         # the structured layer supplies model-independent anti-stagnation
         # intervention and durable file/fact state.
         command.insert(3, "--structured-summary")
+        if action_critic:
+            command.insert(4, "--novelty-action-critic")
         if worker_model:
-            command[4:4] = ["--novelty-worker-model", worker_model]
+            insert_at = 5 if action_critic else 4
+            command[insert_at:insert_at] = ["--novelty-worker-model", worker_model]
     command.extend([
         "--distribution-target-file", "sympy/stats/crv_types.py",
         "--distribution-names",
@@ -144,6 +147,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     report = {
         "run_id": run_id, "mode": mode, "primary_model": primary_model,
         "worker_model": worker_model, "base_commit": BASE_COMMIT,
+        "action_critic": action_critic,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -165,5 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--iterations", type=int, default=250)
     parser.add_argument("--primary-model", default=None)
     parser.add_argument("--worker-model", default=None)
+    parser.add_argument("--action-critic", action="store_true",
+                        help="Enable the 4B worker's bounded next-action directive in novelty mode.")
     args = parser.parse_args()
-    run(args.mode, args.iterations, args.primary_model, args.worker_model)
+    run(args.mode, args.iterations, args.primary_model, args.worker_model, args.action_critic)

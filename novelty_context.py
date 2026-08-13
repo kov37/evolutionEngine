@@ -63,6 +63,8 @@ class WorkerJudgment:
     duplicate_action: bool = False
     stagnating: bool = False
     recommended_action: str = "inspect"
+    blocker: str = ""
+    target: str = ""
     confidence: float = 0.0
     source: str = "fallback"
     latency_ms: float = 0.0
@@ -75,6 +77,8 @@ class WorkerJudgment:
             "duplicate_action": self.duplicate_action,
             "stagnating": self.stagnating,
             "recommended_action": self.recommended_action,
+            "blocker": self.blocker[:240],
+            "target": self.target[:240],
             "confidence": round(self.confidence, 2),
             "source": self.source,
         }
@@ -118,6 +122,7 @@ def _local_judgment(events: list[ContextEvent], event: ContextEvent) -> WorkerJu
         duplicate_action=duplicate,
         stagnating=repeated or (no_mutation and len(recent) >= 8),
         recommended_action=action,
+        target=str(event.arguments.get("path") or event.arguments.get("file") or "")[:240],
         confidence=0.55 if not duplicate else 0.8,
     )
 
@@ -127,7 +132,7 @@ def _prompt(state: str, event: ContextEvent) -> str:
 Allowed phase values: orient, localize, hypothesize, mutate, verify, repair.
 Allowed recommended_action values: inspect, patch_file, validate, finish_or_repair.
 Use only facts present below. Keep every list to at most 3 short strings.
-Schema: {{"phase":str,"new_facts":[str],"relevant_facts":[str],"duplicate_action":bool,"stagnating":bool,"recommended_action":str,"confidence":number}}
+Schema: {{"phase":str,"new_facts":[str],"relevant_facts":[str],"duplicate_action":bool,"stagnating":bool,"recommended_action":str,"blocker":str,"target":str,"confidence":number}}
 
 Current state:
 {state[:MAX_STATE_CHARS]}
@@ -171,6 +176,8 @@ def _parse_judgment(raw: str, fallback: WorkerJudgment) -> WorkerJudgment:
             duplicate_action=bool(data.get("duplicate_action", fallback.duplicate_action)),
             stagnating=bool(data.get("stagnating", fallback.stagnating)),
             recommended_action=action,
+            blocker=str(data.get("blocker", fallback.blocker))[:240],
+            target=str(data.get("target", fallback.target))[:240],
             confidence=max(0.0, min(1.0, float(data.get("confidence", fallback.confidence)))),
             source="4b",
         )
@@ -343,7 +350,7 @@ class NoveltyContext:
                 self._future = None
         return judgment
 
-    def render_for_model(self) -> str:
+    def render_for_model(self, action_critic: bool = False) -> str:
         judgment = self.collect(wait=False)
         with self._lock:
             rendered = "## Context manager state\n" + judgment.render()
@@ -364,6 +371,18 @@ class NoveltyContext:
                     "\nContext worker signal: repeated or non-progress actions detected. "
                     "Use the evidence already gathered and take the recommended concrete action "
                     "before performing another routine read."
+                )
+            if action_critic and (
+                judgment.stagnating or judgment.duplicate_action
+                or (judgment.recommended_action != "inspect" and judgment.confidence >= 0.75)
+            ):
+                rendered += (
+                    "\n## Action critic directive (advisory)\n"
+                    f"The context worker recommends exactly one next action: {judgment.recommended_action}. "
+                    f"Target: {judgment.target or 'not specified'}. "
+                    f"Blocker: {judgment.blocker or 'not specified'}. "
+                    "Use this recommendation if it matches the repository evidence; do not perform broad "
+                    "exploration before addressing it."
                 )
             return rendered + f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
                    f"busy drops: {self.worker_busy_drops}."

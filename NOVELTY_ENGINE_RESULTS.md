@@ -30,6 +30,19 @@ Primary model: `qwen3.6:35b-mlx`. Context worker: `qwen3.5:4b`.
 The default novelty path is opportunistic: the 4B worker is invoked after
 context pressure, failed validation, repeated actions, or a meaningful event,
 not on every routine read. The baseline loop remains available for comparison.
+
+## Action-critic experiment
+
+The next controlled experiment is enabled with `--novelty-action-critic`. The
+4B worker still cannot execute tools; it may only add one bounded advisory
+directive when its judgment is high-confidence or detects stagnation. The
+directive contains a recommended action, blocker, and target. This separates
+"worker provides context" from "worker improves the next action" and makes the
+effect measurable in paired baseline/novelty runs.
+
+Required comparison metrics are verified completion, first successful
+mutation, validation-after-mutation, recovery after an injected tool error,
+redundant action ratio, blocked-necessary-action rate, and worker latency.
 The hard action gate is retained as an opt-in ablation because the live repair
 experiment showed that it can prevent a necessary targeted reread.
 

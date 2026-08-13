@@ -26,9 +26,10 @@ class KernelToolTests(unittest.TestCase):
         result = _parse_judgment(
             '{"phase":"mutate","new_facts":["x"],"relevant_facts":[],'
             '"duplicate_action":false,"stagnating":false,"recommended_action":"patch_file",'
-            '"confidence":0.91}', fallback)
+            '"blocker":"needs edit","target":"a.py","confidence":0.91}', fallback)
         self.assertEqual(result.phase, "mutate")
         self.assertEqual(result.recommended_action, "patch_file")
+        self.assertEqual(result.target, "a.py")
         self.assertEqual(result.source, "4b")
         self.assertEqual(_parse_judgment("not json", fallback).source, "fallback")
 
@@ -97,6 +98,20 @@ class KernelToolTests(unittest.TestCase):
         context.close()
         self.assertIn("repeated or non-progress actions detected", rendered)
         self.assertIn("patch_file", rendered)
+
+    def test_action_critic_emits_concrete_directive_only_when_enabled(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"))
+        context.last_judgment = WorkerJudgment(
+            phase="mutate", stagnating=True, recommended_action="patch_file",
+            blocker="no mutation yet", target="src/a.py", source="4b", confidence=0.9,
+        )
+        plain = context.render_for_model()
+        critic = context.render_for_model(action_critic=True)
+        context.close()
+        self.assertNotIn("Action critic directive", plain)
+        self.assertIn("Action critic directive", critic)
+        self.assertIn("patch_file", critic)
+        self.assertIn("src/a.py", critic)
 
     def test_repeated_failure_gets_deterministic_recovery_signal(self):
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)

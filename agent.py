@@ -162,7 +162,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
               context_summary_enabled=False, structured_summary_enabled=False, working_state_enabled=False,
               task_type="code_change", think=False, status_path=None, distribution_target_file=None,
               distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b",
-              novelty_action_gate=False):
+              novelty_action_gate=False, novelty_action_critic=False):
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
@@ -337,7 +337,8 @@ You have this focused toolbelt: {offered_tool_names}.
 
         if novelty_context is not None:
             messages_for_call = messages_for_call + [{
-                "role": "system", "content": novelty_context.render_for_model(),
+                "role": "system", "content": novelty_context.render_for_model(
+                    action_critic=novelty_action_critic),
             }]
 
         # The graduated progress governor — evaluated using the ledger's
@@ -814,6 +815,10 @@ if __name__ == "__main__":
         help="Opt in to restricting observation tools after a stagnant novelty window; off by default.",
     )
     parser.add_argument(
+        "--novelty-action-critic", action="store_true",
+        help="Ask the 4B worker for one concrete next-action recommendation on stalled/error turns; advisory only.",
+    )
+    parser.add_argument(
         "--thinking", action="store_true",
         help="Enable the orchestrator model's extended-thinking/reasoning mode (ollama.chat(..., think=True)) "
              "for MODEL's own calls only. Previously hardcoded to think=False everywhere in this file — no "
@@ -891,4 +896,4 @@ if __name__ == "__main__":
               status_path=args.status_file, distribution_target_file=args.distribution_target_file,
               distribution_names=args.distribution_names.split(",") if args.distribution_names else None,
               novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model,
-              novelty_action_gate=args.novelty_action_gate)
+              novelty_action_gate=args.novelty_action_gate, novelty_action_critic=args.novelty_action_critic)
