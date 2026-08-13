@@ -12,7 +12,7 @@ import json
 import signal
 import time
 
-from ollama import chat
+from ollama import Client, chat
 
 import action_governor
 import adaptive_budget
@@ -48,6 +48,11 @@ def _chat_with_timeout(*, timeout_seconds, **kwargs):
     if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
         return chat(**kwargs)
 
+    # The Ollama Python client uses an httpx transport.  Its transport-level
+    # timeout is the reliable boundary; a Python alarm alone cannot interrupt
+    # a blocking C/network read (observed in the live action-critic run).
+    client = Client(timeout=timeout_seconds)
+
     def _alarm(_signum, _frame):
         raise ChatTimeoutError(f"acting-model chat exceeded {timeout_seconds}s")
 
@@ -55,7 +60,7 @@ def _chat_with_timeout(*, timeout_seconds, **kwargs):
     signal.signal(signal.SIGALRM, _alarm)
     signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
     try:
-        return chat(**kwargs)
+        return client.chat(**kwargs)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
