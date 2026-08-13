@@ -8,6 +8,28 @@ task is SymPy SWE-bench issue `sympy__sympy-13878`; the final result must be
 independently verified with the real tests, not inferred from the model's
 completion message.
 
+## General agentic benchmark
+
+SymPy remains a long-horizon software-engineering stress test, but it is not a
+good sole measure of a general context engine. `agentic_benchmark.py` provides
+fresh isolated workspaces and mechanical graders for four task families:
+
+- `bug_repair`: diagnose and repair an existing implementation;
+- `feature`: add a function without mutating caller-owned data;
+- `data_report`: use a standard-library data pipeline to create an artifact;
+- `recovery`: inspect, test, recover from an incorrect lead, and verify.
+
+Run paired conditions with:
+
+```bash
+python3 agentic_benchmark.py --task all --condition both --iterations 20
+```
+
+Add `--action-critic` to test the 4B's next-action recommendation and
+`--action-gate` to test bounded enforcement. Every condition receives a fresh
+workspace, and graders run independently after the agent exits. Results are
+stored in `state/benchmark/agentic/results.jsonl`.
+
 The experimental project starts from commit `105b565` and lives in the
 separate `novelty-context-engine` worktree. The original evolveEngine checkout
 is the historical reference and must remain untouched.
@@ -193,4 +215,3 @@ verification, not on self-reported model state.
 - [SymPy #13878 task specification](https://www.tbench.ai/registry/swebench-verified/head/sympy__sympy-13878)
 - [Quality Diversity: A New Frontier for Evolutionary Computation](https://www.frontiersin.org/journals/robotics-and-ai/articles/10.3389/frobt.2016.00040/full)
 - [SWE-bench Verified background](https://openai.com/index/introducing-swe-bench-verified/)
-
