@@ -338,6 +338,18 @@ class NoveltyContext:
         judgment = self.collect(wait=False)
         with self._lock:
             rendered = "## Context manager state\n" + judgment.render()
+            if len(self.events) >= 2:
+                previous, latest = self.events[-2:]
+                same_failure = (
+                    previous.result_fingerprint == latest.result_fingerprint
+                    and latest.result.startswith(("ERROR", "REJECTED"))
+                )
+                if same_failure:
+                    rendered += (
+                        "\nDeterministic recovery: the last two tool calls produced the same failure. "
+                        "Do not repeat that call or argument. Change strategy—use list_workspace, "
+                        "find_files, or read_file to establish the correct relative path before retrying."
+                    )
             if judgment.stagnating:
                 rendered += (
                     "\nContext worker signal: repeated or non-progress actions detected. "

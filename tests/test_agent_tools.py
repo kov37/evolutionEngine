@@ -98,6 +98,14 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("repeated or non-progress actions detected", rendered)
         self.assertIn("patch_file", rendered)
 
+    def test_repeated_failure_gets_deterministic_recovery_signal(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
+        context.observe(1, "list_dir", {"path": "sy"}, "ERROR: missing")
+        context.observe(2, "list_dir", {"path": "sy"}, "ERROR: missing")
+        rendered = context.render_for_model()
+        context.close()
+        self.assertIn("Do not repeat that call or argument", rendered)
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])
