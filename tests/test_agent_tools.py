@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import _completion_ready
+from agent import _completion_ready, _intervention_messages
 from dispatch import _format_result, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -21,6 +21,16 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_intervention_context_keeps_foundation_and_recent_tail(self):
+        messages = [{"role": "system", "content": "foundation"},
+                    {"role": "user", "content": "task"}]
+        messages.extend({"role": "tool", "content": f"turn-{i}"} for i in range(20))
+        compacted = _intervention_messages(messages, tail=4)
+        self.assertEqual(compacted[0]["content"], "foundation")
+        self.assertEqual(compacted[1]["content"], "task")
+        self.assertIn("intervention context reduction", compacted[2]["content"])
+        self.assertEqual([m["content"] for m in compacted[-4:]], ["turn-16", "turn-17", "turn-18", "turn-19"])
+
     def test_context_worker_parses_and_bounds_judgment(self):
         fallback = WorkerJudgment()
         result = _parse_judgment(

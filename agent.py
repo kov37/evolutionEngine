@@ -96,6 +96,27 @@ KEEP_RECENT_RAW_RESULTS = 5
 # for the same cache-invalidation reason.
 KEEP_RECENT_RAW_CHARS = 20_000
 
+# At an intervention point, a short recent tail is more useful than making
+# the acting model reprocess the entire exploratory transcript. The durable
+# structured state and the novelty ledger remain available to the harness;
+# this only changes what the 35B sees for that one action-selection turn.
+INTERVENTION_TAIL_MESSAGES = 12
+
+
+def _intervention_messages(messages, tail=INTERVENTION_TAIL_MESSAGES):
+    """Keep the foundation and latest tool trajectory for an action turn."""
+    if len(messages) <= tail + 2:
+        return list(messages)
+    foundation = list(messages[:2])
+    recent = list(messages[-tail:])
+    return foundation + [
+        {"role": "system", "content": (
+            "[intervention context reduction] Earlier raw turns are omitted from this action-selection "
+            "turn. Use the structured state, novelty critic, and recent tool results below. Take one "
+            "concrete next action; do not restart broad exploration."
+        )},
+    ] + recent
+
 # How many prunable entries must accumulate before a prune batch actually
 # runs. Found live: with this at "prune immediately, one at a time" (the
 # original design), pruning fired on nearly every single iteration once
@@ -366,6 +387,8 @@ You have this focused toolbelt: {offered_tool_names}.
             messages_for_call = messages
 
         if novelty_context is not None:
+            if novelty_action_critic and novelty_context.requires_progress():
+                messages_for_call = _intervention_messages(messages_for_call)
             messages_for_call = messages_for_call + [{
                 "role": "system", "content": novelty_context.render_for_model(
                     action_critic=novelty_action_critic),
