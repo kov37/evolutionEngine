@@ -453,7 +453,7 @@ You have this focused toolbelt: {offered_tool_names}.
             progress_tools = {"patch_file", "write_file", "run_tests", "run_command", "run_shell",
                               "finish_task", "recall"}
             if novelty_context.recovery_reads_allowed():
-                progress_tools.update({"read_file", "find_files"})
+                progress_tools.update({"read_file", "find_files", "search_file"})
             gated_names = {t.__name__ for t in tools_for_call} & progress_tools
             tools_for_call = [t for t in tools_for_call if t.__name__ in gated_names]
             messages_for_call = messages_for_call + [{
@@ -461,7 +461,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 "content": (
                     "[novelty context action gate] The recent context window contains no mutation or "
                     "validation. Broad exploration tools are temporarily unavailable. Use targeted "
-                    "read_file/find_files only to establish the exact file, then patch, validate, finish, "
+                    "read_file/find_files/search_file only to establish the exact file, then patch, validate, finish, "
                     "or recall exact prior text."
                 ),
             }]

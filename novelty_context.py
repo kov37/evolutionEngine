@@ -386,7 +386,7 @@ class NoveltyContext:
                     rendered += (
                         "\nDeterministic recovery: the last two tool calls produced the same failure. "
                         "Do not repeat that call or argument. Change strategy—use list_workspace, "
-                        "find_files, or read_file to establish the correct relative path before retrying."
+                        "find_files, search_file, or read_file to establish the correct relative path before retrying."
                     )
             if judgment.stagnating:
                 rendered += (
