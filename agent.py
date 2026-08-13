@@ -161,7 +161,8 @@ def _completion_ready(messages, task_type):
 def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False, worker_enabled=False,
               context_summary_enabled=False, structured_summary_enabled=False, working_state_enabled=False,
               task_type="code_change", think=False, status_path=None, distribution_target_file=None,
-              distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b"):
+              distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b",
+              novelty_action_gate=False):
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
@@ -394,7 +395,7 @@ You have this focused toolbelt: {offered_tool_names}.
                         "content": f"[progress governor — level {level}] {intervention_msg}{checkpoint_note}",
                     }]
 
-        if novelty_context is not None and novelty_context.requires_progress():
+        if novelty_action_gate and novelty_context is not None and novelty_context.requires_progress():
             progress_tools = {"patch_file", "write_file", "run_tests", "run_command", "run_shell",
                               "finish_task", "recall"}
             if novelty_context.recovery_reads_allowed():
@@ -809,6 +810,10 @@ if __name__ == "__main__":
         help="Ollama model used by --novelty-context (default: qwen3.5:4b).",
     )
     parser.add_argument(
+        "--novelty-action-gate", action="store_true",
+        help="Opt in to restricting observation tools after a stagnant novelty window; off by default.",
+    )
+    parser.add_argument(
         "--thinking", action="store_true",
         help="Enable the orchestrator model's extended-thinking/reasoning mode (ollama.chat(..., think=True)) "
              "for MODEL's own calls only. Previously hardcoded to think=False everywhere in this file — no "
@@ -885,4 +890,5 @@ if __name__ == "__main__":
               structured_summary_enabled=args.structured_summary, think=args.thinking,
               status_path=args.status_file, distribution_target_file=args.distribution_target_file,
               distribution_names=args.distribution_names.split(",") if args.distribution_names else None,
-              novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model)
+              novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model,
+              novelty_action_gate=args.novelty_action_gate)
