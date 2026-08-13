@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,6 +79,58 @@ def _metrics(output: str) -> dict:
 
 
 TASKS = {
+    "real_app": Task(
+        name="real_app",
+        prompt=(
+            "Create a real working local web app in this empty project. Build server.py using only "
+            "the Python standard library. It must start with `python3 server.py --port PORT`, serve "
+            "a useful Todo app at GET /, expose GET /health returning JSON with status=ok, support "
+            "POST /api/tasks with JSON {title: string} returning the created task as JSON, and support "
+            "GET /api/tasks returning all tasks as JSON. Keep data in memory, validate empty titles, "
+            "include a simple usable HTML interface, and test the app by starting it and making HTTP "
+            "requests before calling finish_task."
+        ),
+        setup={
+            "README.md": (
+                "# Todo app\n\n"
+                "Create a standard-library-only web app. The evaluator will run server.py.\n"
+            ),
+        },
+        grade=(
+            "import json, subprocess, sys, time, urllib.request\n"
+            "port = 18765\n"
+            "proc = subprocess.Popen([sys.executable, 'server.py', '--port', str(port)],\n"
+            "                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+            "base = f'http://127.0.0.1:{port}'\n"
+            "try:\n"
+            "    for _ in range(30):\n"
+            "        try:\n"
+            "            with urllib.request.urlopen(base + '/health', timeout=1) as r:\n"
+            "                health = json.loads(r.read())\n"
+            "            break\n"
+            "        except Exception:\n"
+            "            time.sleep(0.1)\n"
+            "    else:\n"
+            "        raise AssertionError('server did not start')\n"
+            "    assert health.get('status') == 'ok', health\n"
+            "    with urllib.request.urlopen(base + '/', timeout=2) as r:\n"
+            "        html = r.read().decode()\n"
+            "    assert '<html' in html.lower() and 'todo' in html.lower()\n"
+            "    req = urllib.request.Request(base + '/api/tasks', data=json.dumps({'title':'Ship it'}).encode(),\n"
+            "                                 headers={'Content-Type':'application/json'}, method='POST')\n"
+            "    with urllib.request.urlopen(req, timeout=2) as r:\n"
+            "        created = json.loads(r.read())\n"
+            "    assert created.get('title') == 'Ship it' and created.get('id')\n"
+            "    with urllib.request.urlopen(base + '/api/tasks', timeout=2) as r:\n"
+            "        tasks = json.loads(r.read())\n"
+            "    assert any(t.get('title') == 'Ship it' for t in tasks), tasks\n"
+            "finally:\n"
+            "    proc.terminate()\n"
+            "    try: proc.wait(timeout=3)\n"
+            "    except subprocess.TimeoutExpired: proc.kill()\n"
+        ),
+        budget=24,
+    ),
     "bug_repair": Task(
         name="bug_repair",
         prompt=(
