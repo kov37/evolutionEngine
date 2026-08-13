@@ -103,7 +103,8 @@ def _run_tests(project: Path, test_patch: str) -> dict:
 
 def run(mode: str, iterations: int, primary_model: str | None = None,
         worker_model: str | None = None, action_critic: bool = False,
-        chat_timeout: float | None = None, action_gate: bool = False) -> dict:
+        chat_timeout: float | None = None, action_gate: bool = False,
+        structured_summary: bool = False) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -121,19 +122,19 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     if primary_model:
         command[2:2] = ["--model", primary_model]
     if mode == "novelty":
-        command.insert(2, "--novelty-context")
-        # Novelty context is evaluated with the deterministic progress ledger
-        # enabled as well. The 4B worker supplies semantic judgments, while
-        # the structured layer supplies model-independent anti-stagnation
-        # intervention and durable file/fact state.
-        command.insert(3, "--structured-summary")
+        option_index = len(command) - 1
+        command.insert(option_index, "--novelty-context")
+        if structured_summary:
+            command.insert(option_index + 1, "--structured-summary")
+            option_index += 1
         if action_critic:
-            command.insert(4, "--novelty-action-critic")
+            command.insert(option_index + 1, "--novelty-action-critic")
+            option_index += 1
         if action_gate:
-            command.insert(5 if action_critic else 4, "--novelty-action-gate")
+            command.insert(option_index + 1, "--novelty-action-gate")
+            option_index += 1
         if worker_model:
-            insert_at = 5 if action_critic else 4
-            command[insert_at:insert_at] = ["--novelty-worker-model", worker_model]
+            command[option_index + 1:option_index + 1] = ["--novelty-worker-model", worker_model]
     if chat_timeout is not None:
         command[2:2] = ["--chat-timeout", str(chat_timeout)]
     command.extend([
@@ -155,6 +156,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "action_critic": action_critic,
         "chat_timeout": chat_timeout,
         "action_gate": action_gate,
+        "structured_summary": structured_summary,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -182,6 +184,8 @@ if __name__ == "__main__":
                         help="Maximum seconds per acting-model turn; useful for bounded experiments.")
     parser.add_argument("--action-gate", action="store_true",
                         help="Enable bounded tool restriction after novelty stagnation.")
+    parser.add_argument("--structured-summary", action="store_true",
+                        help="Also enable the separate structured-summary/governor layer.")
     args = parser.parse_args()
     run(args.mode, args.iterations, args.primary_model, args.worker_model,
-        args.action_critic, args.chat_timeout, args.action_gate)
+        args.action_critic, args.chat_timeout, args.action_gate, args.structured_summary)
