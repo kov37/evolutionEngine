@@ -9,6 +9,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 
 import argparse
 import json
+import signal
 import time
 
 from ollama import chat
@@ -35,6 +36,29 @@ from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
 ITERATION_BUDGET = 20
+CHAT_TIMEOUT_SECONDS = 180
+
+
+class ChatTimeoutError(TimeoutError):
+    """The acting model stopped responding within one bounded turn."""
+
+
+def _chat_with_timeout(*, timeout_seconds, **kwargs):
+    """Call Ollama without allowing one turn to strand the whole run."""
+    if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return chat(**kwargs)
+
+    def _alarm(_signum, _frame):
+        raise ChatTimeoutError(f"acting-model chat exceeded {timeout_seconds}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return chat(**kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 # Level 5 (escalation_governor.py) is meant to be a hard stop — "call
 # finish_task now" — but only OFFERS finish_task as the sole allowed tool;
@@ -162,7 +186,8 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
               context_summary_enabled=False, structured_summary_enabled=False, working_state_enabled=False,
               task_type="code_change", think=False, status_path=None, distribution_target_file=None,
               distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b",
-              novelty_action_gate=False, novelty_action_critic=False):
+              novelty_action_gate=False, novelty_action_critic=False,
+              chat_timeout=CHAT_TIMEOUT_SECONDS):
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
@@ -417,8 +442,16 @@ You have this focused toolbelt: {offered_tool_names}.
         last_error = None
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
             try:
-                response = chat(model=MODEL, messages=messages_for_call, tools=tools_for_call, think=think,
-                                 options={"num_ctx": NUM_CTX})
+                response = _chat_with_timeout(
+                    timeout_seconds=chat_timeout, model=MODEL, messages=messages_for_call,
+                    tools=tools_for_call, think=think, options={"num_ctx": NUM_CTX},
+                )
+                break
+            except ChatTimeoutError as e:
+                last_error = e
+                recent_errors.append(f"iter {iteration}: {e}")
+                recent_errors[:] = recent_errors[-5:]
+                print(f"⚠️  {e}; ending run cleanly so a stalled model call cannot strand the benchmark")
                 break
             except Exception as e:
                 last_error = e
@@ -428,8 +461,21 @@ You have this focused toolbelt: {offered_tool_names}.
                 if attempt < MAX_CHAT_RETRIES:
                     time.sleep(min(120, 2 ** attempt))
         if response is None:
-            print(f"\n❌ chat() failed {MAX_CHAT_RETRIES} times in a row — ending run cleanly rather than "
-                  f"crashing. Last error: {last_error}")
+            print(f"\n❌ acting-model turn failed — ending run cleanly rather than crashing. Last error: {last_error}")
+            TASK_STATE["summary"] = f"Run stopped before a response: {last_error}"
+            if status_path:
+                status_report.write(
+                    status_path, iteration=iteration, iteration_budget=iteration_budget,
+                    last_action_classification="MODEL_TIMEOUT" if isinstance(last_error, ChatTimeoutError) else "MODEL_ERROR",
+                    escalation_level=current_level,
+                    ledger_size=len(ledger.history) if _governed else None,
+                    distributions_done=status_report.classes_with_method(
+                        io_tools._resolve(distribution_target_file), distribution_names
+                    ) if distribution_target_file and distribution_names else None,
+                    recent_errors=list(recent_errors), task_done=False,
+                    task_summary=TASK_STATE["summary"],
+                    novelty_context=novelty_context.metrics() if novelty_context else None,
+                )
             close_novelty_context()
             return False
 
@@ -839,6 +885,10 @@ if __name__ == "__main__":
              "For external monitoring from another terminal — not consumed by the model itself.",
     )
     parser.add_argument(
+        "--chat-timeout", type=float, default=CHAT_TIMEOUT_SECONDS,
+        help=f"Maximum seconds for one acting-model turn before cleanly stopping (default {CHAT_TIMEOUT_SECONDS}; 0 disables).",
+    )
+    parser.add_argument(
         "--distribution-target-file", default=None,
         help="Relative path (within --project) of a file to ast-scan each iteration for which of "
              "--distribution-names' classes define their own _cdf method — only meaningful together "
@@ -896,4 +946,5 @@ if __name__ == "__main__":
               status_path=args.status_file, distribution_target_file=args.distribution_target_file,
               distribution_names=args.distribution_names.split(",") if args.distribution_names else None,
               novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model,
-              novelty_action_gate=args.novelty_action_gate, novelty_action_critic=args.novelty_action_critic)
+              novelty_action_gate=args.novelty_action_gate, novelty_action_critic=args.novelty_action_critic,
+              chat_timeout=args.chat_timeout)

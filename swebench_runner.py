@@ -102,7 +102,8 @@ def _run_tests(project: Path, test_patch: str) -> dict:
 
 
 def run(mode: str, iterations: int, primary_model: str | None = None,
-        worker_model: str | None = None, action_critic: bool = False) -> dict:
+        worker_model: str | None = None, action_critic: bool = False,
+        chat_timeout: float | None = None) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -131,6 +132,8 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         if worker_model:
             insert_at = 5 if action_critic else 4
             command[insert_at:insert_at] = ["--novelty-worker-model", worker_model]
+    if chat_timeout is not None:
+        command[2:2] = ["--chat-timeout", str(chat_timeout)]
     command.extend([
         "--distribution-target-file", "sympy/stats/crv_types.py",
         "--distribution-names",
@@ -148,6 +151,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "run_id": run_id, "mode": mode, "primary_model": primary_model,
         "worker_model": worker_model, "base_commit": BASE_COMMIT,
         "action_critic": action_critic,
+        "chat_timeout": chat_timeout,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -171,5 +175,8 @@ if __name__ == "__main__":
     parser.add_argument("--worker-model", default=None)
     parser.add_argument("--action-critic", action="store_true",
                         help="Enable the 4B worker's bounded next-action directive in novelty mode.")
+    parser.add_argument("--chat-timeout", type=float, default=None,
+                        help="Maximum seconds per acting-model turn; useful for bounded experiments.")
     args = parser.parse_args()
-    run(args.mode, args.iterations, args.primary_model, args.worker_model, args.action_critic)
+    run(args.mode, args.iterations, args.primary_model, args.worker_model,
+        args.action_critic, args.chat_timeout)
