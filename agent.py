@@ -29,6 +29,7 @@ import working_state
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
+from novelty_context import NoveltyContext
 from registry import load_registry
 
 MODEL = "qwen3.6:35b-mlx"
@@ -159,7 +160,7 @@ def _completion_ready(messages, task_type):
 def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=False, worker_enabled=False,
               context_summary_enabled=False, structured_summary_enabled=False, working_state_enabled=False,
               task_type="code_change", think=False, status_path=None, distribution_target_file=None,
-              distribution_names=None):
+              distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b"):
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
@@ -226,6 +227,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # iteration's value on turns that branch doesn't run, e.g. iteration 1).
     current_level = 0
     recent_errors = []
+    novelty_context = NoveltyContext(worker_model=novelty_worker_model) if novelty_context_enabled else None
 
     offered_tool_names = ", ".join(fn.__name__ for fn in tools)
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
@@ -325,6 +327,11 @@ You have this focused toolbelt: {offered_tool_names}.
             }]
         else:
             messages_for_call = messages
+
+        if novelty_context is not None:
+            messages_for_call = messages_for_call + [{
+                "role": "system", "content": novelty_context.render_for_model(),
+            }]
 
         # The graduated progress governor — evaluated using the ledger's
         # state as of the END of the previous iteration (this iteration's
@@ -454,6 +461,17 @@ You have this focused toolbelt: {offered_tool_names}.
         allowed_names = {t.__name__ for t in tools_for_call}
         tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, allowed_names=allowed_names)
         messages.extend(tool_messages)
+
+        if novelty_context is not None:
+            for call, tmsg in zip(msg.tool_calls, tool_messages):
+                args = call.function.arguments or {}
+                tool_name = call.function.name
+                capability = action_governor.classify(tool_name, args)
+                novelty_context.observe(
+                    iteration, tool_name, args, tmsg["content"],
+                    mutation=capability == "MUTATE", validation=capability == "VALIDATE",
+                )
+            print(f"🧬 [novelty context] {novelty_context.render_for_model()}")
 
         if structured_summary_enabled:
             # Unlike context_summary_enabled, state.update() already extracts
@@ -704,15 +722,20 @@ You have this focused toolbelt: {offered_tool_names}.
                 recent_errors=list(recent_errors),
                 task_done=TASK_STATE["done"],
                 task_summary=TASK_STATE["summary"],
+                novelty_context=novelty_context.metrics() if novelty_context else None,
             )
 
         if TASK_STATE["done"]:
             print(f"\n✅ DONE: {TASK_STATE['summary']}")
+            if novelty_context:
+                novelty_context.close()
             return True
 
     print("\n" + "=" * 60)
     print(f"❌ INCOMPLETE: finish_task was not called within {iteration_budget} iterations.")
     print("=" * 60)
+    if novelty_context:
+        novelty_context.close()
     return False
 
 
@@ -750,7 +773,15 @@ if __name__ == "__main__":
         "--structured-summary", action="store_true",
         help="Alternative to --context-summary: files/facts are tracked entirely by code (zero LLM "
              "involvement, zero hallucination risk); qwen3.5:9b only judges a short one-line status. "
-             "See structured_state.py.",
+        "See structured_state.py.",
+    )
+    parser.add_argument(
+        "--novelty-context", action="store_true",
+        help="Enable the asynchronous qwen3.5:4b context worker and novelty metrics.",
+    )
+    parser.add_argument(
+        "--novelty-worker-model", default="qwen3.5:4b",
+        help="Ollama model used by --novelty-context (default: qwen3.5:4b).",
     )
     parser.add_argument(
         "--thinking", action="store_true",
@@ -816,6 +847,8 @@ if __name__ == "__main__":
         print("🗒️  Whole-context summary mode: ENABLED (qwen3.5:9b re-synthesizes one holistic summary)")
     elif args.sidecar:
         print(f"🗒️  Automated activity-log sidecar: ENABLED{' + qwen3.5:9b worker compression' if args.worker else ' (mechanical)'}")
+    if args.novelty_context:
+        print(f"🧬 Novelty context: ENABLED ({args.novelty_worker_model}, asynchronous 4B worker)")
     if args.thinking:
         print("🧠 Orchestrator thinking mode: ENABLED (think=True on MODEL's own calls)")
 
@@ -826,4 +859,5 @@ if __name__ == "__main__":
               worker_enabled=args.worker, context_summary_enabled=args.context_summary,
               structured_summary_enabled=args.structured_summary, think=args.thinking,
               status_path=args.status_file, distribution_target_file=args.distribution_target_file,
-              distribution_names=args.distribution_names.split(",") if args.distribution_names else None)
+              distribution_names=args.distribution_names.split(",") if args.distribution_names else None,
+              novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model)
