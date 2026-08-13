@@ -91,6 +91,11 @@ def _fingerprint(tool: str, arguments: dict[str, Any], result: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
+def _call_key(tool: str, arguments: dict[str, Any]) -> tuple[str, str]:
+    """Stable identity for a tool call, independent of argument key order."""
+    return tool, json.dumps(arguments or {}, sort_keys=True, default=str, separators=(",", ":"))
+
+
 def _local_judgment(events: list[ContextEvent], event: ContextEvent) -> WorkerJudgment:
     recent = events[-8:]
     duplicate = sum(e.result_fingerprint == event.result_fingerprint for e in recent[:-1]) > 0
@@ -369,6 +374,19 @@ class NoveltyContext:
                     "worker_calls": self.worker_calls, "worker_failures": self.worker_failures,
                     "worker_busy_drops": self.worker_busy_drops, "judgments": len(self.judgments),
                     "duplicate_judgments": duplicates, "elapsed_s": monotonic() - self.started_at}
+
+    def blocked_calls(self) -> set[tuple[str, str]]:
+        """Exact calls that produced the same error twice in succession."""
+        with self._lock:
+            if len(self.events) < 2:
+                return set()
+            previous, latest = self.events[-2:]
+            if not (previous.result.startswith(("ERROR", "REJECTED")) and
+                    latest.result.startswith(("ERROR", "REJECTED"))):
+                return set()
+            if _call_key(previous.tool, previous.arguments) != _call_key(latest.tool, latest.arguments):
+                return set()
+            return {_call_key(latest.tool, latest.arguments)}
 
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.

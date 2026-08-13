@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from agent import _completion_ready
-from dispatch import _format_result
+from dispatch import _format_result, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
 from kernel.sandbox import set_root
@@ -105,6 +105,24 @@ class KernelToolTests(unittest.TestCase):
         rendered = context.render_for_model()
         context.close()
         self.assertIn("Do not repeat that call or argument", rendered)
+
+    def test_repeated_failure_blocks_exact_call_at_dispatch(self):
+        class Call:
+            class Function:
+                name = "list_dir"
+                arguments = {"path": "missing"}
+            function = Function()
+
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
+        context.observe(1, "list_dir", {"path": "missing"}, "ERROR: missing")
+        context.observe(2, "list_dir", {"path": "missing"}, "ERROR: missing")
+        messages = dispatch_tool_calls(
+            [Call()], {"list_dir": lambda **kwargs: "should not run"},
+            blocked_calls=context.blocked_calls(),
+        )
+        context.close()
+        self.assertTrue(messages[0]["content"].startswith("REJECTED: repeated failing call"))
+        self.assertIn("Do not retry it", messages[0]["content"])
 
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")

@@ -466,7 +466,10 @@ You have this focused toolbelt: {offered_tool_names}.
         # full, unrestricted registry (dispatch still needs to look up the
         # real function for whatever's actually allowed).
         allowed_names = {t.__name__ for t in tools_for_call}
-        tool_messages = dispatch_tool_calls(msg.tool_calls, tool_map, allowed_names=allowed_names)
+        blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
+        tool_messages = dispatch_tool_calls(
+            msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls
+        )
         messages.extend(tool_messages)
 
         if novelty_context is not None:
