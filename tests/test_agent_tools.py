@@ -124,6 +124,15 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(messages[0]["content"].startswith("REJECTED: repeated failing call"))
         self.assertIn("Do not retry it", messages[0]["content"])
 
+    def test_action_gate_requires_progress_after_observation_window(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
+        for iteration in range(1, 4):
+            context.observe(iteration, "read_file", {"path": f"f{iteration}.py"}, "content")
+        self.assertTrue(context.requires_progress())
+        context.observe(4, "patch_file", {"path": "f.py"}, "Wrote f.py", mutation=True)
+        self.assertFalse(context.requires_progress())
+        context.close()
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])

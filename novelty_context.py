@@ -52,6 +52,7 @@ class WorkerConfig:
     num_ctx: int = DEFAULT_WORKER_NUM_CTX
     interval: int = DEFAULT_WORKER_INTERVAL
     max_output_chars: int = MAX_WORKER_OUTPUT_CHARS
+    action_after_events: int = 8
 
 
 @dataclass
@@ -185,14 +186,17 @@ class NoveltyContext:
         worker_model: str = DEFAULT_WORKER_MODEL,
         worker_num_ctx: int = DEFAULT_WORKER_NUM_CTX,
         worker_interval: int = DEFAULT_WORKER_INTERVAL,
+        action_after_events: int = 8,
         config: WorkerConfig | None = None,
         chat_fn: Callable[..., Any] | None = None,
     ) -> None:
         if config is not None:
             worker_model, worker_num_ctx, worker_interval = config.model, config.num_ctx, config.interval
+            action_after_events = config.action_after_events
         self.worker_model = worker_model
         self.worker_num_ctx = max(512, worker_num_ctx)
         self.worker_interval = max(1, worker_interval)
+        self.action_after_events = max(1, action_after_events)
         self._chat_fn = chat_fn
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="novelty-4b")
         self._future: Future[WorkerJudgment] | None = None
@@ -387,6 +391,19 @@ class NoveltyContext:
             if _call_key(previous.tool, previous.arguments) != _call_key(latest.tool, latest.arguments):
                 return set()
             return {_call_key(latest.tool, latest.arguments)}
+
+    def requires_progress(self) -> bool:
+        """Whether the next turn should make state-changing progress.
+
+        This is deliberately based on the event ledger, not on a model name
+        or an iteration number. It prevents an agent from reading forever
+        after it has had a bounded opportunity to orient itself, while still
+        allowing a task to validate or mutate before the gate is reached.
+        """
+        with self._lock:
+            recent = self.events[-self.action_after_events:]
+            return (len(recent) >= self.action_after_events and
+                    not any(e.mutation or e.validation for e in recent))
 
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.
