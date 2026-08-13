@@ -483,6 +483,15 @@ You have this focused toolbelt: {offered_tool_names}.
                 break
             except Exception as e:
                 last_error = e
+                # httpx/ollama transport timeouts arrive as provider-specific
+                # ReadTimeout exceptions rather than ChatTimeoutError. They
+                # are terminal for this turn; retrying them up to twenty
+                # times defeated the benchmark's time bound in practice.
+                if "timeout" in f"{type(e).__name__}: {e}".lower():
+                    recent_errors.append(f"iter {iteration}: transport timeout: {e}")
+                    recent_errors[:] = recent_errors[-5:]
+                    print(f"⚠️  transport timeout; ending run cleanly: {e}")
+                    break
                 print(f"⚠️  chat() failed (attempt {attempt}/{MAX_CHAT_RETRIES}): {type(e).__name__}: {e}")
                 recent_errors.append(f"iter {iteration}: chat() {type(e).__name__}: {e}")
                 recent_errors[:] = recent_errors[-5:]
