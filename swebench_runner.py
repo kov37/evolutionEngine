@@ -121,8 +121,19 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         command[2:2] = ["--model", primary_model]
     if mode == "novelty":
         command.insert(2, "--novelty-context")
+        # Novelty context is evaluated with the deterministic progress ledger
+        # enabled as well. The 4B worker supplies semantic judgments, while
+        # the structured layer supplies model-independent anti-stagnation
+        # intervention and durable file/fact state.
+        command.insert(3, "--structured-summary")
         if worker_model:
-            command[3:3] = ["--novelty-worker-model", worker_model]
+            command[4:4] = ["--novelty-worker-model", worker_model]
+    command.extend([
+        "--distribution-target-file", "sympy/stats/crv_types.py",
+        "--distribution-names",
+        "Arcsin,Dagum,Erlang,Frechet,Gamma,GammaInverse,Kumaraswamy,Laplace,"
+        "Logistic,Nakagami,StudentT,UniformSum",
+    ])
     started = time.time()
     agent = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=3600)
     elapsed = time.time() - started
