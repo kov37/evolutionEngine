@@ -19,7 +19,7 @@ from time import monotonic
 from typing import Any, Callable
 
 
-DEFAULT_WORKER_MODEL = "qwen3.5:4b"
+DEFAULT_WORKER_MODEL = "qwen3.5:4b"  # default only; behavior never branches on model name
 DEFAULT_WORKER_NUM_CTX = 4096
 DEFAULT_WORKER_INTERVAL = 8
 MAX_EVENT_CHARS = 6000
@@ -36,6 +36,22 @@ class ContextEvent:
     result_fingerprint: str
     mutation: bool = False
     validation: bool = False
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    """Model/backend-neutral worker settings.
+
+    The context manager depends only on a chat callable returning text. Model
+    names, providers, context limits, and deployment choices stay outside the
+    scheduling and state logic so the same policy can be tested with any
+    Ollama tag or an injected API adapter.
+    """
+
+    model: str = DEFAULT_WORKER_MODEL
+    num_ctx: int = DEFAULT_WORKER_NUM_CTX
+    interval: int = DEFAULT_WORKER_INTERVAL
+    max_output_chars: int = MAX_WORKER_OUTPUT_CHARS
 
 
 @dataclass
@@ -164,10 +180,13 @@ class NoveltyContext:
         worker_model: str = DEFAULT_WORKER_MODEL,
         worker_num_ctx: int = DEFAULT_WORKER_NUM_CTX,
         worker_interval: int = DEFAULT_WORKER_INTERVAL,
+        config: WorkerConfig | None = None,
         chat_fn: Callable[..., Any] | None = None,
     ) -> None:
+        if config is not None:
+            worker_model, worker_num_ctx, worker_interval = config.model, config.num_ctx, config.interval
         self.worker_model = worker_model
-        self.worker_num_ctx = worker_num_ctx
+        self.worker_num_ctx = max(512, worker_num_ctx)
         self.worker_interval = max(1, worker_interval)
         self._chat_fn = chat_fn
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="novelty-4b")

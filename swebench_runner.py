@@ -101,7 +101,8 @@ def _run_tests(project: Path, test_patch: str) -> dict:
             "stderr": result.stderr[-4000:]}
 
 
-def run(mode: str, iterations: int) -> dict:
+def run(mode: str, iterations: int, primary_model: str | None = None,
+        worker_model: str | None = None) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -116,8 +117,12 @@ def run(mode: str, iterations: int) -> dict:
     status_file = work / "status.json"
     command = [sys.executable, str(ROOT / "agent.py"), "--project", str(candidate),
                "--iteration-budget", str(iterations), "--status-file", str(status_file), task]
+    if primary_model:
+        command[2:2] = ["--model", primary_model]
     if mode == "novelty":
         command.insert(2, "--novelty-context")
+        if worker_model:
+            command[3:3] = ["--novelty-worker-model", worker_model]
     started = time.time()
     agent = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=3600)
     elapsed = time.time() - started
@@ -126,7 +131,8 @@ def run(mode: str, iterations: int) -> dict:
     shutil.copytree(candidate, grade)
     grading = _run_tests(grade, instance["test_patch"])
     report = {
-        "run_id": run_id, "mode": mode, "base_commit": BASE_COMMIT,
+        "run_id": run_id, "mode": mode, "primary_model": primary_model,
+        "worker_model": worker_model, "base_commit": BASE_COMMIT,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -146,5 +152,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "novelty"], default="novelty")
     parser.add_argument("--iterations", type=int, default=250)
+    parser.add_argument("--primary-model", default=None)
+    parser.add_argument("--worker-model", default=None)
     args = parser.parse_args()
-    run(args.mode, args.iterations)
+    run(args.mode, args.iterations, args.primary_model, args.worker_model)
