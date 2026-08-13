@@ -8,6 +8,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 """
 
 import argparse
+import json
 import time
 
 from ollama import chat
@@ -229,6 +230,11 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     recent_errors = []
     novelty_context = NoveltyContext(worker_model=novelty_worker_model) if novelty_context_enabled else None
 
+    def close_novelty_context():
+        if novelty_context is not None:
+            novelty_context.close()
+            print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
+
     offered_tool_names = ", ".join(fn.__name__ for fn in tools)
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -405,6 +411,7 @@ You have this focused toolbelt: {offered_tool_names}.
         if response is None:
             print(f"\n❌ chat() failed {MAX_CHAT_RETRIES} times in a row — ending run cleanly rather than "
                   f"crashing. Last error: {last_error}")
+            close_novelty_context()
             return False
 
         prompt_eval_s = (response.prompt_eval_duration or 0) / 1e9
@@ -727,15 +734,13 @@ You have this focused toolbelt: {offered_tool_names}.
 
         if TASK_STATE["done"]:
             print(f"\n✅ DONE: {TASK_STATE['summary']}")
-            if novelty_context:
-                novelty_context.close()
+            close_novelty_context()
             return True
 
     print("\n" + "=" * 60)
     print(f"❌ INCOMPLETE: finish_task was not called within {iteration_budget} iterations.")
     print("=" * 60)
-    if novelty_context:
-        novelty_context.close()
+    close_novelty_context()
     return False
 
 

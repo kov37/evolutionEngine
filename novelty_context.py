@@ -9,8 +9,10 @@ continues and the coding loop is never blocked by the worker.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import re
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from time import monotonic
@@ -19,6 +21,7 @@ from typing import Any, Callable
 
 DEFAULT_WORKER_MODEL = "qwen3.5:4b"
 DEFAULT_WORKER_NUM_CTX = 4096
+DEFAULT_WORKER_INTERVAL = 3
 MAX_EVENT_CHARS = 6000
 MAX_STATE_CHARS = 5000
 MAX_WORKER_OUTPUT_CHARS = 1200
@@ -114,6 +117,20 @@ result={event.result[:MAX_EVENT_CHARS]}
 """
 
 
+def _ollama_process(prompt: str, model: str, num_ctx: int, conn) -> None:
+    """Run one real worker call in a killable child process."""
+    try:
+        from ollama import chat
+        response = chat(model=model, messages=[{"role": "user", "content": prompt}],
+                        think=False, options={"num_ctx": num_ctx})
+        raw = getattr(getattr(response, "message", None), "content", "") or ""
+        conn.send({"ok": True, "raw": raw[:MAX_WORKER_OUTPUT_CHARS]})
+    except Exception as exc:
+        conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    finally:
+        conn.close()
+
+
 def _parse_judgment(raw: str, fallback: WorkerJudgment) -> WorkerJudgment:
     match = re.search(r"\{.*\}", raw or "", re.DOTALL)
     if not match:
@@ -146,13 +163,18 @@ class NoveltyContext:
         self,
         worker_model: str = DEFAULT_WORKER_MODEL,
         worker_num_ctx: int = DEFAULT_WORKER_NUM_CTX,
+        worker_interval: int = DEFAULT_WORKER_INTERVAL,
         chat_fn: Callable[..., Any] | None = None,
     ) -> None:
         self.worker_model = worker_model
         self.worker_num_ctx = worker_num_ctx
+        self.worker_interval = max(1, worker_interval)
         self._chat_fn = chat_fn
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="novelty-4b")
         self._future: Future[WorkerJudgment] | None = None
+        self._process = None
+        self._process_conn = None
+        self._process_mode = chat_fn is None
         # state_text() is called while observe() is recording an event.  A
         # re-entrant lock keeps that snapshot operation atomic without making
         # the event path self-deadlock.
@@ -184,11 +206,39 @@ class NoveltyContext:
         with self._lock:
             self.events.append(event)
             self.events = self.events[-100:]
-            if self._future is not None and not self._future.done():
+            # Harvest a completed result before replacing the future.  Without
+            # this, a fast sequence of events could overwrite a completed
+            # future before collect() ever saw it.
+            completed = ((self._future is not None and self._future.done()) or
+                         (self._process is not None and not self._process.is_alive()))
+        if completed:
+            self.collect(wait=False)
+        with self._lock:
+            should_process = (
+                mutation or validation or result.startswith(("ERROR", "REJECTED"))
+                or len(self.events) % self.worker_interval == 0
+            )
+            if not should_process:
+                return
+            process_busy = self._process is not None and self._process.is_alive()
+            if ((self._future is not None and not self._future.done()) or process_busy):
                 self.worker_busy_drops += 1
                 return
             fallback = _local_judgment(self.events, event)
-            self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
+            if self._process_mode:
+                parent_conn, child_conn = multiprocessing.Pipe(False)
+                self._process_conn = parent_conn
+                process_factory = multiprocessing.get_context("fork").Process
+                self._process = process_factory(
+                    target=_ollama_process,
+                    args=(_prompt(self.state_text(), event), self.worker_model, self.worker_num_ctx, child_conn),
+                    daemon=True,
+                )
+                self.worker_calls += 1
+                self._process.start()
+                child_conn.close()
+            else:
+                self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
 
     def _judge(self, state: str, event: ContextEvent, fallback: WorkerJudgment) -> WorkerJudgment:
         started = monotonic()
@@ -211,6 +261,31 @@ class NoveltyContext:
             return fallback
 
     def collect(self, wait: bool = False) -> WorkerJudgment:
+        if self._process_mode and self._process is not None:
+            if wait:
+                self._process.join()
+            if self._process.is_alive() or self._process_conn is None or not self._process_conn.poll():
+                return self.last_judgment
+            try:
+                payload = self._process_conn.recv()
+                event = self.events[-1]
+                fallback = _local_judgment(self.events, event)
+                if payload.get("ok"):
+                    judgment = _parse_judgment(payload.get("raw", ""), fallback)
+                else:
+                    self.worker_failures += 1
+                    judgment = fallback
+                with self._lock:
+                    self.last_judgment = judgment
+                    self.judgments.append(judgment)
+            except (EOFError, OSError, TypeError):
+                self.worker_failures += 1
+                judgment = self.last_judgment
+            finally:
+                self._process_conn.close()
+                self._process_conn = None
+                self._process = None
+            return judgment
         future = self._future
         if future is None:
             return self.last_judgment
@@ -249,5 +324,12 @@ class NoveltyContext:
                     "duplicate_judgments": duplicates, "elapsed_s": monotonic() - self.started_at}
 
     def close(self) -> None:
-        self.collect(wait=True)
+        # A real 4B call is advisory. Never make task completion wait for it.
+        self.collect(wait=False)
+        if self._process is not None and self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=1)
+        if self._process_conn is not None:
+            self._process_conn.close()
+            self._process_conn = None
         self._executor.shutdown(wait=True)

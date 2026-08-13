@@ -43,7 +43,7 @@ class KernelToolTests(unittest.TestCase):
                 '"confidence":0.8}'
             )
 
-        context = NoveltyContext(chat_fn=fake_chat)
+        context = NoveltyContext(chat_fn=fake_chat, worker_interval=1)
         context.observe(1, "read_file", {"path": "a.py"}, "def f(): pass")
         judgment = context.collect(wait=True)
         context.observe(2, "patch_file", {"path": "a.py"}, "Wrote a.py", mutation=True)
@@ -60,7 +60,7 @@ class KernelToolTests(unittest.TestCase):
         def failing_chat(**kwargs):
             raise RuntimeError("offline")
 
-        context = NoveltyContext(chat_fn=failing_chat)
+        context = NoveltyContext(chat_fn=failing_chat, worker_interval=1)
         context.observe(1, "read_file", {}, "content")
         judgment = context.collect(wait=True)
         metrics = context.metrics()

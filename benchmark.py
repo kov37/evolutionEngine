@@ -144,12 +144,20 @@ def _parse_output_metrics(text):
     # An actual signal for "stuck retrying, not recovering": how many times
     # the failure-streak nudge fired (2+ failures in a row — see agent.py).
     failure_streak_nudges = len(re.findall(r"failed calls in a row", text))
+    novelty = None
+    novelty_lines = re.findall(r"🧬 \[novelty metrics\] (\{.*\})", text)
+    if novelty_lines:
+        try:
+            novelty = json.loads(novelty_lines[-1])
+        except json.JSONDecodeError:
+            novelty = {"parse_error": True}
     return {
         "iterations": iterations,
         "tool_calls": len(tool_call_lines),
         "duplicate_tool_calls": duplicate_tool_calls,
         "done": done,
         "failure_streak_nudges": failure_streak_nudges,
+        "novelty": novelty,
     }
 
 
@@ -172,7 +180,7 @@ def _classify_failure(passed, metrics):
     return "other"
 
 
-def run_once(task_name: str, run_index: int, label: str = "baseline"):
+def run_once(task_name: str, run_index: int, label: str = "baseline", novelty_context: bool = False):
     task = TASKS[task_name]
     start = time.time()
 
@@ -193,6 +201,8 @@ def run_once(task_name: str, run_index: int, label: str = "baseline"):
         "--project", project_dir,
         task["task_text"],
     ]
+    if novelty_context:
+        cmd.insert(2, "--novelty-context")
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     elapsed = time.time() - start
 
@@ -234,12 +244,13 @@ def run_once(task_name: str, run_index: int, label: str = "baseline"):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in TASKS:
-        print(f"Usage: python3 benchmark.py <{'|'.join(TASKS)}> [n_runs] [label]")
+        print(f"Usage: python3 benchmark.py <{'|'.join(TASKS)}> [n_runs] [label] [--novelty-context]")
         raise SystemExit(1)
 
     task_name = sys.argv[1]
     n_runs = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-    label = sys.argv[3] if len(sys.argv) > 3 else "baseline"
+    label = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "baseline"
+    novelty_context = "--novelty-context" in sys.argv[2:]
 
     for i in range(1, n_runs + 1):
-        run_once(task_name, i, label)
+        run_once(task_name, i, label, novelty_context=novelty_context)
