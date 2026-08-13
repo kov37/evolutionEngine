@@ -131,6 +131,11 @@ def infer_success(capability: str, tool_name: str, result_content: str):
     return None
 
 
+def result_is_failure(result_content: str) -> bool:
+    """Whether a tool result is an execution/argument failure."""
+    return result_content.startswith(("ERROR:", "REJECTED:"))
+
+
 def is_blocked_response(result_content: str) -> bool:
     """True if `result_content` is dispatch.py's real enforcement-rejection
     message (allowed_names blocked this call), not a real tool result.
@@ -167,7 +172,8 @@ class EvidenceLedger:
             # for the real bug this fixes.
             entry = {
                 "turn": turn, "tool_name": tool_name, "capability": "BLOCKED",
-                "fingerprint": None, "is_duplicate": False, "succeeded": None, "scope": None,
+                "fingerprint": None, "is_duplicate": False, "succeeded": None,
+                "failed_observation": True, "scope": None,
             }
             self.history.append(entry)
             return entry
@@ -177,6 +183,7 @@ class EvidenceLedger:
         is_duplicate = fp is not None and fp in self.seen_fingerprints
         if fp is not None:
             self.seen_fingerprints.add(fp)
+        failed_observation = result_is_failure(result_content)
         scope = (arguments or {}).get("path") or (arguments or {}).get("command") or (arguments or {}).get("pattern")
         entry = {
             "turn": turn,
@@ -185,6 +192,7 @@ class EvidenceLedger:
             "fingerprint": fp,
             "is_duplicate": is_duplicate,
             "succeeded": infer_success(capability, tool_name, result_content),
+            "failed_observation": failed_observation,
             "scope": scope,
         }
         self.history.append(entry)
@@ -222,7 +230,8 @@ class EvidenceLedger:
             return True  # not enough history yet to call it stagnant
         return any(
             e["capability"] in ("MUTATE", "DELIVER")
-            or (e["capability"] in ("OBSERVE", "VALIDATE") and not e["is_duplicate"])
+            or (e["capability"] in ("OBSERVE", "VALIDATE") and
+                not e["is_duplicate"] and not e["failed_observation"])
             for e in recent
         )
 
@@ -237,7 +246,8 @@ class EvidenceLedger:
         signal, independent of raw call count (which counts re-reads too)."""
         return sum(
             1 for e in self.history
-            if e["capability"] in ("OBSERVE", "VALIDATE") and not e["is_duplicate"]
+            if e["capability"] in ("OBSERVE", "VALIDATE") and
+            not e["is_duplicate"] and not e["failed_observation"]
         )
 
 
@@ -284,6 +294,14 @@ def _self_test() -> bool:
     assert infer_success("VALIDATE", "run_shell", "Exit code: 0\nSTDOUT:\nok\nSTDERR:\n") is True
     assert infer_success("VALIDATE", "run_shell", "Exit code: 1\nSTDOUT:\n\nSTDERR:\nFAILED") is False
     assert infer_success("OBSERVE", "read_file", "some file content") is None, "success is meaningless for OBSERVE"
+
+    # A syntactically different failed observation is still not progress: it
+    # must not grant the model an unlimited discovery budget.
+    ledger_failed_observe = EvidenceLedger()
+    for i in range(5):
+        ledger_failed_observe.record(i, "list_dir", {"path": f"missing-{i}"}, "ERROR: missing")
+    assert ledger_failed_observe.new_evidence_count() == 0
+    assert ledger_failed_observe.recent_progress(window=5) is False
 
     # --- EvidenceLedger.failed_action_count() ---
     ledger0 = EvidenceLedger()
