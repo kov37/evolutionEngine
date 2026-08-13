@@ -373,9 +373,7 @@ class NoveltyContext:
             # Do not wait for an asynchronous 4B result to become actionable.
             # The local policy supplies a conservative recommendation; a later
             # 4B judgment can refine it on the next turn.
-            if action_critic and deterministic_trigger and (
-                judgment.recommended_action == "inspect" and judgment.confidence < 0.75
-            ):
+            if action_critic and deterministic_trigger and judgment.recommended_action == "inspect":
                 critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
             rendered = "## Context manager state\n" + judgment.render()
             if len(self.events) >= 2:
