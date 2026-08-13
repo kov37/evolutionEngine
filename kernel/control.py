@@ -7,7 +7,7 @@ different orchestrators with different stop conditions and shouldn't share
 a flag — harness.py doesn't check this, and never gets it as a tool.
 """
 
-TASK_STATE = {"done": False, "summary": None}
+TASK_STATE = {"done": False, "requested": False, "summary": None}
 
 
 def finish_task(summary: str) -> str:
@@ -18,6 +18,11 @@ def finish_task(summary: str) -> str:
     Args:
       summary: A short account of what was done and the end result.
     """
-    TASK_STATE["done"] = True
+    TASK_STATE["requested"] = True
     TASK_STATE["summary"] = summary
-    return "Task marked complete."
+    return "Completion requested; the agent will verify the work before stopping."
+
+
+def approve_task() -> None:
+    """Internal orchestrator hook; never exposed as a model tool."""
+    TASK_STATE["done"] = True

@@ -26,10 +26,15 @@ import subprocess
 import sys
 
 from kernel.io_tools import read_file, write_file, patch_file, list_workspace
-from kernel.exec_tools import run_shell
+from kernel.exec_tools import run_shell, run_command
+from kernel.discovery import find_files
 from kernel.sandbox import confine
 
-KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, run_shell]
+# Keep the model-facing kernel small.  run_shell remains importable for
+# internal/backward-compatible callers, but the 35B model gets one execution
+# primitive with unambiguous argv semantics instead of two competing command
+# tools.
+KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, find_files, run_command]
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 MANIFEST_PATH = os.path.join(STATE_DIR, "registry_manifest.json")
@@ -86,9 +91,15 @@ def _load_graduated_tools(manifest: dict) -> list:
     return tools
 
 
-def load_registry() -> list:
-    """Returns every callable — kernel plus graduated — to hand to ollama.chat."""
-    return KERNEL_TOOLS + _load_graduated_tools(_load_manifest())
+NETWORK_TOOL_NAMES = {"web_search", "fetch"}
+
+
+def load_registry(include_network: bool = True) -> list:
+    """Return the model-facing registry, optionally excluding network tools."""
+    tools = KERNEL_TOOLS + _load_graduated_tools(_load_manifest())
+    if not include_network:
+        tools = [fn for fn in tools if fn.__name__ not in NETWORK_TOOL_NAMES]
+    return tools
 
 
 def is_promoted(tool_name: str) -> bool:

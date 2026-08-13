@@ -14,6 +14,17 @@ import tempfile
 import shutil
 from pathlib import Path
 
+# Duplicated from list_dir_tool.py's SKIP_DIR_NAMES rather than imported —
+# these workspace/ tools are each standalone, independently runnable
+# scripts by design (see their own `__main__` blocks). Same real bug fixed
+# in both: only skipping .git meant a virtualenv or node_modules under the
+# search root got walked and grepped through in full, real noise observed
+# live in a SWE-bench checkout with a `.venv`.
+SKIP_DIR_NAMES = {
+    ".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules",
+    ".mypy_cache", ".tox", ".ruff_cache",
+}
+
 
 def grep_dir(pattern: str, path: str = "."):
     """Recursively search files under *path* for *pattern*. If *path* is a
@@ -77,9 +88,10 @@ def grep_dir(pattern: str, path: str = "."):
         base_for_relpath = path
 
     for dirpath, dirnames, filenames in walk_iter:
-        # Skip .git directories entirely (in-place mutation of dirnames).
+        # Skip noise directories entirely (in-place mutation of dirnames,
+        # required for os.walk to actually not descend into them).
         dirnames[:] = [
-            d for d in dirnames if d != ".git"
+            d for d in dirnames if d not in SKIP_DIR_NAMES and not d.endswith(".egg-info")
         ]
 
         for fname in filenames:
@@ -116,22 +128,15 @@ def grep_dir(pattern: str, path: str = "."):
             continue  # inner for completed normally — keep walking
         break  # inner for hit the break; we're done with os.walk loop
 
-    # If we hit the cap, append the omitted-count note as the last entry.
+    # If we hit the cap, append an honest truncation note. We intentionally
+    # stop at the cap rather than doing a second full traversal just to count
+    # matches in a potentially huge repository.
     if omit_notice_index is not None:
-        remaining = 200 - len(results)
-        # The last appended item was already at index `omit_notice_index`,
-        # so that's now also the count of matched items (should be 199 after
-        # appending the 200th, then breaking).  Actually let me recount:
-        # when len(results) == 200 we break without appending.
-        # The last appended item was at index 199.  We need to know how many
-        # total matches exist vs 200.  Since we only get exact count up to
-        # the cap, we report "and N more were omitted" with no precise N
-        # (we know at least 1).
         results.append(
             (
                 "",
                 0,
-                f"(... and {remaining} match(es) were omitted — total matches ≥ 200)",
+                "(... additional matches omitted — total matches >= 200)",
             )
         )
 
@@ -245,6 +250,21 @@ def _self_test() -> bool:
         literal_matches = grep_dir("arr[unclosed", path=os.path.join(tmp_root, "bracket.txt"))
         assert len(literal_matches) == 1, (
             f"Invalid-regex pattern should fall back to literal substring match, got {literal_matches}"
+        )
+
+        # Noise directories (.venv, __pycache__, etc.) must not be walked at
+        # all — real failure observed live: grep_dir against a SWE-bench
+        # checkout with a virtualenv matched noise inside .venv's own
+        # installed packages instead of just the real project source.
+        for noisy in (".venv", "__pycache__", "node_modules"):
+            noisy_dir = os.path.join(tmp_root, noisy)
+            os.makedirs(noisy_dir)
+            with open(os.path.join(noisy_dir, "noise.txt"), "w", encoding="utf-8") as fh:
+                fh.write(marker + "\n")
+        noise_matches = grep_dir(marker, path=tmp_root)
+        assert len(noise_matches) == 2, (
+            f"Noise directories should be skipped — expected still exactly 2 real matches, "
+            f"got {len(noise_matches)}: {noise_matches}"
         )
 
     finally:

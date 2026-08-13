@@ -14,11 +14,12 @@ import os
 import signal
 import subprocess
 
-from kernel.sandbox import get_root
+from kernel.sandbox import confine, get_root
 
 SHELL_TIMEOUT_SECONDS = 15
 MAX_SHELL_TIMEOUT_SECONDS = 120  # a hallucinated huge value shouldn't be able to hang a run indefinitely
 MAX_OUTPUT_CHARS = 4000
+MAX_COMMAND_TIMEOUT_SECONDS = 120
 
 
 def _truncate(text: str) -> str:
@@ -56,6 +57,44 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.wait()
         return f"TIMEOUT after {timeout}s — command likely hung."
+
+    return (
+        f"Exit code: {proc.returncode}\n"
+        f"STDOUT:\n{_truncate(stdout)}\n"
+        f"STDERR:\n{_truncate(stderr)}"
+    )
+
+
+def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: str = ".") -> str:
+    """Run an executable with argv semantics and a confined working directory.
+
+    Prefer this for tests and project commands. Unlike ``run_shell`` it does
+    not invoke a shell, so quoting, pipes, redirects, and shell metacharacters
+    cannot change the command's meaning.
+    """
+    if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
+        return "ERROR: command must be a non-empty list of strings."
+    try:
+        timeout = max(1, min(int(timeout), MAX_COMMAND_TIMEOUT_SECONDS))
+        workdir = confine(cwd)
+    except (TypeError, ValueError) as exc:
+        return f"ERROR: invalid command options: {exc}"
+    if not os.path.isdir(workdir):
+        return f"ERROR: cwd is not a directory: {cwd}"
+
+    try:
+        proc = subprocess.Popen(
+            command, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+            return f"TIMEOUT after {timeout}s — command likely hung."
+    except OSError as exc:
+        return f"ERROR: could not start command: {exc}"
 
     return (
         f"Exit code: {proc.returncode}\n"

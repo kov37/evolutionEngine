@@ -4,9 +4,14 @@
 Exposes ``list_dir(path: str) -> list[tuple[str, str]]`` which walks an
 entire directory tree and returns ``(kind, relative_path)`` tuples sorted
 alphabetically by *relative_path* (using forward-slash separators).
-Skips ``.git`` — a real, repeatedly-observed problem otherwise: pointed at
-a git repo's root, this tool used to dump hundreds of `.git/objects/...`
-entries before a single real project file, on every single run.
+Skips ``.git`` and other common noise directories (``.venv``/``venv``,
+``__pycache__``, ``.pytest_cache``, ``node_modules``, ``*.egg-info``,
+``.mypy_cache``, ``.tox``) — real, repeatedly-observed problems: pointed
+at a git repo's root, this used to dump hundreds of `.git/objects/...`
+entries before a single real project file; against a checked-out repo
+with a virtualenv (a real SWE-bench task tonight), a single `list_dir('.')`
+call dumped thousands of `.venv/lib/python3.9/site-packages/...` entries
+as its very first, wasted action.
 
 When executed as ``python list_dir_tool.py <dir>`` it prints one line per
 entry in the form ``<kind>: <relative_path>`` and exits 0.
@@ -20,6 +25,15 @@ import sys
 import tempfile
 import shutil
 from typing import List, Tuple
+
+SKIP_DIR_NAMES = {
+    ".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules",
+    ".mypy_cache", ".tox", ".ruff_cache",
+}
+
+
+def _is_skipped(name: str) -> bool:
+    return name in SKIP_DIR_NAMES or name.endswith(".egg-info")
 
 
 def list_dir(path: str) -> List[Tuple[str, str]]:
@@ -50,7 +64,7 @@ def list_dir(path: str) -> List[Tuple[str, str]]:
             return
 
         for name in entries:
-            if name == ".git":
+            if _is_skipped(name):
                 continue
             full_path = os.path.join(dirpath, name)
             if os.path.isdir(full_path):
@@ -114,6 +128,20 @@ def _run_self_test() -> None:
         assert entries_with_git == expected_entries, (
             f".git should be skipped entirely, got extra entries: "
             f"{set(entries_with_git) - set(expected_entries)}"
+        )
+
+        # .venv (and other noise dirs) must be skipped too — real failure
+        # observed live: list_dir('.') on a SWE-bench checkout with a
+        # virtualenv dumped thousands of .venv/lib/.../site-packages
+        # entries as its very first, wasted tool call of a run.
+        for noisy in (".venv", "__pycache__", "node_modules", "pkg.egg-info"):
+            os.makedirs(os.path.join(tmp_root, noisy, "sub"))
+            with open(os.path.join(tmp_root, noisy, "sub", "junk.txt"), "w") as fh:
+                fh.write("")
+        entries_with_noise = list_dir(tmp_root)
+        assert entries_with_noise == expected_entries, (
+            f"noise directories should be skipped entirely, got extra entries: "
+            f"{set(entries_with_noise) - set(expected_entries)}"
         )
 
         # Verify error path for non-existent root.

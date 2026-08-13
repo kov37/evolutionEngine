@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 
-def search_file(pattern: str, path: str) -> list[tuple[int, str]]:
+def search_file(pattern: str, filepath: str) -> list[tuple[int, str]]:
     """Scan *path* line by line and return every 1-indexed line that
     matches *pattern*, together with its content.
 
@@ -32,7 +32,7 @@ def search_file(pattern: str, path: str) -> list[tuple[int, str]]:
         line_matches = lambda line: pattern in line
 
     results: list[tuple[int, str]] = []
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(filepath, "r", encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, start=1):
             if line_matches(line):
                 results.append((lineno, line))

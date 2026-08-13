@@ -92,8 +92,13 @@ def read_file(path: str, offset: int = 1, limit: int = None) -> str:
     patch_file — its search text must match verbatim (a windowed read still
     returns exact, verbatim content for those lines, not a summary).
 
-    For a large file, prefer offset/limit over re-reading the whole thing
-    repeatedly — pass just the section you actually need.
+    For a small-to-moderate file (up to ~2000 lines), call this WITHOUT
+    limit and read the whole thing in one call — you don't yet know which
+    section you need until you've seen the file, so windowing blind forces
+    many small reads to sweep something you could see in one. Only use
+    offset/limit for a genuinely huge file, or to re-read a specific section
+    you've already located (e.g. right before a patch_file call, to confirm
+    exact current whitespace).
 
     Args:
       path: Filename to read, e.g. 'patch_validator.py'.
@@ -158,6 +163,16 @@ def write_file(path: str, content: str) -> str:
     return _test_after_write(full_path)
 
 
+def _visible_whitespace(text: str) -> str:
+    """Render whitespace visibly (·  for space, → for tab) so a model
+    comparing two near-identical blocks can actually SEE which invisible
+    character differs, instead of guessing. Built after a real failure: a
+    patch_file search text was rejected for a single-space indentation
+    difference (9 spaces vs. the file's real 8) that was invisible in a
+    normal text diff but obvious once whitespace is rendered."""
+    return text.replace("\t", "→").replace(" ", "·")
+
+
 def _find_closest_match_hint(content: str, search: str, max_lines_scanned: int = 3000) -> str:
     """Best-effort fuzzy-match hint appended to a failed patch_file search.
     A near-miss (stale whitespace, one changed line, a slightly-off quote)
@@ -187,19 +202,57 @@ def _find_closest_match_hint(content: str, search: str, max_lines_scanned: int =
     return (
         f"\n\nClosest match found (lines {best_start + 1}-{best_start + window}, "
         f"{best_ratio:.0%} similar) — compare it against your search text for the "
-        f"exact difference:\n{snippet}"
+        f"exact difference. Whitespace shown visibly below (· = space, → = tab) since "
+        f"that's the most common cause of a near-miss:\n"
+        f"--- your search text ---\n{_visible_whitespace(search)}\n"
+        f"--- actual file content at that location ---\n{_visible_whitespace(snippet)}"
     )
+
+
+def _find_whitespace_tolerant_match(content: str, search: str):
+    """Locate `search` as a contiguous run of lines in `content`, ignoring
+    trailing whitespace and \\r differences per line — NOT leading/internal
+    whitespace, which stays strictly required (Python is indentation-
+    sensitive, so silently tolerating that would risk applying a
+    replacement that reads correctly to a diff tool but is wrong at
+    runtime). Trailing-whitespace tolerance is safe with no such risk: the
+    matched region is replaced wholesale by `replace`, so nothing about the
+    original trailing whitespace is ever preserved or needs reconciling.
+
+    Returns (start_char_offset, end_char_offset) into `content` for the
+    real matched text, or None. Caller substitutes content[start:end] with
+    `replace` — same effect as content.replace(search, replace, 1) but
+    tolerant of the one real failure mode observed live (a trailing-space/
+    line-ending mismatch causing an otherwise-correct search to be
+    rejected)."""
+    search_lines = search.splitlines()
+    if not search_lines:
+        return None
+    content_lines = content.splitlines(keepends=True)
+    norm_search = [line.rstrip() for line in search_lines]
+    norm_content = [line.rstrip("\r\n").rstrip() for line in content_lines]
+
+    window = len(search_lines)
+    for start in range(0, len(content_lines) - window + 1):
+        if norm_content[start:start + window] == norm_search:
+            char_start = sum(len(l) for l in content_lines[:start])
+            char_end = char_start + sum(len(l) for l in content_lines[start:start + window])
+            return char_start, char_end
+    return None
 
 
 def patch_file(path: str, search: str, replace: str) -> str:
     """Surgically replace one exact substring inside a file that already
     exists in the workspace. Use this for small, targeted edits instead of
     rewriting the whole file. Call read_file first to see the exact current
-    text — the search string must match verbatim, including whitespace.
+    text. The search string's real content and indentation must match
+    verbatim — trailing whitespace and line-ending differences are tolerated,
+    everything else is not.
 
     Args:
       path: Filename to patch, e.g. 'patch_validator.py'. Must already exist.
-      search: Exact text to find, including whitespace — must match verbatim.
+      search: Exact text to find — content and indentation must match verbatim
+        (trailing whitespace/line endings are tolerated).
       replace: Text to substitute in place of the search match.
     """
     full_path = _resolve(path)
@@ -212,14 +265,19 @@ def patch_file(path: str, search: str, replace: str) -> str:
     search = _strip_code_fences(search)
     replace = _strip_code_fences(replace)
 
-    if search not in content:
-        hint = _find_closest_match_hint(content, search)
-        return (
-            f"ERROR: search text was not found verbatim in '{path}'. "
-            f"Call read_file to see the exact current contents, then retry.{hint}"
-        )
-
-    new_content = content.replace(search, replace, 1)
+    if search in content:
+        new_content = content.replace(search, replace, 1)
+    else:
+        match = _find_whitespace_tolerant_match(content, search)
+        if match is None:
+            hint = _find_closest_match_hint(content, search)
+            return (
+                f"ERROR: search text was not found verbatim in '{path}' (checked exact match and "
+                f"trailing-whitespace-tolerant match — indentation and content still must match "
+                f"exactly). Call read_file to see the exact current contents, then retry.{hint}"
+            )
+        start, end = match
+        new_content = content[:start] + replace + content[end:]
     valid, err = validate_python_syntax(full_path, new_content)
     if not valid:
         return f"REJECTED (invalid syntax, nothing written): {err}"
