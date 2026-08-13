@@ -1,0 +1,1 @@
+{"task": "bug_repair", "condition": "baseline", "passed": true, "detail": "", "timed_out": false, "returncode": 0, "elapsed_seconds": 87.7, "metrics": {"iterations": 14, "tool_calls": 14, "failure_lines": 4, "done_signal": false, "novelty": null}}
