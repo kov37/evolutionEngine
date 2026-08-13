@@ -337,8 +337,14 @@ class NoveltyContext:
     def render_for_model(self) -> str:
         judgment = self.collect(wait=False)
         with self._lock:
-            return "## Context manager state\n" + judgment.render() + \
-                   f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
+            rendered = "## Context manager state\n" + judgment.render()
+            if judgment.stagnating:
+                rendered += (
+                    "\nContext worker signal: repeated or non-progress actions detected. "
+                    "Use the evidence already gathered and take the recommended concrete action "
+                    "before performing another routine read."
+                )
+            return rendered + f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
                    f"busy drops: {self.worker_busy_drops}."
 
     def metrics(self) -> dict[str, Any]:

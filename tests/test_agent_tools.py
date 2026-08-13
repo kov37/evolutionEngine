@@ -88,6 +88,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(judgment.source, "4b")
 
+    def test_stagnation_judgment_becomes_actionable_prompt_signal(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"))
+        context.last_judgment = WorkerJudgment(
+            phase="mutate", stagnating=True, recommended_action="patch_file", source="4b"
+        )
+        rendered = context.render_for_model()
+        context.close()
+        self.assertIn("repeated or non-progress actions detected", rendered)
+        self.assertIn("patch_file", rendered)
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])
