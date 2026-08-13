@@ -405,6 +405,11 @@ class NoveltyContext:
             return (len(recent) >= self.action_after_events and
                     not any(e.mutation or e.validation for e in recent))
 
+    def recovery_reads_allowed(self) -> bool:
+        """Allow only a short targeted-read grace period once gated."""
+        with self._lock:
+            return len(self.events) < self.action_after_events + 2
+
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.
         self.collect(wait=False)
