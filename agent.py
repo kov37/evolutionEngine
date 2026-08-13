@@ -395,16 +395,17 @@ You have this focused toolbelt: {offered_tool_names}.
                     }]
 
         if novelty_context is not None and novelty_context.requires_progress():
-            progress_tools = {"patch_file", "write_file", "run_tests", "run_command", "run_shell",
-                              "finish_task", "recall"}
+            progress_tools = {"read_file", "find_files", "patch_file", "write_file", "run_tests",
+                              "run_command", "run_shell", "finish_task", "recall"}
             gated_names = {t.__name__ for t in tools_for_call} & progress_tools
             tools_for_call = [t for t in tools_for_call if t.__name__ in gated_names]
             messages_for_call = messages_for_call + [{
                 "role": "system",
                 "content": (
                     "[novelty context action gate] The recent context window contains no mutation or "
-                    "validation. Observation tools are temporarily unavailable. Use the evidence already "
-                    "gathered to patch, validate, finish, or recall exact prior text."
+                    "validation. Broad exploration tools are temporarily unavailable. Use targeted "
+                    "read_file/find_files only to establish the exact file, then patch, validate, finish, "
+                    "or recall exact prior text."
                 ),
             }]
 
