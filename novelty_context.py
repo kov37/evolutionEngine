@@ -221,6 +221,7 @@ class NoveltyContext:
         self.worker_failures = 0
         self.worker_busy_drops = 0
         self.started_at = monotonic()
+        self.no_action_turns = 0
 
     def state_text(self) -> str:
         with self._lock:
@@ -283,6 +284,54 @@ class NoveltyContext:
                 self._process.start()
                 child_conn.close()
             else:
+                self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
+
+    def observe_no_action(self, iteration: int, content: str = "") -> None:
+        """Record an actor turn that produced prose but no executable action.
+
+        A stalled first turn is itself useful context.  It must not wait for
+        the normal eight-event sampling interval, otherwise the small worker
+        arrives only after the useful recovery window has already passed.
+        """
+        event = ContextEvent(
+            iteration=iteration,
+            tool="actor_turn_no_action",
+            arguments={},
+            result=str(content)[:MAX_EVENT_CHARS],
+            result_fingerprint=_fingerprint("actor_turn_no_action", {}, str(content)),
+        )
+        with self._lock:
+            self.events.append(event)
+            self.events = self.events[-100:]
+            self.no_action_turns += 1
+            if self._process_mode:
+                busy = self._process is not None and self._process.is_alive()
+                if busy:
+                    self.worker_busy_drops += 1
+                    return
+                fallback = WorkerJudgment(
+                    phase="mutate", recommended_action="patch_file",
+                    blocker="The actor returned no executable tool call.",
+                    confidence=0.9,
+                )
+                parent_conn, child_conn = multiprocessing.Pipe(False)
+                self._process_conn = parent_conn
+                process_factory = multiprocessing.get_context("fork").Process
+                self._process = process_factory(
+                    target=_ollama_process,
+                    args=(_prompt(self.state_text(), event), self.worker_model,
+                          self.worker_num_ctx, child_conn), daemon=True,
+                )
+                self.worker_calls += 1
+                self._process.start()
+                child_conn.close()
+                self.last_judgment = fallback
+            elif self._future is None or self._future.done():
+                fallback = WorkerJudgment(
+                    phase="mutate", recommended_action="patch_file",
+                    blocker="The actor returned no executable tool call.",
+                    confidence=0.9,
+                )
                 self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
 
     def _judge(self, state: str, event: ContextEvent, fallback: WorkerJudgment) -> WorkerJudgment:
@@ -403,6 +452,13 @@ class NoveltyContext:
                     "Use this recommendation if it matches the repository evidence; do not perform broad "
                     "exploration before addressing it."
                 )
+            if action_critic and self.no_action_turns:
+                rendered += (
+                    "\n## Immediate recovery directive\n"
+                    "The actor recently returned without an executable tool call. Stop explaining and "
+                    "take one concrete action now: use write_file or patch_file to create or change the "
+                    "smallest useful artifact, then validate it with run_tests or run_command."
+                )
             return rendered + f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
                    f"busy drops: {self.worker_busy_drops}."
 
@@ -451,7 +507,13 @@ class NoveltyContext:
         before the 35B could apply one on the real SymPy task.
         """
         with self._lock:
-            return len(self.events) < self.action_after_events + 8
+            # One bounded orientation window is enough to identify a target.
+            # Keeping reads open for another eight events allowed the actor
+            # to reread the same file indefinitely without attempting the
+            # already-supported mutation. Once the window closes, the gate
+            # still permits patch/validation/command tools, so this is a
+            # progress policy rather than a model-specific instruction.
+            return len(self.events) < self.action_after_events
 
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.
@@ -462,4 +524,7 @@ class NoveltyContext:
         if self._process_conn is not None:
             self._process_conn.close()
             self._process_conn = None
-        self._executor.shutdown(wait=True)
+        # The worker is advisory and its result is no longer useful once the
+        # actor has stopped. Never let a model/provider hang delay benchmark
+        # shutdown or make the parent appear stuck.
+        self._executor.shutdown(wait=False, cancel_futures=True)

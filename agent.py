@@ -11,6 +11,9 @@ import argparse
 import json
 import signal
 import time
+import urllib.request
+import urllib.error
+from types import SimpleNamespace
 
 from ollama import Client, chat
 
@@ -26,6 +29,7 @@ import sidecar
 import status_report
 import structured_state
 import task_contract
+import validation_contract
 import worker
 import working_state
 from dispatch import dispatch_tool_calls
@@ -43,8 +47,164 @@ class ChatTimeoutError(TimeoutError):
     """The acting model stopped responding within one bounded turn."""
 
 
-def _chat_with_timeout(*, timeout_seconds, **kwargs):
+def _json_message(message):
+    if isinstance(message, dict):
+        out = dict(message)
+    elif hasattr(message, "model_dump"):
+        out = message.model_dump(exclude_none=True)
+    else:
+        out = {"role": getattr(message, "role", "assistant"),
+               "content": getattr(message, "content", "")}
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            out["tool_calls"] = []
+            for call in tool_calls:
+                function = getattr(call, "function", None)
+                if isinstance(call, dict):
+                    function = call.get("function", {})
+                    name = function.get("name", "")
+                    arguments = function.get("arguments", {})
+                else:
+                    name = getattr(function, "name", "")
+                    arguments = getattr(function, "arguments", {})
+                out["tool_calls"].append({
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                })
+    if out.get("role") == "tool" and "tool_name" in out:
+        out["name"] = out.pop("tool_name")
+    return out
+
+
+def _normalize_llama_messages(raw_messages):
+    """Adapt the engine's append-only history to strict chat templates.
+
+    This is deliberately transport-local: the engine can retain its richer
+    history while a backend repairs only representational issues required by
+    its model template.  Mistral's template requires user/assistant turns to
+    alternate, with tool results immediately following an assistant tool call.
+    """
+    messages = [_json_message(m) for m in raw_messages]
+    system_messages = [m for m in messages if m.get("role") == "system"]
+    system_text = str(system_messages[0].get("content", "")).strip() if system_messages else ""
+    transient_system = "\n\n".join(
+        str(m.get("content", "")) for m in system_messages[1:]
+    ).strip()
+    messages = [m for m in messages if m.get("role") != "system"]
+
+    # Preserve the stable system role and prefix. The native template supports
+    # one leading system message; moving it into the first user turn would
+    # invalidate llama.cpp's prefix KV cache on every transient update.
+    if system_text:
+        messages.insert(0, {"role": "system", "content": system_text})
+
+    # Later system messages are transient summaries/interventions. Keep them
+    # at the changing tail instead of rewriting the stable prefix.
+    if transient_system and messages:
+        tail = messages[-1]
+        if tail.get("role") in {"user", "tool"}:
+            tail["content"] = str(tail.get("content", "")) + \
+                "\n\n[TRANSIENT INSTRUCTIONS]\n" + transient_system
+        elif tail.get("role") == "assistant" and not tail.get("tool_calls"):
+            messages.append({"role": "user", "content":
+                             "[TRANSIENT INSTRUCTIONS]\n" + transient_system})
+
+    normalized = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        if role == "user" and normalized and normalized[-1].get("role") == "tool":
+            # The generic loop may append a completion/repair instruction
+            # after a tool result. Mistral's template requires the next turn
+            # to be assistant, so carry that instruction with the tool result
+            # rather than emitting an invalid user-after-tool transition.
+            normalized[-1]["content"] = (
+                str(normalized[-1].get("content", ""))
+                + "\n\n[FOLLOW-UP INSTRUCTION]\n"
+                + str(message.get("content", ""))
+            )
+            continue
+        if role == "user" and normalized and normalized[-1].get("role") == "user":
+            # Multiple transient user nudges are one user turn to Mistral's
+            # alternating-role checker.
+            previous = normalized[-1]
+            previous["content"] = str(previous.get("content", "")) + "\n\n" + str(message.get("content", ""))
+            continue
+        if role == "tool" and (not normalized or normalized[-1].get("role") != "assistant"):
+            # An intervention/compaction boundary must never leave an orphan
+            # tool result. Preserve its evidence as a user-visible result.
+            message = {
+                "role": "user",
+                "content": "[ORPHANED TOOL RESULT]\n" + str(message.get("content", "")),
+            }
+            if normalized and normalized[-1].get("role") == "user":
+                normalized[-1]["content"] += "\n\n" + message["content"]
+                continue
+        normalized.append(message)
+    return normalized
+
+
+def _llama_cpp_chat(*, base_url, timeout_seconds, **kwargs):
+    """Call llama-server's OpenAI-compatible endpoint as the actor backend."""
+    from ollama import _utils
+
+    messages = _normalize_llama_messages(kwargs.get("messages", []))
+
+    payload = {
+        "model": kwargs["model"],
+        "messages": messages,
+        "stream": False,
+        # Agent turns should be decisive and bounded.  The Ollama path gets
+        # these from its model defaults; llama-server otherwise defaults to
+        # temperature 0.8 with unlimited generation, which can spend minutes
+        # explaining before emitting a tool call.
+        "temperature": 0.15,
+        "max_tokens": kwargs.get("max_tokens", 1024),
+        "reasoning_format": "none",
+        "reasoning_effort": "none",
+        "parallel_tool_calls": False,
+        "tools": [json.loads(_utils.convert_function_to_tool(fn).model_dump_json(exclude_none=True))
+                  for fn in kwargs.get("tools", [])],
+    }
+    if kwargs.get("tool_choice") is not None:
+        payload["tool_choice"] = kwargs["tool_choice"]
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds or None) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise RuntimeError(f"llama.cpp HTTP {exc.code}: {detail}") from exc
+    raw = ((data.get("choices") or [{}])[0].get("message") or {})
+    calls = []
+    for call in raw.get("tool_calls") or []:
+        fn = call.get("function") or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        calls.append(SimpleNamespace(function=SimpleNamespace(
+            name=fn.get("name", ""), arguments=args)))
+    message = SimpleNamespace(role="assistant", content=raw.get("content") or "",
+                              tool_calls=calls or None, thinking=None)
+    usage = data.get("usage") or {}
+    return SimpleNamespace(message=message, prompt_eval_count=usage.get("prompt_tokens", 0),
+                           eval_count=usage.get("completion_tokens", 0),
+                           prompt_eval_duration=0, eval_duration=0)
+
+
+def _chat_with_timeout(*, timeout_seconds, backend="ollama",
+                       base_url="http://127.0.0.1:8080/v1", **kwargs):
     """Call Ollama without allowing one turn to strand the whole run."""
+    if backend == "llama-cpp":
+        return _llama_cpp_chat(base_url=base_url, timeout_seconds=timeout_seconds, **kwargs)
     if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
         return chat(**kwargs)
 
@@ -168,7 +328,7 @@ NUM_CTX = 65536
 MAX_CHAT_RETRIES = 20
 
 
-def _completion_ready(messages, task_type):
+def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
         return True, None
@@ -182,14 +342,18 @@ def _completion_ready(messages, task_type):
         content = str(message.get("content", ""))
         if name in {"write_file", "patch_file"} and not content.startswith(("ERROR:", "REJECTED")):
             mutated = True
-        if name == "run_tests" and content.startswith("(True,"):
-            validated = True
-        if name in {"run_shell", "run_command"} and "Exit code: 0" in content:
+        if (validation_plan.assess(name, {}, content)[0] if validation_plan
+                else action_governor.is_substantive_validation(name, {}, content)):
             validated = True
     if not mutated:
         return False, "no successful write_file or patch_file call has been observed"
     if not validated:
         return False, "no passing run_tests, run_command, or run_shell result has been observed"
+    if validation_plan and validation_plan.endpoints:
+        evidence = validation_evidence or set()
+        covered = {endpoint for endpoint in validation_plan.endpoints if any(endpoint.lower() in item.lower() for item in evidence)}
+        if len(covered) < len(validation_plan.endpoints):
+            return False, f"only {len(covered)}/{len(validation_plan.endpoints)} required interfaces have validation evidence"
     return True, None
 
 # A hard forcing function (removing read-only tools from what the model is
@@ -213,7 +377,8 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
               task_type="code_change", think=False, status_path=None, distribution_target_file=None,
               distribution_names=None, novelty_context_enabled=False, novelty_worker_model="qwen3.5:4b",
               novelty_action_gate=False, novelty_action_critic=False,
-              chat_timeout=CHAT_TIMEOUT_SECONDS):
+              chat_timeout=CHAT_TIMEOUT_SECONDS, backend="ollama",
+              base_url="http://127.0.0.1:8080/v1", action_first=False):
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
@@ -281,6 +446,18 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     current_level = 0
     recent_errors = []
     novelty_context = NoveltyContext(worker_model=novelty_worker_model) if novelty_context_enabled else None
+    # A mutation opens a deterministic verification phase. The actor may
+    # choose how to validate, but it cannot make another edit or deliver until
+    # one validation action succeeds. This is an engine policy, independent of
+    # model, provider, task wording, or tool names beyond their capabilities.
+    validation_required = False
+    validation_failures = 0
+    repair_required = False
+    last_validation_failure = ""
+    last_repair_packet = ""
+    validation_plan = validation_contract.from_task(task, task_type)
+    validation_evidence = set()
+    validation_criteria_hits = set()
 
     def close_novelty_context():
         if novelty_context is not None:
@@ -386,6 +563,24 @@ You have this focused toolbelt: {offered_tool_names}.
         else:
             messages_for_call = messages
 
+        if validation_required:
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": (
+                    "## Verification required\n"
+                    "A previous mutation succeeded but has not yet been independently validated. "
+                    "Perform one concrete validation action now using run_tests, run_command, or "
+                    "run_shell. Do not edit files or call finish_task until validation succeeds. "
+                    "The check must exercise the changed behavior or artifact, not merely list or "
+                    "diff the file. For APIs, send representative requests and assert status codes "
+                    "and response structure; for CLIs, check exit status and output; for libraries, "
+                    "run the focused regression test. Record failures and repair from their evidence. "
+                    + validation_plan.render() + "\n"
+                    + (f"The previous validation failed {validation_failures} time(s); use the failure "
+                       "output to choose the next targeted check." if validation_failures else "")
+                ),
+            }]
+
         if novelty_context is not None:
             if novelty_action_critic and novelty_context.requires_progress():
                 messages_for_call = _intervention_messages(messages_for_call)
@@ -400,6 +595,26 @@ You have this focused toolbelt: {offered_tool_names}.
         # FORCE_EDIT_AFTER_ITERATIONS gate; see escalation_governor.py's
         # docstring for why graduated intervention beats a single hard cutoff.
         tools_for_call = tools
+        if validation_required:
+            print(f"🔒 [validation phase active] failures={validation_failures}")
+        if action_first and iteration == 1:
+            # A model-neutral interaction policy: reduce choice overload for
+            # the first executable turn, then restore the complete registry.
+            # This is deliberately independent of provider, model name, and
+            # quantization; it is an engine-level contract for agents that
+            # need to begin changing a workspace promptly.
+            first_action_names = {"write_file", "patch_file", "read_file",
+                                  "run_command", "finish_task"}
+            tools_for_call = [t for t in tools if t.__name__ in first_action_names]
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": (
+                    "Initial action contract: take one concrete executable step now. Use the "
+                    "available file or command tool to begin the requested work; do not return "
+                    "a plan or broad exploration. The full toolbelt returns after this turn."
+                ),
+            }]
+            print(f"🎯 [initial action contract] {[t.__name__ for t in tools_for_call]}")
         if _governed and ledger.history:
             signal = progress_governor.evaluate(ledger, contract, task=task, repo_size_hint=repo_size_hint)
             last_dup = next(
@@ -466,14 +681,49 @@ You have this focused toolbelt: {offered_tool_names}.
                 ),
             }]
 
+        if validation_required:
+            # Validation and repair are separate states. After a failed
+            # check, force an inspect/repair turn before offering another
+            # check; otherwise a model can loop over superficially different
+            # probes without ever changing the defective artifact.
+            if repair_required:
+                validation_tools = {"read_file", "find_files", "search_file", "patch_file", "write_file",
+                                     "diff_files", "git_diff"}
+            else:
+                validation_tools = {"run_tests", "run_command", "run_shell", "diff_files", "git_diff"}
+            tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": (
+                    ("A validation check failed. Inspect this failure and make one targeted repair now; "
+                     "do not run another check or finish until you have changed the defective artifact. "
+                    "Failure evidence:\n" + last_repair_packet if repair_required
+                     else "Validation phase tool restriction: only validation tools are available this turn. "
+                          "Run a focused test or executable check and inspect its result.")
+                ),
+            }]
+
         response = None
         last_error = None
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
             try:
-                response = _chat_with_timeout(
+                chat_kwargs = dict(
                     timeout_seconds=chat_timeout, model=MODEL, messages=messages_for_call,
                     tools=tools_for_call, think=think, options={"num_ctx": NUM_CTX},
+                    backend=backend, base_url=base_url,
                 )
+                if action_first and iteration == 1 and backend == "llama-cpp":
+                    # The OpenAI-compatible required choice is a generic
+                    # protocol control, not a model-specific prompt trick.
+                    if any(t.__name__ == "write_file" for t in tools_for_call):
+                        chat_kwargs["tool_choice"] = {
+                            "type": "function",
+                            "function": {"name": "write_file"},
+                        }
+                    else:
+                        chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = 2048
+                response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
                 last_error = e
@@ -541,9 +791,16 @@ You have this focused toolbelt: {offered_tool_names}.
 
         if not msg.tool_calls:
             print("⚠️  Model returned no tool call — nudging it to act.")
+            if novelty_context is not None:
+                novelty_context.observe_no_action(iteration, msg.content or "")
+                print(f"🧬 [novelty recovery] {novelty_context.render_for_model(action_critic=True)}")
             messages.append({
                 "role": "user",
-                "content": "You must call a tool to make progress, or call finish_task if you're actually done.",
+                "content": (
+                    "Do not return another explanation. Take one executable action now. Use write_file "
+                    "or patch_file to create the smallest useful artifact, then validate it; call "
+                    "finish_task only after verification."
+                ),
             })
             continue
 
@@ -574,14 +831,78 @@ You have this focused toolbelt: {offered_tool_names}.
         )
         messages.extend(tool_messages)
 
+        validation_phase_before_turn = validation_required
+        turn_mutated = False
+        turn_validation_succeeded = False
+        turn_validation_failed = False
+        validation_suggestions = []
+        for call, tmsg in zip(msg.tool_calls, tool_messages):
+            tool_name = call.function.name
+            args = call.function.arguments or {}
+            capability = action_governor.classify(tool_name, args)
+            result = tmsg.get("content", "")
+            success = action_governor.infer_success(capability, tool_name, result)
+            if capability == "MUTATE" and success is True:
+                turn_mutated = True
+            # During the verification phase, a successful executable check is
+            # validation even when the command is an app/API smoke test rather
+            # than a pytest command and the general classifier calls it OBSERVE.
+            phase_validation = validation_required and tool_name in {
+                "run_tests", "run_command", "run_shell", "diff_files", "git_diff"
+            }
+            if capability == "VALIDATE" or phase_validation:
+                assessment = validation_plan.assess(tool_name, args, result)
+                if success is True and assessment[0] and assessment[3] not in validation_evidence:
+                    turn_validation_succeeded = True
+                    validation_evidence.add(assessment[3])
+                    validation_criteria_hits.update(assessment[4])
+                elif success is False or result.startswith(("ERROR:", "REJECTED:")):
+                    turn_validation_failed = True
+                    validation_suggestions.append(assessment[2])
+                elif phase_validation:
+                    turn_validation_failed = True
+                    validation_suggestions.append(assessment[1])
+        if turn_mutated:
+            if repair_required:
+                repair_required = False
+                validation_failures = 0
+                print("🛠️  [repair phase] targeted mutation landed; returning to validation")
+            validation_required = True
+            validation_failures = 0
+            print("🔒 [validation phase] mutation succeeded; validation required before another edit")
+        if turn_validation_failed and validation_required:
+            validation_failures += 1
+            repair_required = True
+            failed_packets = []
+            for call, tmsg in zip(msg.tool_calls, tool_messages):
+                name = call.function.name
+                args = call.function.arguments or {}
+                if name in {"run_tests", "run_command", "run_shell", "diff_files", "git_diff"}:
+                    packet = validation_plan.failure_packet(name, args, tmsg.get("content", ""))
+                    failed_packets.append(packet)
+            last_repair_packet = "\n\n".join(failed_packets)[-3000:]
+            last_validation_failure = "; ".join(dict.fromkeys(s for s in validation_suggestions if s))[-1200:]
+            messages.append({"role": "system", "content": (
+                last_repair_packet or ("Validation feedback: " + "; ".join(dict.fromkeys(s for s in validation_suggestions if s)))
+            )})
+            print(f"⚠️  [validation phase] validation failed ({validation_failures}); targeted repair required before recheck")
+        if turn_validation_succeeded:
+            validation_required = False
+            validation_failures = 0
+            print("✅ [validation phase] independent validation succeeded; edits reopened")
+
         if novelty_context is not None:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
                 args = call.function.arguments or {}
                 tool_name = call.function.name
                 capability = action_governor.classify(tool_name, args)
+                phase_validation = validation_phase_before_turn and tool_name in {
+                    "run_tests", "run_command", "run_shell", "diff_files", "git_diff"
+                }
                 novelty_context.observe(
                     iteration, tool_name, args, tmsg["content"],
-                    mutation=capability == "MUTATE", validation=capability == "VALIDATE",
+                    mutation=capability == "MUTATE",
+                    validation=capability == "VALIDATE" or phase_validation,
                 )
             print(f"🧬 [novelty context] {novelty_context.render_for_model()}")
 
@@ -799,7 +1120,7 @@ You have this focused toolbelt: {offered_tool_names}.
             messages[0]["content"] = system_prompt + sidecar.render_sidecar(sidecar_log)
 
         if TASK_STATE["requested"] and not TASK_STATE["done"]:
-            ready, reason = _completion_ready(messages, task_type)
+            ready, reason = _completion_ready(messages, task_type, validation_plan, validation_evidence, validation_criteria_hits)
             if ready:
                 approve_task()
                 print(f"✅ Completion evidence verified: {TASK_STATE['summary']}")
@@ -860,6 +1181,18 @@ if __name__ == "__main__":
         "--model", default=MODEL,
         help=f"Ollama model tag for the orchestrator's own calls (default {MODEL!r}). "
              "Per-run override only — does not change the module default.",
+    )
+    parser.add_argument(
+        "--backend", choices=["ollama", "llama-cpp"], default="ollama",
+        help="Actor serving backend (default: ollama).",
+    )
+    parser.add_argument(
+        "--base-url", default="http://127.0.0.1:8080/v1",
+        help="OpenAI-compatible base URL for --backend llama-cpp.",
+    )
+    parser.add_argument(
+        "--action-first", action="store_true",
+        help="Use a model-neutral initial action contract with a small executable tool surface.",
     )
     parser.add_argument(
         "--network", action="store_true",
@@ -984,4 +1317,5 @@ if __name__ == "__main__":
               distribution_names=args.distribution_names.split(",") if args.distribution_names else None,
               novelty_context_enabled=args.novelty_context, novelty_worker_model=args.novelty_worker_model,
               novelty_action_gate=args.novelty_action_gate, novelty_action_critic=args.novelty_action_critic,
-              chat_timeout=args.chat_timeout)
+              chat_timeout=args.chat_timeout, backend=args.backend, base_url=args.base_url,
+              action_first=args.action_first)

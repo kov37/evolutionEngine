@@ -69,7 +69,15 @@ def _run_tests(project: Path, test_patch: str) -> dict:
     (project / "sitecustomize.py").write_text(
         "import collections, collections.abc\n"
         "for _name in ('Mapping', 'MutableMapping', 'MutableSet', 'Sequence', 'Iterable', 'Callable'):\n"
-        "    if not hasattr(collections, _name): setattr(collections, _name, getattr(collections.abc, _name))\n",
+        "    if not hasattr(collections, _name): setattr(collections, _name, getattr(collections.abc, _name))\n"
+        "try:\n"
+        "    import setuptools._distutils as _distutils\n"
+        "    import sys\n"
+        "    sys.modules.setdefault('distutils', _distutils)\n"
+        "    import setuptools._distutils.version as _version\n"
+        "    sys.modules.setdefault('distutils.version', _version)\n"
+        "except ImportError:\n"
+        "    pass\n",
         encoding="utf-8",
     )
     patch_path = project / ".swebench_test.patch"
@@ -104,7 +112,9 @@ def _run_tests(project: Path, test_patch: str) -> dict:
 def run(mode: str, iterations: int, primary_model: str | None = None,
         worker_model: str | None = None, action_critic: bool = False,
         chat_timeout: float | None = None, action_gate: bool = False,
-        structured_summary: bool = False) -> dict:
+        structured_summary: bool = False, backend: str = "ollama",
+        base_url: str = "http://127.0.0.1:8080/v1",
+        action_first: bool = False) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -119,6 +129,9 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     status_file = work / "status.json"
     command = [sys.executable, str(ROOT / "agent.py"), "--project", str(candidate),
                "--iteration-budget", str(iterations), "--status-file", str(status_file), task]
+    command[2:2] = ["--backend", backend, "--base-url", base_url]
+    if action_first:
+        command[2:2] = ["--action-first"]
     if primary_model:
         command[2:2] = ["--model", primary_model]
     if mode == "novelty":
@@ -157,6 +170,9 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "chat_timeout": chat_timeout,
         "action_gate": action_gate,
         "structured_summary": structured_summary,
+        "backend": backend,
+        "base_url": base_url,
+        "action_first": action_first,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -186,6 +202,11 @@ if __name__ == "__main__":
                         help="Enable bounded tool restriction after novelty stagnation.")
     parser.add_argument("--structured-summary", action="store_true",
                         help="Also enable the separate structured-summary/governor layer.")
+    parser.add_argument("--backend", choices=["ollama", "llama-cpp"], default="ollama")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
+    parser.add_argument("--action-first", action="store_true",
+                        help="Use the model-neutral initial action contract.")
     args = parser.parse_args()
     run(args.mode, args.iterations, args.primary_model, args.worker_model,
-        args.action_critic, args.chat_timeout, args.action_gate, args.structured_summary)
+        args.action_critic, args.chat_timeout, args.action_gate, args.structured_summary,
+        args.backend, args.base_url, args.action_first)

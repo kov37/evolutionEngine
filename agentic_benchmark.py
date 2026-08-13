@@ -79,6 +79,49 @@ def _metrics(output: str) -> dict:
 
 
 TASKS = {
+    "wifi_simulator": Task(
+        name="wifi_simulator",
+        prompt=(
+            "Create a polished, self-contained offline web GUI named wifi-simulator.html. "
+            "It must be an educational simulation only: do not access real Wi-Fi, send packets, "
+            "open sockets, invoke processes, or make network requests. Simulate an access point, "
+            "clients, and a defensive monitor entirely in browser memory. Include a clear safety "
+            "notice, scenario controls for Normal traffic, Deauthentication simulation, Rogue AP "
+            "simulation, and Recovery, a visual topology showing AP/client connections, a live event "
+            "timeline, and a defensive explanation that identifies observable indicators and safe "
+            "mitigations. Add Start, Pause, Reset, and scenario controls; make state changes visible "
+            "and accessible. Use inline CSS and JavaScript only, with no external dependencies. "
+            "Open the file locally or serve it with Python's standard-library server and verify the "
+            "primary controls work before calling finish_task."
+        ),
+        setup={
+            "README.md": (
+                "# Offline Wi-Fi simulator\n\n"
+                "Build a browser-only educational simulator. It must never interact with real networks.\n"
+            ),
+        },
+        grade=(
+            "from pathlib import Path\n"
+            "import re\n"
+            "html = Path('wifi-simulator.html').read_text(encoding='utf-8')\n"
+            "lower = html.lower()\n"
+            "assert len(html) > 5000, 'simulator needs a considered UI and interaction model'\n"
+            "required = ['start', 'pause', 'reset', 'normal', 'deauthentication', 'rogue', 'recovery',\n"
+            "            'timeline', 'access point', 'client', 'mitigation']\n"
+            "missing = [x for x in required if x not in lower]\n"
+            "assert not missing, f'missing simulator concepts: {missing}'\n"
+            "forbidden = [r'\\bimport\\s+socket', r'\\bfrom\\s+socket', r'\\bfetch\\s*\\(',\n"
+            "             r'\\bXMLHttpRequest\\b', r'\\bWebSocket\\b', r'\\bscapy\\b',\n"
+            "             r'child_process', r'\\bexec\\s*\\(', r'\\bspawn\\s*\\(']\n"
+            "hits = [p for p in forbidden if re.search(p, lower)]\n"
+            "assert not hits, f'unsafe runtime primitive found: {hits}'\n"
+            "assert re.search(r'<(canvas|svg)\\b', lower), 'topology needs a visual surface'\n"
+            "assert re.search(r'addEventListener|onclick|onchange', html), 'controls are not wired'\n"
+            "assert re.search(r'(offline|simulation only|does not access|no real network)', lower)\n"
+            "assert re.search(r'(indicator|detect|defen|mitigat)', lower)\n"
+        ),
+        budget=20,
+    ),
     "3d_scene": Task(
         name="3d_scene",
         prompt=(
@@ -287,11 +330,15 @@ TASKS = {
 
 
 def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
-            action_gate: bool, chat_timeout: float) -> dict:
+            action_gate: bool, chat_timeout: float, model: str,
+            backend: str, base_url: str, action_first: bool) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
     cmd = [sys.executable, str(ROOT / "agent.py"), "--project", str(work),
-           "--iteration-budget", str(iterations), "--chat-timeout", str(chat_timeout)]
+           "--iteration-budget", str(iterations), "--chat-timeout", str(chat_timeout),
+           "--model", model, "--backend", backend, "--base-url", base_url]
+    if action_first:
+        cmd.append("--action-first")
     if condition == "novelty":
         cmd.extend(["--novelty-context"])
         if action_critic:
@@ -301,8 +348,12 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     cmd.append(task.prompt)
     started = time.monotonic()
     try:
+        # Deliberately leave the aggregate benchmark uncapped while we study
+        # llama.cpp mechanics. The agent's iteration budget and per-turn
+        # timeout remain visible experimental controls; this layer must not
+        # silently terminate a slow but informative run.
         proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True,
-                              timeout=max(180, chat_timeout * iterations + 30))
+                              timeout=None)
         timed_out = False
     except subprocess.TimeoutExpired as exc:
         proc = subprocess.CompletedProcess(cmd, 124, exc.stdout or "", exc.stderr or "")
@@ -311,6 +362,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     passed, detail = _grade(task, work)
     record = {
         "task": task.name, "condition": condition, "passed": passed,
+        "model": model,
+        "backend": backend,
         "detail": detail, "timed_out": timed_out, "returncode": proc.returncode,
         "elapsed_seconds": round(elapsed, 1), "metrics": _metrics(proc.stdout or ""),
     }
@@ -328,13 +381,22 @@ def main() -> int:
     parser.add_argument("--condition", choices=["baseline", "novelty", "both"], default="both")
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--chat-timeout", type=float, default=30)
+    parser.add_argument("--model", default="qwen3.6:35b-mlx",
+                        help="Ollama actor model used for the run.")
+    parser.add_argument("--backend", choices=["ollama", "llama-cpp"], default="ollama",
+                        help="Actor serving backend used for the run.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1",
+                        help="Actor OpenAI-compatible base URL.")
     parser.add_argument("--action-critic", action="store_true")
     parser.add_argument("--action-gate", action="store_true")
+    parser.add_argument("--action-first", action="store_true",
+                        help="Use the model-neutral initial action contract.")
     args = parser.parse_args()
     selected = list(TASKS.values()) if args.task == "all" else [TASKS[args.task]]
     conditions = ["baseline", "novelty"] if args.condition == "both" else [args.condition]
     records = [run_one(task, condition, args.iterations, args.action_critic,
-                       args.action_gate, args.chat_timeout)
+                       args.action_gate, args.chat_timeout, args.model,
+                       args.backend, args.base_url, args.action_first)
                for task in selected for condition in conditions]
     passed = sum(r["passed"] for r in records)
     print(json.dumps({"summary": {"passed": passed, "total": len(records),

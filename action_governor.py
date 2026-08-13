@@ -51,6 +51,10 @@ CAPABILITY_CLASS = {
 }
 
 _SHELL_VALIDATE_RE = re.compile(r"\b(pytest|py\.test|python3?\s+-m\s+pytest|unittest)\b")
+_ASSERTIVE_CHECK_RE = re.compile(
+    r"\b(assert|check|verify|test|pytest|unittest|curl|wget|http|urllib|health|status|exit\s+code)\b",
+    re.IGNORECASE,
+)
 # (?!&) excludes fd-to-fd redirects (2>&1, 1>&2) — extremely common in any
 # shell command that wants combined stdout/stderr, NOT a file write. Found
 # live: a real `python3 -m pytest ... 2>&1 | head -40` VALIDATE command was
@@ -129,6 +133,30 @@ def infer_success(capability: str, tool_name: str, result_content: str):
         if tool_name in {"run_shell", "run_command"}:
             return "Exit code: 0" in result_content
     return None
+
+
+def is_substantive_validation(tool_name: str, arguments: dict, result_content: str) -> bool:
+    """Return whether a successful call contains executable evidence.
+
+    A clean process exit is not enough: starting a server, printing a file,
+    or compiling a module can all return zero while the requested behavior is
+    wrong. The rule is deliberately task/model-neutral. It accepts a test
+    runner, or a command whose arguments/output show an explicit check, and
+    still requires the underlying command to succeed.
+    """
+    if result_content.startswith(("ERROR:", "REJECTED:")):
+        return False
+    if tool_name == "run_tests":
+        return result_content.startswith("(True,")
+    if tool_name not in {"run_command", "run_shell"}:
+        return False
+    if "Exit code: 0" not in result_content:
+        return False
+    command = (arguments or {}).get("command", "")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    return bool(_ASSERTIVE_CHECK_RE.search(str(command)) or
+                _ASSERTIVE_CHECK_RE.search(result_content))
 
 
 def result_is_failure(result_content: str) -> bool:
