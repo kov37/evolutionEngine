@@ -120,6 +120,23 @@ def build_intervention(level: int, signal, contract, all_tool_names: set, escala
         ), allowed
 
     if level == 5:
+        # A hard finish-only wall is unsafe when the model has not yet made
+        # the required mutation: one bad path or malformed observation can
+        # strand a code-change task with no way to recover.  Give it a final,
+        # deliberately narrow recovery window.  The caller still applies the
+        # hard stop after HARD_STOP_AFTER_TURNS, so this cannot spin forever.
+        if "MUTATE" in signal.missing_capabilities:
+            recovery = {
+                name for name in all_tool_names
+                if _capability_of(name) in {"OBSERVE", "MUTATE", "VALIDATE", "DELIVER"}
+                and name not in {"list_workspace", "list_dir", "grep_dir"}
+            }
+            recovery.update({"read_file", "find_files", "recall", "run_command", "run_shell"} & all_tool_names)
+            return (
+                "This is the final recovery window. The required code mutation still has not happened. "
+                "Use one targeted read_file/find_files call only if needed to establish the exact path, "
+                "then patch_file or write_file, validate it, and finish; do not resume broad exploration."
+            ), recovery
         return (
             "This task has made no real progress for many turns in a row despite multiple prompts. "
             "Stop and call finish_task now with an honest summary of what was and wasn't accomplished, "
@@ -181,9 +198,17 @@ def _self_test() -> bool:
     # run tests (VALIDATE), which is unconditionally part of the target set.
     assert "run_shell" in restricted4, "run_shell should stay available at level 4 — it's a legitimate VALIDATE path"
 
-    # --- level 5: hard restriction to finish_task only.
+    # --- level 5: a missing mutation gets one narrow recovery window rather
+    # than an immediate finish-only wall; non-mutation tasks still terminate.
     msg5, restricted5 = build_intervention(5, stuck_signal, tc.CODE_CHANGE_CONTRACT, all_tools, state)
-    assert restricted5 == {"finish_task"}, restricted5
+    assert "patch_file" in restricted5 and "read_file" in restricted5, restricted5
+    assert "list_workspace" not in restricted5 and "grep_dir" not in restricted5, restricted5
+    diagnosis_signal = pg.ProgressSignal(
+        stagnating=True, avoiding_required_phase=False, missing_capabilities=["DELIVER"],
+        new_evidence_count=1, capabilities_seen={"OBSERVE"},
+    )
+    _, diagnosis_restricted = build_intervention(5, diagnosis_signal, tc.DIAGNOSIS_CONTRACT, all_tools, state)
+    assert diagnosis_restricted == {"finish_task"}, diagnosis_restricted
 
     return True
 
