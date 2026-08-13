@@ -79,6 +79,55 @@ def _metrics(output: str) -> dict:
 
 
 TASKS = {
+    "3d_scene": Task(
+        name="3d_scene",
+        prompt=(
+            "Create a short but beautiful 3D scene as scene.html in this empty project. Use Three.js "
+            "from its browser CDN, with a perspective camera, WebGLRenderer, responsive resize handling, "
+            "lighting, shadows, animation loop, and a deliberate composition: a glowing crystalline orb "
+            "hovering above a reflective floor with a few orbiting objects and a dark atmospheric background. "
+            "Make it polished and self-contained in one HTML file, with a title and brief on-screen caption. "
+            "Serve it locally with Python's standard-library HTTP server and verify that it loads before "
+            "calling finish_task."
+        ),
+        setup={
+            "README.md": (
+                "# 3D scene\n\n"
+                "Create one polished scene.html. The evaluator checks the artifact and serves it locally.\n"
+            ),
+        },
+        grade=(
+            "from pathlib import Path\n"
+            "import re, subprocess, sys, time, urllib.request\n"
+            "html = Path('scene.html').read_text(encoding='utf-8')\n"
+            "required = ['three', 'PerspectiveCamera', 'WebGLRenderer', 'requestAnimationFrame',\n"
+            "            'AmbientLight', 'DirectionalLight', 'PointLight', 'MeshStandardMaterial']\n"
+            "missing = [x for x in required if x not in html]\n"
+            "assert not missing, f'missing scene elements: {missing}'\n"
+            "assert len(html) > 2500, 'scene is too small to be a considered composition'\n"
+            "assert re.search(r'(orb|sphere|icosa|crystal)', html, re.I)\n"
+            "assert re.search(r'(floor|plane)', html, re.I)\n"
+            "port = 18766\n"
+            "proc = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)],\n"
+            "                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+            "try:\n"
+            "    for _ in range(20):\n"
+            "        try:\n"
+            "            with urllib.request.urlopen(f'http://127.0.0.1:{port}/scene.html', timeout=1) as r:\n"
+            "                served = r.read().decode()\n"
+            "            break\n"
+            "        except Exception:\n"
+            "            time.sleep(0.1)\n"
+            "    else:\n"
+            "        raise AssertionError('scene did not serve')\n"
+            "    assert 'WebGLRenderer' in served\n"
+            "finally:\n"
+            "    proc.terminate()\n"
+            "    try: proc.wait(timeout=3)\n"
+            "    except subprocess.TimeoutExpired: proc.kill()\n"
+        ),
+        budget=14,
+    ),
     "real_app": Task(
         name="real_app",
         prompt=(
