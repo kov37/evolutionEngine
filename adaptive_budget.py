@@ -23,22 +23,22 @@ evaluated: a real failed MUTATE/VALIDATE is a genuinely independent signal
 so there's no equivalent circularity.
 """
 
-BASE_BUDGET = 5  # minimum evidence entries expected even for a trivial task
+BASE_BUDGET = 4  # minimum evidence entries expected even for a trivial task
 
 # Credit per file in the project (or per some other external size hint) —
 # a task against a larger codebase legitimately needs more OBSERVE calls
 # before a MUTATE is reasonable. Capped so an enormous repo doesn't grant
 # unbounded budget.
 REPO_SIZE_CREDIT_PER_UNIT = 1
-MAX_REPO_SIZE_CREDIT = 10
+MAX_REPO_SIZE_CREDIT = 4
 
-# Credit per ~200 characters of task description — crude proxy for how
+# Credit per ~400 characters of task description — crude proxy for how
 # much the task itself demands understanding before acting; a one-line
 # task needs less exploration room than a multi-paragraph issue with many
 # named requirements (like tonight's real sympy-13878 issue, which lists
 # 12 separate distributions).
-AMBIGUITY_CREDIT_PER_CHARS = 200
-MAX_AMBIGUITY_CREDIT = 15  # cap — a very long task description shouldn't grant unlimited budget
+AMBIGUITY_CREDIT_PER_CHARS = 400
+MAX_AMBIGUITY_CREDIT = 6  # cap — task prose must not become an analysis-paralysis budget
 
 # Credit per failed MUTATE/VALIDATE attempt — debugging a real failure
 # legitimately needs more re-observation than the baseline case.
@@ -74,7 +74,7 @@ def _self_test() -> bool:
     )
 
     # A longer task description raises the budget, capped.
-    long_task = "x" * 3000  # 3000 // 200 = 15, exactly at the cap
+    long_task = "x" * 3000  # 3000 // 400 = 7, capped at 6
     assert compute_budget(long_task) == BASE_BUDGET + MAX_AMBIGUITY_CREDIT
     longer_task = "x" * 10000
     assert compute_budget(longer_task) == compute_budget(long_task), (
