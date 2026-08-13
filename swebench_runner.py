@@ -103,7 +103,7 @@ def _run_tests(project: Path, test_patch: str) -> dict:
 
 def run(mode: str, iterations: int, primary_model: str | None = None,
         worker_model: str | None = None, action_critic: bool = False,
-        chat_timeout: float | None = None) -> dict:
+        chat_timeout: float | None = None, action_gate: bool = False) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -129,6 +129,8 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         command.insert(3, "--structured-summary")
         if action_critic:
             command.insert(4, "--novelty-action-critic")
+        if action_gate:
+            command.insert(5 if action_critic else 4, "--novelty-action-gate")
         if worker_model:
             insert_at = 5 if action_critic else 4
             command[insert_at:insert_at] = ["--novelty-worker-model", worker_model]
@@ -152,6 +154,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "worker_model": worker_model, "base_commit": BASE_COMMIT,
         "action_critic": action_critic,
         "chat_timeout": chat_timeout,
+        "action_gate": action_gate,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -177,6 +180,8 @@ if __name__ == "__main__":
                         help="Enable the 4B worker's bounded next-action directive in novelty mode.")
     parser.add_argument("--chat-timeout", type=float, default=None,
                         help="Maximum seconds per acting-model turn; useful for bounded experiments.")
+    parser.add_argument("--action-gate", action="store_true",
+                        help="Enable bounded tool restriction after novelty stagnation.")
     args = parser.parse_args()
     run(args.mode, args.iterations, args.primary_model, args.worker_model,
-        args.action_critic, args.chat_timeout)
+        args.action_critic, args.chat_timeout, args.action_gate)
