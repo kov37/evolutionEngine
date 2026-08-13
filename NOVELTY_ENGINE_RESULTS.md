@@ -25,11 +25,29 @@ Primary model: `qwen3.6:35b-mlx`. Context worker: `qwen3.5:4b`.
 5. The worker currently provides context advice but does not yet improve task
    outcome on this easy task; this is expected and is not evidence of benefit.
 
-## Next experiment
+## Current operating policy
 
-Test an opportunistic policy that runs the 4B model only after context pressure,
-failed validation, repeated actions, or a meaningful mutation—not on routine
-reads. Compare it on the harder SymPy #13878 task, where retrieval and recovery
-may have measurable value. Keep the baseline as the default until a repeated
-verified improvement appears.
+The default novelty path is opportunistic: the 4B worker is invoked after
+context pressure, failed validation, repeated actions, or a meaningful event,
+not on every routine read. The baseline loop remains available for comparison.
+The hard action gate is retained as an opt-in ablation because the live repair
+experiment showed that it can prevent a necessary targeted reread.
 
+## First verified SymPy #13878 hybrid repair
+
+The baseline 35B run produced a near-complete candidate with 17 CDF methods
+and one remaining failure: `asin` was used by `ArcsinDistribution._cdf` but
+was not imported. A repair run used `qwen3.6:35b-mlx` as the coding model and
+`qwen3.5:4b` as the asynchronous novelty worker.
+
+| Run | Mutations | Validations | 4B worker calls | Independent grade |
+|---|---:|---:|---:|---:|
+| Hybrid repair | 1 | 1 | 1 | **20/20 passed** |
+
+The clean grader applied the withheld official test patch to a fresh copy and
+ran `test_arcsin` plus 19 PASS_TO_PASS regression tests. The result was
+`20 passed, 43 deselected`; the 35B added the missing `asin` import.
+
+The action-gate ablation was also tested. It reduced open-ended exploration,
+but was too restrictive for a repair that still needed a targeted reread, so
+it remains opt-in via `--novelty-action-gate`.
