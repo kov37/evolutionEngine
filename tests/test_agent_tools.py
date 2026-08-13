@@ -113,6 +113,18 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("patch_file", critic)
         self.assertIn("src/a.py", critic)
 
+    def test_action_critic_has_deterministic_trigger_without_worker_result(self):
+        context = NoveltyContext(
+            chat_fn=lambda **kwargs: _FakeResponse("{}"),
+            worker_interval=100, action_after_events=3,
+        )
+        for iteration in range(1, 4):
+            context.observe(iteration, "read_file", {"path": "src/a.py"}, "same evidence")
+        rendered = context.render_for_model(action_critic=True)
+        context.close()
+        self.assertIn("Action critic directive", rendered)
+        self.assertIn("patch_file", rendered)
+
     def test_repeated_failure_gets_deterministic_recovery_signal(self):
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
         context.observe(1, "list_dir", {"path": "sy"}, "ERROR: missing")

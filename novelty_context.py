@@ -101,8 +101,8 @@ def _call_key(tool: str, arguments: dict[str, Any]) -> tuple[str, str]:
     return tool, json.dumps(arguments or {}, sort_keys=True, default=str, separators=(",", ":"))
 
 
-def _local_judgment(events: list[ContextEvent], event: ContextEvent) -> WorkerJudgment:
-    recent = events[-8:]
+def _local_judgment(events: list[ContextEvent], event: ContextEvent, window: int = 8) -> WorkerJudgment:
+    recent = events[-max(1, window):]
     duplicate = sum(e.result_fingerprint == event.result_fingerprint for e in recent[:-1]) > 0
     no_mutation = not any(e.mutation for e in recent)
     repeated = sum(e.result_fingerprint == event.result_fingerprint for e in recent) >= 2
@@ -112,7 +112,7 @@ def _local_judgment(events: list[ContextEvent], event: ContextEvent) -> WorkerJu
     elif event.validation:
         phase = "repair" if event.result.startswith(("ERROR", "REJECTED")) else "verify"
         action = "patch_file" if phase == "repair" else "finish_or_repair"
-    elif no_mutation and len(recent) >= 5:
+    elif no_mutation and len(recent) >= window:
         phase, action = "mutate", "patch_file"
     else:
         phase, action = "localize", "inspect"
@@ -353,6 +353,30 @@ class NoveltyContext:
     def render_for_model(self, action_critic: bool = False) -> str:
         judgment = self.collect(wait=False)
         with self._lock:
+            recent = self.events[-self.action_after_events:]
+            adjacent_failure = len(self.events) >= 2 and all(
+                e.result.startswith(("ERROR", "REJECTED")) for e in self.events[-2:]
+            ) and _call_key(self.events[-2].tool, self.events[-2].arguments) == _call_key(
+                self.events[-1].tool, self.events[-1].arguments
+            )
+            deterministic_trigger = adjacent_failure or (
+                len(recent) >= self.action_after_events
+                and not any(e.mutation or e.validation for e in recent)
+            )
+            critic_trigger = deterministic_trigger or (
+                action_critic and (
+                    judgment.stagnating or judgment.duplicate_action
+                    or (judgment.recommended_action != "inspect" and judgment.confidence >= 0.75)
+                )
+            )
+            critic_judgment = judgment
+            # Do not wait for an asynchronous 4B result to become actionable.
+            # The local policy supplies a conservative recommendation; a later
+            # 4B judgment can refine it on the next turn.
+            if action_critic and deterministic_trigger and (
+                judgment.recommended_action == "inspect" and judgment.confidence < 0.75
+            ):
+                critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
             rendered = "## Context manager state\n" + judgment.render()
             if len(self.events) >= 2:
                 previous, latest = self.events[-2:]
@@ -372,15 +396,12 @@ class NoveltyContext:
                     "Use the evidence already gathered and take the recommended concrete action "
                     "before performing another routine read."
                 )
-            if action_critic and (
-                judgment.stagnating or judgment.duplicate_action
-                or (judgment.recommended_action != "inspect" and judgment.confidence >= 0.75)
-            ):
+            if action_critic and critic_trigger:
                 rendered += (
                     "\n## Action critic directive (advisory)\n"
-                    f"The context worker recommends exactly one next action: {judgment.recommended_action}. "
-                    f"Target: {judgment.target or 'not specified'}. "
-                    f"Blocker: {judgment.blocker or 'not specified'}. "
+                    f"The context critic recommends exactly one next action: {critic_judgment.recommended_action}. "
+                    f"Target: {critic_judgment.target or 'not specified'}. "
+                    f"Blocker: {critic_judgment.blocker or 'use the latest evidence to choose the exact target'}. "
                     "Use this recommendation if it matches the repository evidence; do not perform broad "
                     "exploration before addressing it."
                 )
