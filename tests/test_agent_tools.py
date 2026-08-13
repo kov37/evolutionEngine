@@ -168,8 +168,11 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(context.requires_progress())
         context.observe(4, "find_files", {"pattern": "*.py"}, "a.py")
         context.observe(5, "find_files", {"pattern": "*.py"}, "a.py")
+        self.assertTrue(context.recovery_reads_allowed())
+        for iteration in range(6, 12):
+            context.observe(iteration, "find_files", {"pattern": "*.py"}, "a.py")
         self.assertFalse(context.recovery_reads_allowed())
-        context.observe(6, "patch_file", {"path": "f.py"}, "Wrote f.py", mutation=True)
+        context.observe(12, "patch_file", {"path": "f.py"}, "Wrote f.py", mutation=True)
         self.assertFalse(context.requires_progress())
         context.close()
 
