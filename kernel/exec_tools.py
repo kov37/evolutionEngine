@@ -13,6 +13,9 @@ project — that's the explicit tradeoff of pointing it there.
 import os
 import signal
 import subprocess
+import tempfile
+import threading
+import uuid
 
 from kernel.sandbox import confine, get_root
 
@@ -20,6 +23,8 @@ SHELL_TIMEOUT_SECONDS = 15
 MAX_SHELL_TIMEOUT_SECONDS = 120  # a hallucinated huge value shouldn't be able to hang a run indefinitely
 MAX_OUTPUT_CHARS = 4000
 MAX_COMMAND_TIMEOUT_SECONDS = 120
+_BACKGROUND = {}
+_BACKGROUND_LOCK = threading.Lock()
 
 
 def _truncate(text: str) -> str:
@@ -28,7 +33,81 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]"
 
 
-def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
+def _start_background(command, cwd, shell):
+    log = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix=".agent-process-", suffix=".log",
+        dir=get_root(), delete=False,
+    )
+    log_path = log.name
+    proc = subprocess.Popen(
+        command, shell=shell, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log.close()
+    handle = "proc-" + uuid.uuid4().hex[:12]
+    with _BACKGROUND_LOCK:
+        _BACKGROUND[handle] = {"proc": proc, "log_path": log_path, "command": str(command)}
+    return (
+        "Started background process.\n"
+        f"Handle: {handle}\nPID: {proc.pid}\nLog: {log_path}\n"
+        f"Use process_status(handle='{handle}') to inspect it and stop_process(handle='{handle}') to clean it up."
+    )
+
+
+def process_status(handle: str, tail_chars: int = 3000) -> str:
+    """Inspect a process started by run_shell/run_command(background=True)."""
+    with _BACKGROUND_LOCK:
+        item = _BACKGROUND.get(handle)
+    if item is None:
+        return f"ERROR: unknown process handle: {handle}"
+    proc = item["proc"]
+    code = proc.poll()
+    try:
+        with open(item["log_path"], "r", encoding="utf-8", errors="replace") as stream:
+            log = stream.read()[-max(1, min(int(tail_chars), MAX_OUTPUT_CHARS)):]
+    except OSError as exc:
+        log = f"(log unavailable: {exc})"
+    state = "RUNNING" if code is None else f"EXITED code={code}"
+    return f"{state}\nHandle: {handle}\nLog tail:\n{log}"
+
+
+def stop_process(handle: str) -> str:
+    """Stop a managed background process and its descendants."""
+    with _BACKGROUND_LOCK:
+        item = _BACKGROUND.get(handle)
+    if item is None:
+        return f"ERROR: unknown process handle: {handle}"
+    proc = item["proc"]
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+        except ProcessLookupError:
+            pass
+    else:
+        return f"Already stopped process {handle}; exit code={proc.returncode}; launch a fresh process before probing"
+    return f"Stopped process {handle}; exit code={proc.returncode}; log={item['log_path']}"
+
+
+def cleanup_background_processes() -> None:
+    """Best-effort cleanup for all processes owned by this agent run."""
+    with _BACKGROUND_LOCK:
+        handles = list(_BACKGROUND)
+    for handle in handles:
+        stop_process(handle)
+
+
+def active_background_handles() -> list[str]:
+    """Return handles for background processes still running in this agent."""
+    with _BACKGROUND_LOCK:
+        items = list(_BACKGROUND.items())
+    return [handle for handle, item in items if item["proc"].poll() is None]
+
+
+def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bool = False) -> str:
     """Run a shell command with its working directory confined to the
     workspace, and report exit code, stdout, and stderr. Use this to run
     tests, install a package, or invoke a tool you already wrote.
@@ -40,6 +119,11 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
         command (e.g. a full test suite); capped at 120s regardless of
         what's requested.
     """
+    if background:
+        try:
+            return _start_background(command, get_root(), shell=True)
+        except OSError as exc:
+            return f"ERROR: could not start background command: {exc}"
     timeout = max(1, min(timeout, MAX_SHELL_TIMEOUT_SECONDS))
     proc = subprocess.Popen(
         command, shell=True, cwd=get_root(),
@@ -65,7 +149,8 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS) -> str:
     )
 
 
-def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: str = ".") -> str:
+def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: str = ".",
+                background: bool = False) -> str:
     """Run an executable with argv semantics and a confined working directory.
 
     Prefer this for tests and project commands. Unlike ``run_shell`` it does
@@ -81,6 +166,12 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
         return f"ERROR: invalid command options: {exc}"
     if not os.path.isdir(workdir):
         return f"ERROR: cwd is not a directory: {cwd}"
+
+    if background:
+        try:
+            return _start_background(command, workdir, shell=False)
+        except OSError as exc:
+            return f"ERROR: could not start background command: {exc}"
 
     try:
         proc = subprocess.Popen(

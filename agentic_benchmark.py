@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -69,13 +72,176 @@ def _metrics(output: str) -> dict:
             novelty = json.loads(lines[-1])
         except json.JSONDecodeError:
             novelty = {"parse_error": True}
+    repair = None
+    repair_lines = re.findall(r"🧰 \[repair metrics\] (\{.*\})", output)
+    if repair_lines:
+        try:
+            repair = json.loads(repair_lines[-1])
+        except json.JSONDecodeError:
+            repair = {"parse_error": True}
+    timing = None
+    timing_lines = re.findall(r"⏱️ \[agent timing\] (\{.*\})", output)
+    if timing_lines:
+        try:
+            timing = json.loads(timing_lines[-1])
+        except json.JSONDecodeError:
+            timing = {"parse_error": True}
     return {
         "iterations": iterations,
         "tool_calls": tool_calls,
         "failure_lines": failures,
         "done_signal": "✅ DONE" in output,
         "novelty": novelty,
+        "repair": repair,
+        "timing": timing,
     }
+
+
+def _event_kind(line: str) -> str:
+    """Classify one live actor line for the durable monitor stream."""
+    stripped = line.strip()
+    if stripped.startswith("🌀 [Iteration"):
+        return "iteration"
+    if stripped.startswith("🔧"):
+        return "tool_call"
+    if stripped.startswith("⏱️"):
+        return "timing"
+    if stripped.startswith("🧰"):
+        return "repair_metrics"
+    if stripped.startswith("🧬"):
+        return "novelty_metrics"
+    if "validation" in stripped.lower():
+        return "validation"
+    if any(word in stripped.lower() for word in ("error", "rejected", "failed", "timeout")):
+        return "error"
+    if stripped.startswith(("🧠", "💭")):
+        return "model_output"
+    return "agent_event"
+
+
+def _live_summary(line: str) -> str:
+    """Return a compact user-facing line; the monitor JSONL keeps raw text."""
+    kind = _event_kind(line)
+    stripped = line.strip()
+    if kind == "tool_call":
+        match = re.match(r"🔧\s+([A-Za-z0-9_]+)\((.*)", stripped)
+        if match:
+            args = match.group(2)
+            path = re.search(r"['\"]path['\"]:\s*['\"]([^'\"]+)", args)
+            target = f" path={path.group(1)}" if path else ""
+            return f"📡 tool {match.group(1)}{target}"
+    if kind == "model_output":
+        return "📡 model " + stripped[:220]
+    if kind == "error":
+        return "📡 ERROR " + stripped[:300]
+    if kind in {"iteration", "timing", "repair_metrics", "novelty_metrics", "validation"}:
+        return "📡 " + stripped[:400]
+    return "📡 event " + stripped[:220]
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    """Find descendants even when an actor gives a service a new session."""
+    try:
+        raw = subprocess.check_output(["pgrep", "-P", str(pid)], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    result = []
+    for value in raw.split():
+        try:
+            child = int(value)
+        except ValueError:
+            continue
+        result.append(child)
+        result.extend(_descendant_pids(child))
+    return result
+
+
+def _terminate_process_tree(proc) -> None:
+    """Terminate the actor and descendants, including detached service sessions."""
+    descendants = _descendant_pids(proc.pid)
+    # Detached descendants have their own process groups. Kill those first;
+    # then kill the actor's group, which also handles ordinary child processes.
+    for pid in reversed(descendants):
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        for pid in reversed(_descendant_pids(proc.pid)):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        proc.wait()
+
+
+def _stream_agent(proc, started: float, run_timeout: float, monitor_path: Path):
+    """Stream every agent line while retaining the watchdog."""
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    chunks = []
+    partial = b""
+    timed_out = False
+    interrupted = False
+    monitor_path.parent.mkdir(parents=True, exist_ok=True)
+    monitor = monitor_path.open("w", encoding="utf-8")
+
+    def emit(raw_line: bytes):
+        line = raw_line.decode(errors="replace")
+        chunks.append(line + "\n")
+        print(_live_summary(line), flush=True)
+        event = {
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "kind": _event_kind(line),
+            "text": line,
+        }
+        monitor.write(json.dumps(event, ensure_ascii=False) + "\n")
+        monitor.flush()
+
+    try:
+        while True:
+            remaining = run_timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready = selector.select(min(0.5, remaining))
+            if not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+            data = os.read(proc.stdout.fileno(), 4096)
+            if not data:
+                break
+            partial += data
+            lines = partial.split(b"\n")
+            partial = lines.pop()
+            for line in lines:
+                emit(line)
+        if partial:
+            emit(partial)
+    except KeyboardInterrupt:
+        interrupted = True
+        timed_out = False
+        print("📡 ⚠️ benchmark interrupted; terminating actor process tree", flush=True)
+    finally:
+        if proc.poll() is None or timed_out or interrupted:
+            _terminate_process_tree(proc)
+        else:
+            proc.wait()
+        selector.close()
+        monitor.close()
+    return "".join(chunks), timed_out, proc.returncode
 
 
 TASKS = {
@@ -207,7 +373,9 @@ TASKS = {
             "    assert health.get('status') == 'ok', health\n"
             "    with urllib.request.urlopen(base + '/', timeout=2) as r:\n"
             "        html = r.read().decode()\n"
-            "    assert '<html' in html.lower() and 'todo' in html.lower()\n"
+            "    assert '<html' in html.lower() and 'todo' in html.lower(), (\n"
+            "        'GET / did not return expected Todo HTML: ' + repr(html[:500])\n"
+            "    )\n"
             "    req = urllib.request.Request(base + '/api/tasks', data=json.dumps({'title':'Ship it'}).encode(),\n"
             "                                 headers={'Content-Type':'application/json'}, method='POST')\n"
             "    with urllib.request.urlopen(req, timeout=2) as r:\n"
@@ -331,10 +499,13 @@ TASKS = {
 
 def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             action_gate: bool, chat_timeout: float, model: str,
-            backend: str, base_url: str, action_first: bool) -> dict:
+            backend: str, base_url: str, action_first: bool,
+            run_timeout: float, keep_workspace: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
-    cmd = [sys.executable, str(ROOT / "agent.py"), "--project", str(work),
+    # Unbuffered child output is required for true event-level monitoring;
+    # otherwise Python holds agent logs until the entire run exits.
+    cmd = [sys.executable, "-u", str(ROOT / "agent.py"), "--project", str(work),
            "--iteration-budget", str(iterations), "--chat-timeout", str(chat_timeout),
            "--model", model, "--backend", backend, "--base-url", base_url]
     if action_first:
@@ -347,30 +518,33 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             cmd.append("--novelty-action-gate")
     cmd.append(task.prompt)
     started = time.monotonic()
-    try:
-        # Deliberately leave the aggregate benchmark uncapped while we study
-        # llama.cpp mechanics. The agent's iteration budget and per-turn
-        # timeout remain visible experimental controls; this layer must not
-        # silently terminate a slow but informative run.
-        proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True,
-                              timeout=None)
-        timed_out = False
-    except subprocess.TimeoutExpired as exc:
-        proc = subprocess.CompletedProcess(cmd, 124, exc.stdout or "", exc.stderr or "")
-        timed_out = True
+    RUNS.mkdir(parents=True, exist_ok=True)
+    monitor_path = RUNS / f"monitor-{task.name}-{condition}-{time.time_ns()}.jsonl"
+    proc = subprocess.Popen(
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    stdout, timed_out, returncode = _stream_agent(proc, started, run_timeout, monitor_path)
+    if timed_out:
+        stdout += f"\nBENCHMARK WATCHDOG: exceeded {run_timeout:.1f}s and was terminated.\n"
     elapsed = time.monotonic() - started
     passed, detail = _grade(task, work)
     record = {
         "task": task.name, "condition": condition, "passed": passed,
         "model": model,
         "backend": backend,
-        "detail": detail, "timed_out": timed_out, "returncode": proc.returncode,
-        "elapsed_seconds": round(elapsed, 1), "metrics": _metrics(proc.stdout or ""),
+        "detail": detail, "timed_out": timed_out, "returncode": returncode,
+        "elapsed_seconds": round(elapsed, 1), "metrics": _metrics(stdout or ""),
+        "monitor_log": str(monitor_path),
     }
     RUNS.mkdir(parents=True, exist_ok=True)
     with (RUNS / "results.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-    shutil.rmtree(work, ignore_errors=True)
+    if keep_workspace:
+        record["workspace"] = str(work)
+        print(f"📁 Preserved workspace: {work}")
+    else:
+        shutil.rmtree(work, ignore_errors=True)
     print(json.dumps(record, indent=2))
     return record
 
@@ -381,6 +555,8 @@ def main() -> int:
     parser.add_argument("--condition", choices=["baseline", "novelty", "both"], default="both")
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--chat-timeout", type=float, default=30)
+    parser.add_argument("--run-timeout", type=float, default=600,
+                        help="Maximum seconds for one agent run before its process group is terminated.")
     parser.add_argument("--model", default="qwen3.6:35b-mlx",
                         help="Ollama actor model used for the run.")
     parser.add_argument("--backend", choices=["ollama", "llama-cpp"], default="ollama",
@@ -391,12 +567,15 @@ def main() -> int:
     parser.add_argument("--action-gate", action="store_true")
     parser.add_argument("--action-first", action="store_true",
                         help="Use the model-neutral initial action contract.")
+    parser.add_argument("--keep-workspace", action="store_true",
+                        help="Preserve the generated task workspace for inspection.")
     args = parser.parse_args()
     selected = list(TASKS.values()) if args.task == "all" else [TASKS[args.task]]
     conditions = ["baseline", "novelty"] if args.condition == "both" else [args.condition]
     records = [run_one(task, condition, args.iterations, args.action_critic,
                        args.action_gate, args.chat_timeout, args.model,
-                       args.backend, args.base_url, args.action_first)
+                       args.backend, args.base_url, args.action_first,
+                       args.run_timeout, args.keep_workspace)
                for task in selected for condition in conditions]
     passed = sum(r["passed"] for r in records)
     print(json.dumps({"summary": {"passed": passed, "total": len(records),

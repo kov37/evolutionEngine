@@ -25,6 +25,39 @@ _FIELD_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:string|number|integ
 _STATUS_RE = re.compile(r"\bstatus\s*[=:]\s*([A-Za-z0-9_-]+)", re.I)
 
 
+def _inferred_response_requirements(text):
+    """Infer only response facts that are explicit in common task wording.
+
+    This is deliberately conservative: the contract should improve the
+    actor's probe without inventing a schema from a benchmark name.  A
+    resource-creation clause such as ``POST /api/tasks with JSON {title:
+    string} returning the created task as JSON`` says two useful things that
+    the old field parser missed: the response is an object, and it should
+    identify the created resource.  A collection clause says the response is
+    a JSON list of objects.  The same wording works for users, jobs, records,
+    and other resources.
+    """
+    lower = text.lower()
+    fields = []
+    shapes = []
+
+    # Input typed fields are also normally part of a returned resource when
+    # the task explicitly says it returns the created resource.
+    if re.search(r"return(?:s|ing)?\s+(?:the\s+)?created\s+[^.\n,;]*\bjson", lower):
+        fields.extend(_FIELD_RE.findall(text))
+        if re.search(r"\b(?:id|identifier)\b", lower) or re.search(
+                r"created\s+(?:task|item|record|resource|object|entry|entity)", lower):
+            fields.append("id")
+        shapes.append("object")
+
+    if re.search(r"return(?:s|ing)?\s+(?:all|a list of|the list of)\s+[^.\n,;]*\bjson", lower):
+        shapes.append("list")
+        shapes.append("object items")
+
+    # Preserve order while removing duplicates.
+    return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(shapes))
+
+
 @dataclass(frozen=True)
 class ValidationContract:
     task: str
@@ -32,6 +65,10 @@ class ValidationContract:
     categories: frozenset
     endpoints: tuple
     fields: tuple = ()
+    response_shapes: tuple = ()
+    creation_endpoints: tuple = ()
+    collection_endpoints: tuple = ()
+    operations: tuple = ()
 
     @property
     def has_criteria(self):
@@ -52,14 +89,26 @@ class ValidationContract:
             lines.append(f"- {criterion}")
         if self.endpoints:
             lines.append("Representative interfaces to exercise: " + ", ".join(self.endpoints[:8]))
+            lines.append("Do not stop after one interface: cover every listed interface before finish_task.")
+        if self.operations:
+            lines.append("Required HTTP operations (method matters): " + ", ".join(self.operations[:8]))
         if self.fields:
             lines.append("Response fields to assert where applicable: " + ", ".join(self.fields))
+        if self.response_shapes:
+            lines.append("Response shapes to assert where applicable: " + ", ".join(self.response_shapes))
         lines.extend([
             "Evidence rules: tests must assert behavior, API checks must make a request and assert status/body structure, "
             "and CLI checks must assert exit status/output. Do not count startup, compilation, diff, or file listing.",
             "If a check fails, use its output to make the smallest targeted repair, then rerun the relevant check.",
         ])
         return "\n".join(lines)
+
+    def uncovered_endpoints(self, covered_hits):
+        """Return required interfaces not represented in accepted evidence."""
+        covered = {str(item).lower() for item in (covered_hits or ())}
+        if self.operations:
+            return tuple(operation for operation in self.operations if operation.lower() not in covered)
+        return tuple(endpoint for endpoint in self.endpoints if endpoint.lower() not in covered)
 
     def assess(self, tool_name, arguments, result_content):
         """Return (accepted, reason, suggestion, evidence_key, hits)."""
@@ -78,11 +127,33 @@ class ValidationContract:
             passed = False
         if not passed:
             return False, "the executable check did not pass", "read the failure output, repair the implementation, and rerun the focused check", None, ()
-        if tool_name != "run_tests" and not re.search(r"\b(assert|check|verify|test|pytest|unittest|curl|wget|http|urllib|health|status)\b", probe, re.I):
+        endpoint_hits = tuple(p for p in self.endpoints if p.lower() in probe)
+        operation_hits = []
+        for operation in self.operations:
+            method, path = operation.split(None, 1)
+            method_present = re.search(rf"\b{re.escape(method)}\b", probe, re.I)
+            if method == "GET" and not re.search(
+                r"\b(?:post|put|patch|delete|head)\b|(?:-X|--request)\s+\w+", probe, re.I
+            ):
+                method_present = True
+            if len(self.operations) == 1 and path.lower() in probe:
+                # A task with one required operation may use a framework
+                # default method and omit the verb in its probe.
+                method_present = True
+            if method in {"POST", "PUT", "PATCH"} and re.search(r"(?:-d|--data|--request)", probe, re.I):
+                method_present = True
+            if method_present and path.lower() in probe:
+                operation_hits.append(operation)
+        health_evidence = bool(
+            endpoint_hits and any(p.lower().endswith("/health") for p in endpoint_hits)
+            and re.search(r"[\"']?status[\"']?\s*[=:]\s*[\"']?ok\b", probe, re.I)
+        )
+        if tool_name != "run_tests" and not health_evidence and not re.search(r"\b(assert|check|verify|test(?:ing)?|pytest|unittest|curl|wget|http|urllib|health|status)\b", probe, re.I):
             return False, "the command passed but does not show an assertion or behavioral probe", "replace the smoke command with a focused test or request that asserts the requested behavior", None, ()
         hits = tuple(c for c in self.criteria if any(word.lower() in probe for word in _meaningful_words(c)))
-        endpoint_hits = tuple(p for p in self.endpoints if p.lower() in probe)
-        if self.endpoints and not endpoint_hits and self.categories.intersection({"api", "web"}):
+        if self.operations and not operation_hits and self.categories.intersection({"api", "web"}):
+            return False, "the passing check did not exercise a required HTTP operation", "send a request using the required HTTP method and endpoint, then assert its response", None, ()
+        if not self.operations and self.endpoints and not endpoint_hits and self.categories.intersection({"api", "web"}):
             return False, "the passing check did not exercise a task interface", "send a representative request to one of the required interfaces and assert its status and response structure", None, ()
         def field_is_asserted(field):
             # Do not mistake a request payload (e.g. {"title": ...}) for
@@ -91,15 +162,73 @@ class ValidationContract:
             name = re.escape(field)
             return bool(re.search(
                 rf"(?:get\s*\(\s*['\"]{name}['\"]|\[['\"]{name}['\"]\]|"
-                rf"['\"]{name}['\"]\s+in|assert[^\n;]*{name})",
+                rf"['\"]{name}['\"]\s+in|assert[^\n;]*{name}|"
+                rf"(?:check|verify|test|pass|returns?|response|✓)[^\n;]{{0,140}}\b{name}\b|"
+                rf"[^\n;]{{0,140}}['\"]{name}['\"]\s*:)",
                 str(command) + " " + text, re.I,
             ))
         missing_fields = tuple(f for f in self.fields if not field_is_asserted(f))
-        field_relevant = any("api" in p.lower() for p in endpoint_hits)
+        write_probe = bool(re.search(r"\b(?:post|put|patch)\b|(?:-d|--data|--request)", probe, re.I))
+        creation_probe = any(
+            re.search(rf"\b{method}\b", probe, re.I) and path.lower() in probe
+            for method, path in (("POST", p) for p in self.creation_endpoints)
+        ) or (write_probe and (
+            any(p.lower() in self.creation_endpoints for p in endpoint_hits)
+            or (not self.creation_endpoints and any("api" in p.lower() for p in endpoint_hits))
+        ))
+        collection_probe = any(
+            re.search(rf"\bGET\b", probe, re.I) and path.lower() in probe
+            for path in self.collection_endpoints
+        ) or (not write_probe and any(p.lower() in self.collection_endpoints for p in endpoint_hits))
+        field_relevant = creation_probe and any("api" in p.lower() for p in endpoint_hits)
         if missing_fields and field_relevant and self.categories.intersection({"api", "web"}) and tool_name != "run_tests":
             return False, "the passing API check does not mention required response fields: " + ", ".join(missing_fields), "assert the response JSON has the required fields and types, then rerun the request", None, ()
+        shape_relevant = (
+            (creation_probe and "object" in self.response_shapes)
+            or (collection_probe and "list" in self.response_shapes)
+        )
+        if self.response_shapes and shape_relevant and self.categories.intersection({"api", "web"}) and tool_name != "run_tests":
+            shape_words = {
+                "object": (r"\b(?:dict|object|mapping|json\s*object)\b",),
+                "list": (r"\b(?:list|array|sequence)\b",),
+                "object items": (r"\b(?:item|record|task|entry)s?\b", r"\b(?:dict|object|isinstance|get|index|iterat|any)\b"),
+            }
+            missing_shapes = []
+            expected_shapes = []
+            if creation_probe and "object" in self.response_shapes:
+                expected_shapes.append("object")
+            if collection_probe:
+                expected_shapes.extend(shape for shape in ("list", "object items") if shape in self.response_shapes)
+            for shape in expected_shapes:
+                if shape not in self.response_shapes:
+                    continue
+                patterns = shape_words.get(shape, (re.escape(shape),))
+                evidence = str(command) + " " + text
+                concrete_json_shape = {
+                    "object": bool(re.search(r"(?:response|json|/(?:api|health)[^\n:]{0,80})\s*:\s*\{|(?:^|\n)\s*\{", evidence, re.I)),
+                    "list": bool(re.search(r"(?:response|json|/(?:api|health)[^\n:]{0,80})\s*:\s*\[|(?:^|\n)\s*\[", evidence, re.I)),
+                    "object items": bool(re.search(r"(?:response|json|/(?:api|health)[^\n:]{0,80})\s*:\s*\[\s*\{|(?:^|\n)\s*\[\s*\{", evidence, re.I)),
+                }
+                if not concrete_json_shape.get(shape, False) and not all(
+                    re.search(pattern, evidence, re.I) for pattern in patterns
+                ):
+                    missing_shapes.append(shape)
+            if missing_shapes:
+                return False, "the passing API check does not assert response shape: " + ", ".join(missing_shapes), "assert the response is the required JSON object/list and inspect each returned item, then rerun the request", None, ()
         key = f"{tool_name}|{command}|{text}"
-        return True, "behavioral evidence accepted", "", key, hits + endpoint_hits + self.fields
+        return True, "behavioral evidence accepted", "", key, hits + endpoint_hits + tuple(operation_hits) + self.fields
+
+    @staticmethod
+    def is_lifecycle_setup(tool_name, arguments, result_content):
+        """Return true for process setup/cleanup, not behavior evidence."""
+        text = str(result_content or "")
+        if tool_name in {"run_command", "run_shell"} and (arguments or {}).get("background") is True:
+            return text.startswith("Started background process.")
+        if tool_name == "process_status":
+            return "RUNNING" in text
+        if tool_name == "stop_process":
+            return text.startswith("Stopped process")
+        return False
 
     def failure_packet(self, tool_name, arguments, result_content):
         """Render compact, actionable evidence for the mandatory repair turn."""
@@ -112,8 +241,15 @@ class ValidationContract:
         expected = []
         if endpoint:
             expected.append(f"exercise {endpoint}")
-        if self.fields:
+        write_probe = bool(re.search(r"\b(?:post|put|patch)\b|(?:-d|--data|--request)", joined, re.I))
+        field_relevant = write_probe and endpoint and endpoint.lower() in self.creation_endpoints
+        collection_relevant = (not write_probe and endpoint and endpoint.lower() in self.collection_endpoints)
+        if self.fields and field_relevant:
             expected.append("assert response field(s): " + ", ".join(self.fields))
+        if self.response_shapes and field_relevant:
+            expected.append("assert response shape: object")
+        elif self.response_shapes and collection_relevant:
+            expected.append("assert response shape: list and object items")
         matching = [c for c in self.criteria if endpoint is None or endpoint.lower() in c.lower()]
         expected.extend(matching[:2])
         if not expected:
@@ -123,8 +259,23 @@ class ValidationContract:
             observed = observed[-900:]
         if not observed:
             observed = "(no tool output)"
-        if endpoint and self.fields:
+        lower_observed = observed.lower()
+        if "modulenotfounderror" in lower_observed or "no module named" in lower_observed:
+            next_action = (
+                "inspect project declarations and determine whether the missing dependency is required; if required, "
+                "install it through the project's normal workflow and record it in the dependency declaration, "
+                "otherwise replace an ad hoc probe dependency with a standard-library or existing-project equivalent, "
+                "then rerun the check"
+            )
+        elif "timeout" in lower_observed or "timed out" in lower_observed:
+            next_action = (
+                "do not use a foreground long-running process as the check; launch the service with a bounded "
+                "background lifecycle and issue a focused request or health probe"
+            )
+        elif endpoint and field_relevant:
             next_action = f"inspect the handler for {endpoint}; return a JSON object and assert its fields before rechecking"
+        elif endpoint and collection_relevant:
+            next_action = f"inspect the handler for {endpoint}; return a JSON collection and assert each item before rechecking"
         elif endpoint:
             next_action = f"inspect the handler for {endpoint} and repair the behavior shown by the failure"
         else:
@@ -170,7 +321,32 @@ def from_task(task, task_type="code_change"):
     for field in _FIELD_RE.findall(text):
         if field not in fields:
             fields.append(field)
-    return ValidationContract(text, tuple(criteria), frozenset(categories), tuple(endpoints), tuple(fields))
+    inferred_fields, response_shapes = _inferred_response_requirements(text)
+    for field in inferred_fields:
+        if field not in fields:
+            fields.append(field)
+    creation_endpoints = []
+    collection_endpoints = []
+    operations = []
+    endpoint_matches = list(_ENDPOINT_RE.finditer(text))
+    for index, match in enumerate(endpoint_matches):
+        method, path = match.group(0).split(None, 1)
+        method = method.upper()
+        operations.append(f"{method} {path}")
+        clause_end = endpoint_matches[index + 1].start() if index + 1 < len(endpoint_matches) else len(text)
+        clause = text[match.start():clause_end]
+        if method in {"POST", "PUT", "PATCH"} and "created" in clause.lower():
+            creation_endpoints.append(path)
+        if method == "GET" and re.search(r"\b(?:all|list|list of)\b", clause, re.I):
+            collection_endpoints.append(path)
+    if response_shapes and not creation_endpoints:
+        creation_endpoints = [p for p in endpoints if "api" in p.lower()]
+    if "list" in response_shapes and not collection_endpoints:
+        collection_endpoints = [p for p in endpoints if "api" in p.lower()]
+    return ValidationContract(text, tuple(criteria), frozenset(categories), tuple(endpoints), tuple(fields), response_shapes,
+                              tuple(dict.fromkeys(p.lower() for p in creation_endpoints)),
+                              tuple(dict.fromkeys(p.lower() for p in collection_endpoints)),
+                              tuple(dict.fromkeys(operations)))
 
 
 def _self_test():
@@ -184,6 +360,36 @@ def _self_test():
     assert not api.assess("run_shell", {"command": "curl /api/tasks -d '{title: x}'"}, "Exit code: 0\nOK")[0]
     assert api.assess("run_shell", {"command": "curl /api/tasks; assert response.get('title') == 'x'"}, "Exit code: 0\nOK")[0]
     assert "Repair packet" in api.failure_packet("run_shell", {"command": "curl /api/tasks"}, "Exit code: 1\nAssertionError")
+    missing = api.failure_packet("run_command", {"command": "python test_server.py"}, "Exit code: 1\nModuleNotFoundError: No module named 'requests'")
+    assert "standard-library" in missing
+    timeout = api.failure_packet("run_command", {"command": "python server.py"}, "TIMEOUT after 5s — command likely hung")
+    assert "foreground long-running process" in timeout
+    created = from_task("Support POST /api/tasks with JSON {title: string} returning the created task as JSON.")
+    assert created.fields == ("title", "id") and created.response_shapes == ("object",)
+    assert created.creation_endpoints == ("/api/tasks",)
+    assert not created.assess("run_shell", {"command": "curl -X POST /api/tasks -d '{title: x}'; assert response.get('title') == 'x'"}, "Exit code: 0\nOK")[0]
+    script_evidence = (
+        "Exit code: 0\n"
+        "Testing POST /api/tasks... Response: {\"id\": 1, \"title\": \"Ship it\"}\n"
+        "✓ POST /api/tasks returns task with id and title\n"
+        "Testing GET /api/tasks... Response: [{\"id\": 1, \"title\": \"Ship it\"}]\n"
+        "✓ GET /api/tasks returns list of tasks with id and title"
+    )
+    assert created.assess("run_shell", {"command": "bash validate.sh"}, script_evidence)[0]
+    collection = from_task("Support GET /api/tasks returning all tasks as JSON.")
+    assert collection.response_shapes == ("list", "object items")
+    assert collection.assess("run_shell", {"command": "curl /api/tasks"}, "Exit code: 0\n[{\"id\": 1, \"title\": \"Ship it\"}]")[0]
+    multi = from_task("Expose GET /health and POST /api/tasks with JSON {title: string} returning the created task as JSON.")
+    assert multi.uncovered_endpoints({"GET /health"}) == ("POST /api/tasks",)
+    assert multi.uncovered_endpoints({"POST /api/tasks"}) == ("GET /health",)
+    multi_collection = from_task("Expose GET /health, POST /api/tasks returning the created task, and GET /api/tasks returning all tasks as JSON.")
+    assert multi_collection.uncovered_endpoints({"GET /health", "POST /api/tasks"}) == ("GET /api/tasks",)
+    combined_bad = "Exit code: 0\nPOST /api/tasks: {\"id\": 1, \"title\": \"x\"}\nGET /api/tasks: {\"tasks\": [{\"id\": 1, \"title\": \"x\"}]}"
+    assert not multi_collection.assess("run_shell", {"command": "curl POST GET /api/tasks"}, combined_bad)[0]
+    assert multi.assess("run_shell", {"command": "curl /health"}, "Exit code: 0\n{\"status\":\"ok\"}")[0]
+    assert c.assess("run_shell", {"command": "curl /health"}, "Exit code: 0\n{\"status\": \"ok\"}")[0]
+    assert api.is_lifecycle_setup("run_command", {"background": True}, "Started background process.\nHandle: proc-x")
+    assert api.is_lifecycle_setup("process_status", {}, "RUNNING\nHandle: proc-x")
 
 
 if __name__ == "__main__":

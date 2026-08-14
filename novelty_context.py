@@ -29,6 +29,7 @@ MAX_WORKER_OUTPUT_CHARS = 1200
 
 @dataclass
 class ContextEvent:
+    event_id: int
     iteration: int
     tool: str
     arguments: dict[str, Any]
@@ -57,6 +58,7 @@ class WorkerConfig:
 
 @dataclass
 class WorkerJudgment:
+    event_id: int = 0
     phase: str = "orient"
     new_facts: list[str] = field(default_factory=list)
     relevant_facts: list[str] = field(default_factory=list)
@@ -71,6 +73,7 @@ class WorkerJudgment:
 
     def render(self) -> str:
         payload = {
+            "event_id": self.event_id,
             "phase": self.phase,
             "new_facts": self.new_facts[-5:],
             "relevant_facts": self.relevant_facts[-5:],
@@ -117,6 +120,7 @@ def _local_judgment(events: list[ContextEvent], event: ContextEvent, window: int
     else:
         phase, action = "localize", "inspect"
     return WorkerJudgment(
+        event_id=event.event_id,
         phase=phase,
         new_facts=[f"{event.tool}: {event.result[:240]}"],
         duplicate_action=duplicate,
@@ -210,6 +214,10 @@ class NoveltyContext:
         self._process = None
         self._process_conn = None
         self._process_mode = chat_fn is None
+        self._active_event: ContextEvent | None = None
+        self._pending_event: ContextEvent | None = None
+        self._pending_fallback: WorkerJudgment | None = None
+        self._next_event_id = 0
         # state_text() is called while observe() is recording an event.  A
         # re-entrant lock keeps that snapshot operation atomic without making
         # the event path self-deadlock.
@@ -220,6 +228,8 @@ class NoveltyContext:
         self.worker_calls = 0
         self.worker_failures = 0
         self.worker_busy_drops = 0
+        self.coalesced_events = 0
+        self.stale_judgments = 0
         self.started_at = monotonic()
         self.no_action_turns = 0
 
@@ -237,7 +247,10 @@ class NoveltyContext:
 
     def observe(self, iteration: int, tool: str, arguments: dict[str, Any], result: str,
                 mutation: bool = False, validation: bool = False) -> None:
-        event = ContextEvent(iteration, tool, arguments, str(result),
+        with self._lock:
+            self._next_event_id += 1
+            event_id = self._next_event_id
+        event = ContextEvent(event_id, iteration, tool, arguments, str(result),
                              _fingerprint(tool, arguments, str(result)), mutation, validation)
         with self._lock:
             self.events.append(event)
@@ -266,25 +279,18 @@ class NoveltyContext:
             )
             if not should_process:
                 return
+            fallback = _local_judgment(self.events, event)
             process_busy = self._process is not None and self._process.is_alive()
             if ((self._future is not None and not self._future.done()) or process_busy):
-                self.worker_busy_drops += 1
+                # Keep the newest actionable event instead of losing every
+                # event that arrives during a slow 4B call. One slot is
+                # intentional: replaying the whole backlog would make the
+                # worker permanently chase history rather than current state.
+                self._pending_event = event
+                self._pending_fallback = fallback
+                self.coalesced_events += 1
                 return
-            fallback = _local_judgment(self.events, event)
-            if self._process_mode:
-                parent_conn, child_conn = multiprocessing.Pipe(False)
-                self._process_conn = parent_conn
-                process_factory = multiprocessing.get_context("fork").Process
-                self._process = process_factory(
-                    target=_ollama_process,
-                    args=(_prompt(self.state_text(), event), self.worker_model, self.worker_num_ctx, child_conn),
-                    daemon=True,
-                )
-                self.worker_calls += 1
-                self._process.start()
-                child_conn.close()
-            else:
-                self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
+            self._start_worker_locked(event, fallback)
 
     def observe_no_action(self, iteration: int, content: str = "") -> None:
         """Record an actor turn that produced prose but no executable action.
@@ -293,7 +299,11 @@ class NoveltyContext:
         the normal eight-event sampling interval, otherwise the small worker
         arrives only after the useful recovery window has already passed.
         """
+        with self._lock:
+            self._next_event_id += 1
+            event_id = self._next_event_id
         event = ContextEvent(
+            event_id=event_id,
             iteration=iteration,
             tool="actor_turn_no_action",
             arguments={},
@@ -307,32 +317,46 @@ class NoveltyContext:
             if self._process_mode:
                 busy = self._process is not None and self._process.is_alive()
                 if busy:
-                    self.worker_busy_drops += 1
+                    self._pending_event = event
+                    self._pending_fallback = WorkerJudgment(
+                        event_id=event.event_id, phase="mutate", recommended_action="patch_file",
+                        blocker="The actor returned no executable tool call.", confidence=0.9,
+                    )
+                    self.coalesced_events += 1
                     return
                 fallback = WorkerJudgment(
                     phase="mutate", recommended_action="patch_file",
                     blocker="The actor returned no executable tool call.",
                     confidence=0.9,
                 )
-                parent_conn, child_conn = multiprocessing.Pipe(False)
-                self._process_conn = parent_conn
-                process_factory = multiprocessing.get_context("fork").Process
-                self._process = process_factory(
-                    target=_ollama_process,
-                    args=(_prompt(self.state_text(), event), self.worker_model,
-                          self.worker_num_ctx, child_conn), daemon=True,
-                )
-                self.worker_calls += 1
-                self._process.start()
-                child_conn.close()
+                self._start_worker_locked(event, fallback)
                 self.last_judgment = fallback
             elif self._future is None or self._future.done():
                 fallback = WorkerJudgment(
+                    event_id=event.event_id,
                     phase="mutate", recommended_action="patch_file",
                     blocker="The actor returned no executable tool call.",
                     confidence=0.9,
                 )
-                self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
+                self._start_worker_locked(event, fallback)
+
+    def _start_worker_locked(self, event: ContextEvent, fallback: WorkerJudgment) -> None:
+        """Start one judgment; caller must hold ``_lock``."""
+        self._active_event = event
+        if self._process_mode:
+            parent_conn, child_conn = multiprocessing.Pipe(False)
+            self._process_conn = parent_conn
+            process_factory = multiprocessing.get_context("fork").Process
+            self._process = process_factory(
+                target=_ollama_process,
+                args=(_prompt(self.state_text(), event), self.worker_model, self.worker_num_ctx, child_conn),
+                daemon=True,
+            )
+            self.worker_calls += 1
+            self._process.start()
+            child_conn.close()
+        else:
+            self._future = self._executor.submit(self._judge, self.state_text(), event, fallback)
 
     def _judge(self, state: str, event: ContextEvent, fallback: WorkerJudgment) -> WorkerJudgment:
         started = monotonic()
@@ -347,10 +371,12 @@ class NoveltyContext:
                                think=False, options={"num_ctx": self.worker_num_ctx})
             raw = getattr(getattr(response, "message", None), "content", "")
             judgment = _parse_judgment(raw[:MAX_WORKER_OUTPUT_CHARS], fallback)
+            judgment.event_id = event.event_id
             judgment.latency_ms = (monotonic() - started) * 1000
             return judgment
         except Exception:
             self.worker_failures += 1
+            fallback.event_id = event.event_id
             fallback.latency_ms = (monotonic() - started) * 1000
             return fallback
 
@@ -362,10 +388,11 @@ class NoveltyContext:
                 return self.last_judgment
             try:
                 payload = self._process_conn.recv()
-                event = self.events[-1]
+                event = self._active_event or self.events[-1]
                 fallback = _local_judgment(self.events, event)
                 if payload.get("ok"):
                     judgment = _parse_judgment(payload.get("raw", ""), fallback)
+                    judgment.event_id = event.event_id
                 else:
                     self.worker_failures += 1
                     judgment = fallback
@@ -379,6 +406,9 @@ class NoveltyContext:
                 self._process_conn.close()
                 self._process_conn = None
                 self._process = None
+                with self._lock:
+                    self._active_event = None
+                    self._start_pending_locked()
             return judgment
         future = self._future
         if future is None:
@@ -391,18 +421,37 @@ class NoveltyContext:
             self.worker_failures += 1
             if self._future is future:
                 self._future = None
+            with self._lock:
+                self._active_event = None
+                self._start_pending_locked()
             return self.last_judgment
         with self._lock:
             self.last_judgment = judgment
             self.judgments.append(judgment)
             if self._future is future:
                 self._future = None
+            self._active_event = None
+            self._start_pending_locked()
         return judgment
+
+    def _start_pending_locked(self) -> None:
+        """Launch the newest coalesced event after the active call finishes."""
+        if self._pending_event is None:
+            return
+        event = self._pending_event
+        fallback = self._pending_fallback or _local_judgment(self.events, event)
+        self._pending_event = None
+        self._pending_fallback = None
+        self._start_worker_locked(event, fallback)
 
     def render_for_model(self, action_critic: bool = False) -> str:
         judgment = self.collect(wait=False)
         with self._lock:
             recent = self.events[-self.action_after_events:]
+            latest_event_id = recent[-1].event_id if recent else 0
+            judgment_is_stale = bool(judgment.event_id and judgment.event_id < latest_event_id)
+            if judgment_is_stale:
+                self.stale_judgments += 1
             adjacent_failure = len(self.events) >= 2 and all(
                 e.result.startswith(("ERROR", "REJECTED")) for e in self.events[-2:]
             ) and _call_key(self.events[-2].tool, self.events[-2].arguments) == _call_key(
@@ -419,12 +468,20 @@ class NoveltyContext:
                 )
             )
             critic_judgment = judgment
+            if judgment_is_stale:
+                critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
             # Do not wait for an asynchronous 4B result to become actionable.
             # The local policy supplies a conservative recommendation; a later
             # 4B judgment can refine it on the next turn.
             if action_critic and deterministic_trigger and judgment.recommended_action == "inspect":
                 critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
             rendered = "## Context manager state\n" + judgment.render()
+            if judgment_is_stale:
+                rendered += (
+                    f"\nWorker judgment is for event {judgment.event_id}, while the latest event is "
+                    f"{latest_event_id}; use the deterministic local recommendation until the newer "
+                    "judgment arrives."
+                )
             if len(self.events) >= 2:
                 previous, latest = self.events[-2:]
                 same_failure = (
@@ -460,7 +517,7 @@ class NoveltyContext:
                     "smallest useful artifact, then validate it with run_tests or run_command."
                 )
             return rendered + f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
-                   f"busy drops: {self.worker_busy_drops}."
+                   f"coalesced: {self.coalesced_events}; stale judgments: {self.stale_judgments}."
 
     def metrics(self) -> dict[str, Any]:
         self.collect(wait=False)
@@ -470,7 +527,9 @@ class NoveltyContext:
             duplicates = sum(j.duplicate_action for j in self.judgments)
             return {"events": len(self.events), "mutations": mutations, "validations": validations,
                     "worker_calls": self.worker_calls, "worker_failures": self.worker_failures,
-                    "worker_busy_drops": self.worker_busy_drops, "judgments": len(self.judgments),
+                    "worker_busy_drops": self.worker_busy_drops, "coalesced_events": self.coalesced_events,
+                    "stale_judgments": self.stale_judgments, "latest_event_id": self.events[-1].event_id if self.events else 0,
+                    "judgment_event_id": self.last_judgment.event_id, "judgments": len(self.judgments),
                     "duplicate_judgments": duplicates, "elapsed_s": monotonic() - self.started_at}
 
     def blocked_calls(self) -> set[tuple[str, str]]:

@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 from kernel.io_tools import read_file, write_file, patch_file, list_workspace
-from kernel.exec_tools import run_shell, run_command
+from kernel.exec_tools import run_shell, run_command, process_status, stop_process
 from kernel.discovery import find_files
 from kernel.sandbox import confine
 
@@ -34,7 +34,8 @@ from kernel.sandbox import confine
 # internal/backward-compatible callers, but the 35B model gets one execution
 # primitive with unambiguous argv semantics instead of two competing command
 # tools.
-KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, find_files, run_command]
+KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, find_files,
+                run_command, process_status, stop_process]
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 MANIFEST_PATH = os.path.join(STATE_DIR, "registry_manifest.json")

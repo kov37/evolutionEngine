@@ -1,6 +1,6 @@
 {
   "search_text": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/search_text.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/search_text.py",
     "function_name": "search_file",
     "description": "Search a file line-by-line for a substring pattern; returns (line_number, line_text) for every match.",
     "path_params": [
@@ -8,7 +8,7 @@
     ]
   },
   "list_symbols": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/list_symbols.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/list_symbols.py",
     "function_name": "list_symbols",
     "description": "Parse a Python file's AST and list every top-level function/class definition with its kind and line number.",
     "path_params": [
@@ -16,7 +16,7 @@
     ]
   },
   "list_dir": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/list_dir_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/list_dir_tool.py",
     "function_name": "list_dir",
     "description": "Recursively list every file and subdirectory beneath a root path, as (kind, relative_path) tuples.",
     "path_params": [
@@ -24,7 +24,7 @@
     ]
   },
   "diff_files": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/diff_files_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/diff_files_tool.py",
     "function_name": "diff_files",
     "description": "Compute a unified diff between two files, as a string, so a change can be inspected before or after it's applied.",
     "path_params": [
@@ -33,7 +33,7 @@
     ]
   },
   "run_tests": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/run_tests_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/run_tests_tool.py",
     "function_name": "run_tests",
     "description": "Discover and run a unittest test suite under a directory, returning (success, summary) instead of raw subprocess text a caller has to parse.",
     "path_params": [
@@ -41,19 +41,19 @@
     ]
   },
   "web_search": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/web_search_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/web_search_tool.py",
     "function_name": "web_search",
     "description": "Search the live web via the Tavily API and return the top results (title, url, short content snippet) as a formatted string.",
     "path_params": []
   },
   "fetch": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/fetch_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/fetch_tool.py",
     "function_name": "fetch",
     "description": "Retrieve the full content of one known URL (as markdown) via the Firecrawl API \u2014 the retrieval counterpart to web_search's discovery.",
     "path_params": []
   },
   "grep_dir": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/grep_dir_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/grep_dir_tool.py",
     "function_name": "grep_dir",
     "description": "Recursively search every file under a directory for a substring pattern, returning (relative_path, line_number, line_text) for every match.",
     "path_params": [
@@ -61,7 +61,7 @@
     ]
   },
   "git_status": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/git_status_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/git_status_tool.py",
     "function_name": "git_status",
     "description": "List every changed/untracked/staged file in a git working tree as (status_code, path) pairs, via `git status --porcelain=v1`.",
     "path_params": [
@@ -69,7 +69,7 @@
     ]
   },
   "git_diff": {
-    "module_path": "/Users/digitialchameleon/evolutionEngine/workspace/git_diff_tool.py",
+    "module_path": "/Users/digitialchameleon/noveltyEngine/workspace/git_diff_tool.py",
     "function_name": "git_diff",
     "description": "Return the full diff of a git working tree against HEAD (staged and unstaged combined) as a string, via `git diff HEAD`.",
     "path_params": [

@@ -39,7 +39,20 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
                        "Ran 5 tests: 4 passed, 1 failed, 0 errors".
     """
     loader = unittest.TestLoader()
-    suite = loader.discover(start_dir=path, top_level_dir=path)
+    # Agents naturally pass either a project directory or the focused test
+    # file they just inspected. unittest.discover only accepts directories;
+    # normalize a file target into its parent directory plus an exact pattern
+    # so the tool contract remains ergonomic and deterministic.
+    absolute_path = os.path.abspath(path)
+    if os.path.isfile(absolute_path):
+        start_dir = os.path.dirname(absolute_path) or os.curdir
+        pattern = os.path.basename(absolute_path)
+        top_level_dir = start_dir
+    else:
+        start_dir = path
+        pattern = "test*.py"
+        top_level_dir = path
+    suite = loader.discover(start_dir=start_dir, pattern=pattern, top_level_dir=top_level_dir)
 
     # Filter out non-test suites to get the real test count
     # loader.countTestCases() already excludes empty sub-suites
@@ -68,6 +81,20 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
         f"{pass_count} passed, {fail_count} failed, "
         f"{error_count} errors"
     )
+
+    # A count-only failure is not actionable feedback for an agent. Preserve
+    # the compact headline, then include bounded failure/error evidence so the
+    # next repair turn can target the implementation instead of guessing or
+    # rewriting the probe. Keep this provider-neutral and cap the payload so a
+    # pathological traceback cannot consume the agent's context window.
+    details: list[str] = []
+    for label, cases in (("FAIL", result.failures), ("ERROR", result.errors)):
+        for test_case, traceback_text in cases[:4]:
+            detail = traceback_text.strip().splitlines()
+            tail = " | ".join(line.strip() for line in detail[-3:] if line.strip())
+            details.append(f"{label} {test_case}: {tail}")
+    if details:
+        summary += " — " + " || ".join(details)[:1800]
 
     success = pass_count == tests_run and tests_run > 0
     return (success, summary)
@@ -138,6 +165,12 @@ class TestAllPass(unittest.TestCase):
             errors.append(
                 f"Scenario 2 FAILED — expected success=True "
                 f"(all tests pass), got {success!r}. Summary: {summary}"
+            )
+        file_success, file_summary = run_tests(module_path)
+        if file_success is not True or "Ran 2 tests" not in file_summary:
+            errors.append(
+                f"Scenario 2 FAILED — file-targeted discovery should pass two tests. "
+                f"Got success={file_success!r}, summary={file_summary}"
             )
     finally:
         shutil.rmtree(tmpdir_2, ignore_errors=True)

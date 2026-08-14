@@ -162,13 +162,15 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("Do not retry it", messages[0]["content"])
 
     def test_action_gate_requires_progress_after_observation_window(self):
+        # Recovery reads stay available during the orientation window and
+        # close once the action threshold is reached.
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
         for iteration in range(1, 4):
             context.observe(iteration, "read_file", {"path": f"f{iteration}.py"}, "content")
         self.assertTrue(context.requires_progress())
         context.observe(4, "find_files", {"pattern": "*.py"}, "a.py")
         context.observe(5, "find_files", {"pattern": "*.py"}, "a.py")
-        self.assertTrue(context.recovery_reads_allowed())
+        self.assertFalse(context.recovery_reads_allowed())
         for iteration in range(6, 12):
             context.observe(iteration, "find_files", {"pattern": "*.py"}, "a.py")
         self.assertFalse(context.recovery_reads_allowed())

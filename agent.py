@@ -32,6 +32,7 @@ import task_contract
 import validation_contract
 import worker
 import working_state
+from kernel.exec_tools import active_background_handles, cleanup_background_processes, stop_process
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
@@ -145,11 +146,85 @@ def _normalize_llama_messages(raw_messages):
     return normalized
 
 
+class PromptBudgetError(RuntimeError):
+    """The request cannot fit even after safe transcript reduction."""
+
+
+def _llama_root(base_url):
+    root = base_url.rstrip("/")
+    return root[:-3].rstrip("/") if root.endswith("/v1") else root
+
+
+def _llama_token_count(base_url, messages, timeout_seconds, extra_payload=None):
+    """Ask llama.cpp for the exact token count of the normalized prompt."""
+    measured = {"messages": messages}
+    if extra_payload is not None:
+        measured["extra"] = extra_payload
+    payload = {"content": json.dumps(measured, ensure_ascii=False, separators=(",", ":"))}
+    request = urllib.request.Request(
+        _llama_root(base_url) + "/tokenize",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=min(2.0, timeout_seconds or 2.0)) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    tokens = data.get("tokens")
+    if not isinstance(tokens, list):
+        raise RuntimeError("llama.cpp /tokenize returned no token list")
+    return len(tokens)
+
+
+def _fit_llama_prompt(base_url, messages, max_tokens, timeout_seconds, extra_payload=None):
+    """Measure and reduce the prompt before sending it to llama.cpp."""
+    context_tokens = _context_window_tokens("llama-cpp", base_url)
+    response_reserve = max(256, int(max_tokens or 0))
+    prompt_budget = max(1_024, context_tokens - response_reserve - 256)
+    try:
+        prompt_tokens = _llama_token_count(base_url, messages, timeout_seconds, extra_payload)
+    except Exception as exc:
+        # The percentage/raw-output bound remains the safe fallback when a
+        # provider does not expose exact tokenization.
+        print(f"⚠️ [prompt measurement unavailable] {type(exc).__name__}: {exc}")
+        return messages, None, prompt_budget
+    if prompt_tokens <= prompt_budget:
+        return messages, prompt_tokens, prompt_budget
+
+    # Keep the newest tool evidence and replace the oldest tool payloads in
+    # place. Re-measure after each replacement because token density varies by
+    # file/code content; never guess that characters equal tokens here.
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content", ""))
+        if content.startswith("[pruned tool output"):
+            continue
+        message["content"] = (
+            f"[pruned by exact token budget: {len(content)} chars removed; "
+            "use focused reads or current state if needed.]"
+        )
+        prompt_tokens = _llama_token_count(base_url, messages, timeout_seconds, extra_payload)
+        if prompt_tokens <= prompt_budget:
+            print(f"🧮 [prompt fit] reduced {prompt_tokens} tokens <= budget {prompt_budget}")
+            return messages, prompt_tokens, prompt_budget
+    raise PromptBudgetError(
+        f"prompt remains {prompt_tokens} tokens after safe tool pruning; "
+        f"budget={prompt_budget}, n_ctx={context_tokens}"
+    )
+
+
 def _llama_cpp_chat(*, base_url, timeout_seconds, **kwargs):
     """Call llama-server's OpenAI-compatible endpoint as the actor backend."""
     from ollama import _utils
 
     messages = _normalize_llama_messages(kwargs.get("messages", []))
+    max_tokens = kwargs.get("max_tokens", 1024)
+    tool_payload = [json.loads(_utils.convert_function_to_tool(fn).model_dump_json(exclude_none=True))
+                    for fn in kwargs.get("tools", [])]
+    messages, measured_prompt_tokens, prompt_budget = _fit_llama_prompt(
+        base_url, messages, max_tokens, timeout_seconds, extra_payload=tool_payload,
+    )
+    if measured_prompt_tokens is not None:
+        print(f"🧮 [prompt tokens] {measured_prompt_tokens}/{prompt_budget}")
 
     payload = {
         "model": kwargs["model"],
@@ -160,12 +235,11 @@ def _llama_cpp_chat(*, base_url, timeout_seconds, **kwargs):
         # temperature 0.8 with unlimited generation, which can spend minutes
         # explaining before emitting a tool call.
         "temperature": 0.15,
-        "max_tokens": kwargs.get("max_tokens", 1024),
+        "max_tokens": max_tokens,
         "reasoning_format": "none",
         "reasoning_effort": "none",
         "parallel_tool_calls": False,
-        "tools": [json.loads(_utils.convert_function_to_tool(fn).model_dump_json(exclude_none=True))
-                  for fn in kwargs.get("tools", [])],
+        "tools": tool_payload,
     }
     if kwargs.get("tool_choice") is not None:
         payload["tool_choice"] = kwargs["tool_choice"]
@@ -288,6 +362,67 @@ def _intervention_messages(messages, tail=INTERVENTION_TAIL_MESSAGES):
 # unpruned) for a proportional reduction in cache-invalidation frequency.
 PRUNE_BATCH_SIZE = 5
 
+# Always bound live raw tool output, including novelty-only runs where the
+# optional structured/context summary branches are disabled. This protects the
+# actor from a finite provider context (llama.cpp may be configured below
+# agent.py's preferred NUM_CTX) without removing tool-call/result messages.
+RAW_TOOL_CONTEXT_FRACTION = 0.18
+CHARS_PER_TOKEN_ESTIMATE = 4
+FALLBACK_CONTEXT_WINDOW_TOKENS = 16_384
+
+
+def _context_window_tokens(backend, base_url):
+    """Discover the provider window when possible; use a safe fallback."""
+    if backend != "llama-cpp":
+        return int(NUM_CTX)
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3].rstrip("/")
+    try:
+        request = urllib.request.Request(root + "/props", method="GET")
+        with urllib.request.urlopen(request, timeout=0.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        candidates = [payload.get("n_ctx"), payload.get("n_ctx_train")]
+        defaults = payload.get("default_generation_settings") or {}
+        candidates.extend([defaults.get("n_ctx"), defaults.get("n_ctx_train")])
+        for value in candidates:
+            if isinstance(value, int) and value > 0:
+                return value
+    except Exception:
+        pass
+    return FALLBACK_CONTEXT_WINDOW_TOKENS
+
+
+def _live_tool_result_char_budget(backend, base_url):
+    context_tokens = _context_window_tokens(backend, base_url)
+    budget = int(context_tokens * RAW_TOOL_CONTEXT_FRACTION * CHARS_PER_TOKEN_ESTIMATE)
+    return max(4_000, budget), context_tokens
+
+
+def _bound_live_tool_results(messages, char_budget):
+    """Replace old tool output in place once the live raw tail is too large."""
+    running = 0
+    pruned = []
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        content = str(message.get("content", ""))
+        if content.startswith("[pruned tool output"):
+            continue
+        if running + len(content) <= char_budget:
+            running += len(content)
+            continue
+        messages[index]["content"] = (
+            f"[pruned tool output: {len(content)} chars removed from live context; "
+            "use focused reads and current state if this evidence is needed.]"
+        )
+        pruned.append(len(content))
+    if pruned:
+        print(f"🗑️  [global tool bound] pruned {len(pruned)} outputs "
+              f"({sum(pruned)} chars); live tail budget={char_budget}")
+    return pruned
+
 # Re-enabled after an isolated experiment (every other fix left on, only
 # this toggled off) showed pruning was NEVER the cause of the exploration-
 # avoidance behavior — the same redundant-read pattern persisted with zero
@@ -347,13 +482,21 @@ def _completion_ready(messages, task_type, validation_plan=None, validation_evid
             validated = True
     if not mutated:
         return False, "no successful write_file or patch_file call has been observed"
+    # Validation was already assessed at dispatch time with the original
+    # command arguments. Re-assessing a tool result here with ``{}`` loses the
+    # endpoint/method that was present in the command and can falsely reject
+    # valid evidence (especially API probes). Use the accepted evidence ledger
+    # as the source of truth for completion readiness.
+    if validation_evidence:
+        validated = True
     if not validated:
         return False, "no passing run_tests, run_command, or run_shell result has been observed"
     if validation_plan and validation_plan.endpoints:
-        evidence = validation_evidence or set()
-        covered = {endpoint for endpoint in validation_plan.endpoints if any(endpoint.lower() in item.lower() for item in evidence)}
-        if len(covered) < len(validation_plan.endpoints):
-            return False, f"only {len(covered)}/{len(validation_plan.endpoints)} required interfaces have validation evidence"
+        evidence = validation_criteria_hits or validation_evidence or set()
+        required = validation_plan.operations or validation_plan.endpoints
+        covered = {item for item in required if any(item.lower() in str(observed).lower() for observed in evidence)}
+        if len(covered) < len(required):
+            return False, f"only {len(covered)}/{len(required)} required interfaces have validation evidence"
     return True, None
 
 # A hard forcing function (removing read-only tools from what the model is
@@ -446,6 +589,10 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     current_level = 0
     recent_errors = []
     novelty_context = NoveltyContext(worker_model=novelty_worker_model) if novelty_context_enabled else None
+    live_tool_char_budget, provider_context_tokens = _live_tool_result_char_budget(backend, base_url)
+    print(f"📐 [context budget] provider_n_ctx={provider_context_tokens}; "
+          f"raw_tool_fraction={RAW_TOOL_CONTEXT_FRACTION:.2f}; "
+          f"raw_tool_chars={live_tool_char_budget}")
     # A mutation opens a deterministic verification phase. The actor may
     # choose how to validate, but it cannot make another edit or deliver until
     # one validation action succeeds. This is an engine policy, independent of
@@ -455,11 +602,41 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     repair_required = False
     last_validation_failure = ""
     last_repair_packet = ""
+    validation_failures_total = 0
+    repair_mode_entries = 0
+    repair_mutations = 0
+    revalidation_attempts = 0
+    successful_repair_cycles = 0
+    repair_mutation_pending = False
+    stale_service_restart_pending = False
+    agent_started_at = time.monotonic()
+    first_tool_elapsed = None
+    first_mutation_elapsed = None
+    first_validation_elapsed = None
+
+    def repair_metrics():
+        return {
+            "validation_failures": validation_failures_total,
+            "repair_mode_entries": repair_mode_entries,
+            "repair_mutations": repair_mutations,
+            "revalidation_attempts": revalidation_attempts,
+            "successful_repair_cycles": successful_repair_cycles,
+        }
+
+    def timing_metrics():
+        return {
+            "first_tool_s": round(first_tool_elapsed, 3) if first_tool_elapsed is not None else None,
+            "first_mutation_s": round(first_mutation_elapsed, 3) if first_mutation_elapsed is not None else None,
+            "first_validation_s": round(first_validation_elapsed, 3) if first_validation_elapsed is not None else None,
+        }
     validation_plan = validation_contract.from_task(task, task_type)
     validation_evidence = set()
     validation_criteria_hits = set()
 
     def close_novelty_context():
+        print(f"🧰 [repair metrics] {json.dumps(repair_metrics(), sort_keys=True)}")
+        print(f"⏱️ [agent timing] {json.dumps(timing_metrics(), sort_keys=True)}")
+        cleanup_background_processes()
         if novelty_context is not None:
             novelty_context.close()
             print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
@@ -498,6 +675,14 @@ You have this focused toolbelt: {offered_tool_names}.
 - Use web_search to find information or documentation, fetch to read a specific URL's full content.
 - Files you write are NOT automatically executed — this isn't a throwaway sandbox, so verify your own work
   explicitly with run_tests or run_command rather than assuming a write succeeded because it didn't error.
+- Dependency policy: the workspace has internet access. Inspect project declarations first. If a dependency is
+  explicitly required by the task or needed by the application, install it through the project's normal workflow and
+  record it in the dependency declaration. Do not invent a third-party dependency merely for an ad hoc probe; for
+  probe-only code, prefer the standard library or an existing project dependency. For long-running services, do not
+  use a foreground startup command as the behavioral check; use a bounded background lifecycle and probe the service.
+- For a long-running command, call run_command or run_shell with background=true. Save the returned handle, use
+  process_status to inspect logs/readiness, and call stop_process when finished. Do not use a foreground timeout as
+  evidence that a service is broken.
 - When — and only when — the task is fully complete, call finish_task with a short summary of what you did.
   Returning plain text without calling finish_task does not end the task; you are expected to keep working."""
 
@@ -564,6 +749,7 @@ You have this focused toolbelt: {offered_tool_names}.
             messages_for_call = messages
 
         if validation_required:
+            uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
             messages_for_call = messages_for_call + [{
                 "role": "system",
                 "content": (
@@ -576,6 +762,8 @@ You have this focused toolbelt: {offered_tool_names}.
                     "and response structure; for CLIs, check exit status and output; for libraries, "
                     "run the focused regression test. Record failures and repair from their evidence. "
                     + validation_plan.render() + "\n"
+                    + ("Required interfaces still without accepted evidence: " + ", ".join(uncovered) + "\n"
+                       if uncovered else "")
                     + (f"The previous validation failed {validation_failures} time(s); use the failure "
                        "output to choose the next targeted check." if validation_failures else "")
                 ),
@@ -588,6 +776,14 @@ You have this focused toolbelt: {offered_tool_names}.
                 "role": "system", "content": novelty_context.render_for_model(
                     action_critic=novelty_action_critic),
             }]
+
+        if stale_service_restart_pending:
+            messages_for_call = messages_for_call + [{"role": "system", "content": (
+                "One-time stale-service recovery: stop the old background process, launch exactly one fresh "
+                "process from the updated workspace, then run the focused behavioral validation. Once the "
+                "fresh process is running, do not repeat this restart instruction."
+            )}]
+            stale_service_restart_pending = False
 
         # The graduated progress governor — evaluated using the ledger's
         # state as of the END of the previous iteration (this iteration's
@@ -686,21 +882,51 @@ You have this focused toolbelt: {offered_tool_names}.
             # check, force an inspect/repair turn before offering another
             # check; otherwise a model can loop over superficially different
             # probes without ever changing the defective artifact.
+            setup_failure = False
             if repair_required:
                 validation_tools = {"read_file", "find_files", "search_file", "patch_file", "write_file",
-                                     "diff_files", "git_diff"}
+                                    "diff_files", "git_diff", "process_status", "stop_process"}
+                # A failed check can be an execution/setup failure rather
+                # than an assertion failure. In that case the actor needs a
+                # command/test tool available to select the right interpreter,
+                # install an explicitly required dependency, or rerun from a
+                # valid target. Keep this conditional so ordinary failures
+                # still force an implementation mutation before probing again.
+                setup_failure = any(marker in last_repair_packet.lower() for marker in (
+                    "could not start", "no such file or directory", "importerror",
+                    "no tests discovered", "dependency", "permission denied",
+                ))
+                if setup_failure:
+                    validation_tools.update({"run_tests", "run_command", "run_shell"})
             else:
-                validation_tools = {"run_tests", "run_command", "run_shell", "diff_files", "git_diff"}
+                validation_tools = {"run_tests", "run_command", "run_shell", "process_status", "stop_process",
+                                    "diff_files", "git_diff"}
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
+            repair_instruction = (
+                "A validation check failed. Repair the execution/setup problem first; you may retry with an "
+                "available command or test target. "
+                if setup_failure else
+                "A validation check failed. Inspect this failure and make one targeted repair now; "
+            )
+            if repair_required:
+                validation_prompt = (
+                    repair_instruction
+                    + "Do not run another check or finish until you have changed the defective artifact, unless "
+                    + "the failure is solely execution/setup-related. "
+                    + "Treat the validation script as evidence, not the artifact: do not weaken or rewrite "
+                    + "the probe to make it pass. Only change the probe for an explicit dependency, setup, "
+                    + "or syntax failure; otherwise repair the implementation named by the evidence. "
+                    + "Failure evidence:\n"
+                    + last_repair_packet
+                )
+            else:
+                validation_prompt = (
+                    "Validation phase tool restriction: only validation tools are available this turn. "
+                    "Run a focused test or executable check and inspect its result."
+                )
             messages_for_call = messages_for_call + [{
                 "role": "system",
-                "content": (
-                    ("A validation check failed. Inspect this failure and make one targeted repair now; "
-                     "do not run another check or finish until you have changed the defective artifact. "
-                    "Failure evidence:\n" + last_repair_packet if repair_required
-                     else "Validation phase tool restriction: only validation tools are available this turn. "
-                          "Run a focused test or executable check and inspect its result.")
-                ),
+                "content": validation_prompt,
             }]
 
         response = None
@@ -713,15 +939,12 @@ You have this focused toolbelt: {offered_tool_names}.
                     backend=backend, base_url=base_url,
                 )
                 if action_first and iteration == 1 and backend == "llama-cpp":
-                    # The OpenAI-compatible required choice is a generic
-                    # protocol control, not a model-specific prompt trick.
-                    if any(t.__name__ == "write_file" for t in tools_for_call):
-                        chat_kwargs["tool_choice"] = {
-                            "type": "function",
-                            "function": {"name": "write_file"},
-                        }
-                    else:
-                        chat_kwargs["tool_choice"] = "required"
+                    # llama-server accepts the OpenAI-compatible string form
+                    # here.  Its current API rejects the structured
+                    # {type:function,function:{name:...}} form, so keep the
+                    # provider translation at this boundary rather than
+                    # leaking a llama.cpp-specific choice into the agent.
+                    chat_kwargs["tool_choice"] = "required"
                     chat_kwargs["max_tokens"] = 2048
                 response = _chat_with_timeout(**chat_kwargs)
                 break
@@ -730,6 +953,12 @@ You have this focused toolbelt: {offered_tool_names}.
                 recent_errors.append(f"iter {iteration}: {e}")
                 recent_errors[:] = recent_errors[-5:]
                 print(f"⚠️  {e}; ending run cleanly so a stalled model call cannot strand the benchmark")
+                break
+            except PromptBudgetError as e:
+                last_error = e
+                recent_errors.append(f"iter {iteration}: prompt budget: {e}")
+                recent_errors[:] = recent_errors[-5:]
+                print(f"⚠️  {e}; ending run cleanly instead of retrying an oversized prompt")
                 break
             except Exception as e:
                 last_error = e
@@ -773,6 +1002,9 @@ You have this focused toolbelt: {offered_tool_names}.
 
         msg = response.message
         messages.append(msg)
+        if msg.tool_calls and first_tool_elapsed is None:
+            first_tool_elapsed = time.monotonic() - agent_started_at
+            print(f"⏱️ [first tool] {first_tool_elapsed:.3f}s")
 
         if structured_summary_enabled:
             iteration_assistant_idx[iteration] = len(messages) - 1
@@ -830,6 +1062,9 @@ You have this focused toolbelt: {offered_tool_names}.
             msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls
         )
         messages.extend(tool_messages)
+        # This runs regardless of which optional memory mode is enabled.
+        # Novelty context must not leave raw tool output unbounded.
+        _bound_live_tool_results(messages, live_tool_char_budget)
 
         validation_phase_before_turn = validation_required
         turn_mutated = False
@@ -844,15 +1079,28 @@ You have this focused toolbelt: {offered_tool_names}.
             success = action_governor.infer_success(capability, tool_name, result)
             if capability == "MUTATE" and success is True:
                 turn_mutated = True
+                if first_mutation_elapsed is None:
+                    first_mutation_elapsed = time.monotonic() - agent_started_at
+                    print(f"⏱️ [first mutation] {first_mutation_elapsed:.3f}s")
             # During the verification phase, a successful executable check is
             # validation even when the command is an app/API smoke test rather
             # than a pytest command and the general classifier calls it OBSERVE.
             phase_validation = validation_required and tool_name in {
                 "run_tests", "run_command", "run_shell", "diff_files", "git_diff"
             }
+            if phase_validation:
+                revalidation_attempts += 1
+                if first_validation_elapsed is None:
+                    first_validation_elapsed = time.monotonic() - agent_started_at
+                    print(f"⏱️ [first validation] {first_validation_elapsed:.3f}s")
             if capability == "VALIDATE" or phase_validation:
+                if validation_plan.is_lifecycle_setup(tool_name, args, result):
+                    # Process startup/status/cleanup is setup, not proof of
+                    # application behavior. Keep the validation phase open
+                    # until a test or request produces evidence.
+                    continue
                 assessment = validation_plan.assess(tool_name, args, result)
-                if success is True and assessment[0] and assessment[3] not in validation_evidence:
+                if (success is True or (phase_validation and assessment[0])) and assessment[0] and assessment[3] not in validation_evidence:
                     turn_validation_succeeded = True
                     validation_evidence.add(assessment[3])
                     validation_criteria_hits.update(assessment[4])
@@ -864,13 +1112,24 @@ You have this focused toolbelt: {offered_tool_names}.
                     validation_suggestions.append(assessment[1])
         if turn_mutated:
             if repair_required:
+                repair_mutations += 1
+                repair_mutation_pending = True
                 repair_required = False
                 validation_failures = 0
                 print("🛠️  [repair phase] targeted mutation landed; returning to validation")
             validation_required = True
             validation_failures = 0
             print("🔒 [validation phase] mutation succeeded; validation required before another edit")
+            stale_service_handles = active_background_handles()
+            if stale_service_handles:
+                for handle in stale_service_handles:
+                    print(f"♻️ [stale service] automatic stop: {stop_process(handle)}")
+                stale_service_restart_pending = True
+                print(f"♻️ [stale service] restart required after mutation: {stale_service_handles}")
         if turn_validation_failed and validation_required:
+            if not repair_required:
+                repair_mode_entries += 1
+            validation_failures_total += 1
             validation_failures += 1
             repair_required = True
             failed_packets = []
@@ -887,9 +1146,21 @@ You have this focused toolbelt: {offered_tool_names}.
             )})
             print(f"⚠️  [validation phase] validation failed ({validation_failures}); targeted repair required before recheck")
         if turn_validation_succeeded:
-            validation_required = False
-            validation_failures = 0
-            print("✅ [validation phase] independent validation succeeded; edits reopened")
+            if repair_mutation_pending:
+                successful_repair_cycles += 1
+                repair_mutation_pending = False
+            uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
+            if uncovered:
+                # One passing probe is useful evidence, but it is not enough
+                # when the task names several interfaces. Keep the actor in a
+                # focused validation phase until every interface is covered.
+                validation_required = True
+                validation_failures = 0
+                print("✅ [validation phase] probe succeeded; still required: " + ", ".join(uncovered))
+            else:
+                validation_required = False
+                validation_failures = 0
+                print("✅ [validation phase] independent validation succeeded; edits reopened")
 
         if novelty_context is not None:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
