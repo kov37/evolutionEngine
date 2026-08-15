@@ -1982,3 +1982,28 @@ the current turn, recommends validation commands during validation, and
 recommends mutation only during repair. Its generic directive no longer names
 an unavailable tool. The deterministic suite passes 95 tests, including the
 novelty-context tests.
+
+### 2026-08-15 — make temporary validation probes executable without file mutation
+
+The next live WebSocket run reproduced a separate, model-independent tool
+contract edge case. After the actor had repaired all three artifacts and
+installed `ws`, it correctly decided that a real client/server smoke test was
+needed. It then repeatedly said it would write a temporary smoke-test file.
+Validation intentionally exposes only executable checks and forbids product
+file mutation, so the actor had no legal way to carry out that plan. The
+recovery directive recommended `run_command`, but did not explain that an
+inline `node -e` or `python -c` probe was the intended replacement.
+
+Validation prompts now explicitly direct temporary probes through an inline
+shell command and forbid creating helper files during validation. This keeps
+the setup/product/evidence boundary intact while making the existing shell
+surface sufficient for short-lived probes. The preflight now also includes the
+novelty-context test module, so changes to the worker/recovery layer cannot
+skip the cheap deterministic suite. The full targeted suite passes 96 tests
+and the benchmark preflight passes before any model call.
+
+The interrupted live run still had a correct artifact and an independent
+passing grader, but no `finish_task`; it is recorded as incomplete rather than
+counted as a success. The next run should verify whether the actor converts
+the same smoke-test plan into an inline command and then completes the
+handoff.

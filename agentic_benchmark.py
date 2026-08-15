@@ -127,6 +127,7 @@ def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
     command = [
         sys.executable, "-m", "unittest",
         "tests.test_agent_tools", "tests.test_adversarial_preflight",
+        "tests.test_novelty_context",
     ]
     try:
         proc = subprocess.run(

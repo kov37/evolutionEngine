@@ -194,6 +194,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("run_tests", policy.tools)
         self.assertIn("2 related product artifact", policy.prompt)
 
+    def test_validation_policy_directs_temporary_probes_inline(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=False, setup_failure=False,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=0, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False,
+        )
+        self.assertIn("node -e", policy.prompt)
+        self.assertIn("do not create a new helper file", policy.prompt)
+
     def test_dependency_install_is_setup_not_behavioral_evidence(self):
         self.assertTrue(is_dependency_setup_command(["npm", "install", "--no-audit"]))
         self.assertTrue(is_dependency_setup_command("python3 -m pip install ws"))

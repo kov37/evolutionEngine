@@ -935,7 +935,9 @@ You have this focused toolbelt: {offered_tool_names}.
                     "The check must exercise the changed behavior or artifact, not merely list or "
                     "diff the file. For APIs, send representative requests and assert status codes "
                     "and response structure; for CLIs, check exit status and output; for libraries, "
-                    "run the focused regression test. Record failures and repair from their evidence."
+                    "run the focused regression test. If a temporary probe is needed, run it inline "
+                    "with run_command/run_shell (for example, node -e or python -c); do not create a "
+                    "new helper file during validation. Record failures and repair from their evidence."
                     + batch_instruction + " "
                     + validation_plan.render() + "\n"
                     + ("Required interfaces still without accepted evidence: " + ", ".join(uncovered) + "\n"
@@ -1304,7 +1306,8 @@ You have this focused toolbelt: {offered_tool_names}.
                 "content": (
                     "Do not return another explanation. Take one executable action now: use "
                     + next_action
-                    + "; call finish_task only after verification."
+                    + "; for a temporary validation probe, use an inline run_command/run_shell "
+                    "rather than creating a helper file; call finish_task only after verification."
                 ),
             })
             continue
