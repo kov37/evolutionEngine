@@ -184,12 +184,12 @@ class KernelToolTests(unittest.TestCase):
             validation_required=True, repair_required=False, setup_failure=False,
             repair_inspection_used=False, last_mutation_rejected=False,
             validation_failures=0, protected_edit_recovery_pending=False,
-            repair_recovery_mode=False, mutation_batch_remaining=1,
+            repair_recovery_mode=False, mutation_batch_remaining=2,
         )
         self.assertIn("patch_file", policy.tools)
         self.assertIn("write_file", policy.tools)
         self.assertIn("run_tests", policy.tools)
-        self.assertIn("distinct unfinished artifact", policy.prompt)
+        self.assertIn("2 related product artifact", policy.prompt)
 
     def test_repair_recovery_preserves_rejected_write_method_ban(self):
         policy = build_validation_policy(

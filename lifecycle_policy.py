@@ -164,8 +164,9 @@ def build_validation_policy(
         if mutation_batch_remaining > 0:
             validation_tools |= MUTATION_TOOLS
             batch_note = (
-                " One related product artifact may still be added to the current change batch before "
-                "validation; use a mutation only for a distinct unfinished artifact, then validate."
+                f" Up to {mutation_batch_remaining} related product artifact(s) may still be added to "
+                "the current change batch before validation; use mutations only for distinct unfinished "
+                "artifacts, then validate."
             )
         return ValidationActionPolicy(
             tools=frozenset(validation_tools),

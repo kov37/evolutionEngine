@@ -1951,3 +1951,10 @@ deterministic suite passes 92 tests. The grader also identified the next
 product/setup requirement for this harder task: the workspace needs a
 `package.json` declaring `ws`; the next live run will verify how the actor
 handles that dependency contract.
+
+The batch run reached `server.js` and `index.html` as intended, then exposed
+that the WebSocket task also explicitly requires a third artifact,
+`package.json`. The bounded batch allowance is now two follow-up mutations
+after the first successful write, enough for an implementation, client, and
+dependency manifest while still forcing validation immediately afterward. The
+deterministic suite remains green at 92 tests.

@@ -503,6 +503,11 @@ NUM_CTX = 65536
 # fresh guess. Exponential, capped, so a genuinely dead server still gives up
 # in reasonable time rather than retrying forever.
 MAX_CHAT_RETRIES = 20
+# A coherent small application may need an implementation file, a client,
+# and a dependency manifest before any one of them is runnable. Permit two
+# related follow-up mutations, then force validation; this is finite and
+# provider/model agnostic.
+MUTATION_BATCH_LIMIT = 2
 
 
 def _terminal_provider_error(error) -> bool:
@@ -757,9 +762,10 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     repair_turns_used = 0
     repair_recovery_mode = False
     repair_recovery_entries = 0
-    # Permit one related product mutation after the first successful write so
-    # multi-file changes can reach a coherent validation point. The allowance
-    # is consumed immediately and never opens an unbounded edit loop.
+    # Permit a small bounded set of related product mutations after the first
+    # successful write so multi-file changes can reach a coherent validation
+    # point. The allowance is consumed immediately and never opens an
+    # unbounded edit loop.
     validation_batch_remaining = 0
     orientation_turns_without_mutation = 0
     lifecycle = LifecycleFSM()
@@ -914,8 +920,9 @@ You have this focused toolbelt: {offered_tool_names}.
         if validation_required:
             uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
             batch_instruction = (
-                " If a distinct requested product artifact still needs implementation, you may make "
-                "one related product mutation before validating; do not edit the already changed artifact."
+                " If distinct requested product artifacts still need implementation, you may make "
+                f"up to {validation_batch_remaining} related product mutation(s) before validating; "
+                "do not edit an already changed artifact."
                 if validation_batch_remaining > 0 and not repair_required else ""
             )
             messages_for_call = messages_for_call + [{
@@ -1455,7 +1462,7 @@ You have this focused toolbelt: {offered_tool_names}.
             if mutation_was_in_validation_batch:
                 validation_batch_remaining = max(0, validation_batch_remaining - 1)
             else:
-                validation_batch_remaining = 1
+                validation_batch_remaining = MUTATION_BATCH_LIMIT
             print("🔒 [validation phase] mutation succeeded; validation required before another edit")
             stale_service_handles = active_background_handles()
             if stale_service_handles:
