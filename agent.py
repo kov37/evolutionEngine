@@ -34,9 +34,9 @@ import task_contract
 import validation_contract
 import worker
 import working_state
-from lifecycle_fsm import LifecycleFSM
+from lifecycle_fsm import LifecycleFSM, LifecycleState
 from kernel.exec_tools import active_background_handles, cleanup_background_processes, stop_process
-from dispatch import dispatch_tool_calls
+from dispatch import _call_key, dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
 from novelty_context import NoveltyContext
@@ -269,6 +269,15 @@ def _llama_cpp_chat(*, base_url, timeout_seconds, **kwargs):
         "parallel_tool_calls": False,
         "tools": tool_payload,
     }
+    # mlx-lm exposes Qwen's hybrid thinking switch as a request-level chat
+    # template argument. Send it explicitly instead of relying on the
+    # server's startup default, so a provider restart cannot silently change
+    # the actor's latency/action profile. `think` remains the generic agent
+    # setting; this mapping is isolated at the llama.cpp adapter boundary.
+    if kwargs.get("think") is not None:
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": bool(kwargs["think"]),
+        }
     if kwargs.get("tool_choice") is not None:
         payload["tool_choice"] = kwargs["tool_choice"]
     request = urllib.request.Request(
@@ -527,6 +536,28 @@ def _is_validation_setup_failure(text: str) -> bool:
         "does not show behavioral evidence", "no behavioral assertion",
         "no interaction evidence", "zero exit code without a behavioral",
     ))
+
+
+def _has_orientation_evidence(messages) -> bool:
+    """Return whether a targeted inspection produced usable evidence."""
+    evidence_tools = {"read_file", "find_files", "search_file", "list_symbols"}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        tool_name = message.get("tool_name") or message.get("name")
+        if tool_name not in evidence_tools:
+            continue
+        content = str(message.get("content") or "").strip()
+        if content and not content.startswith(("ERROR:", "REJECTED:")):
+            # A malformed small-model read request such as ``limit: 0`` still
+            # produces a non-empty wrapper ("--- file --- (0 chars) ---").
+            # The wrapper is not source evidence; treating it as evidence
+            # closes the read surface before the actor has seen the artifact,
+            # which creates a deterministic-looking but real paralysis loop.
+            if "(0 chars)" in content or "lines 1-0" in content:
+                continue
+            return True
+    return False
 
 
 def _force_repair_recovery(recovery_mode, repair_required, setup_failure):
@@ -1014,26 +1045,55 @@ You have this focused toolbelt: {offered_tool_names}.
                 ),
             }]
 
+        orientation_recovery_active = lifecycle.state == LifecycleState.RECOVER
+        orientation_evidence_available = False
         if (not validation_required and not repair_required
+                and lifecycle.state == LifecycleState.ACT
                 and orientation_turns_without_mutation >= ORIENTATION_TURN_BUDGET):
-            # Pressure the actor toward progress without forcing a blind edit:
-            # one targeted read/search remains legal, while broad listing and
-            # unrestricted exploration stay unavailable.
-            orientation_tools = lifecycle_policy.orientation_action_tools()
+            lifecycle.transition("orientation_stalled")
+            orientation_recovery_active = True
+            print("🧭 [FSM] ACT -> RECOVER: orientation budget exhausted")
+
+        if orientation_recovery_active and not validation_required and not repair_required:
+            # RECOVER is the lifecycle-owned recovery surface.  Before useful
+            # evidence exists, one targeted read is still legal. Once source
+            # evidence exists, a code-change contract has a missing MUTATE
+            # capability, so the FSM offers only mutation tools. This removes
+            # the old loophole where the actor could receive repeated
+            # read/validation tools forever while the lifecycle stayed ACT.
+            evidence_available = _has_orientation_evidence(messages)
+            orientation_evidence_available = evidence_available
+            if evidence_available and contract.requires("MUTATE"):
+                orientation_tools = {"patch_file", "write_file"}
+                orientation_instruction = (
+                    "The FSM is in RECOVER and source evidence is available. A code mutation is now "
+                    "required. Use patch_file or write_file immediately; do not read, search, run a "
+                    "probe, or return a plan."
+                )
+            else:
+                orientation_tools = lifecycle_policy.orientation_action_tools(
+                    evidence_available=evidence_available
+                )
+                orientation_instruction = (
+                    "Useful inspection evidence is already present. Make one concrete implementation "
+                    "change now, or run focused validation if the artifact is complete."
+                    if evidence_available else
+                    "No useful inspection evidence is present yet. Take at most one targeted read/search, "
+                    "then make one concrete implementation change or run focused validation."
+                )
             tools_for_call = [t for t in tools_for_call if t.__name__ in orientation_tools]
             messages_for_call = messages_for_call + [{
                 "role": "system",
                 "content": (
                     "## Orientation budget exhausted\n"
                     f"The last {orientation_turns_without_mutation} turns produced no mutation. "
-                    "You have enough evidence to act. Make one concrete implementation change now, "
-                    "or run the focused validation if the artifact is already complete. Do not reread "
-                    "unchanged files or return a plan."
+                    + orientation_instruction + " Do not return a plan."
                 ),
             }]
             print(
-                f"🧭 [orientation recovery] {orientation_turns_without_mutation} turns without mutation; "
-                "restricting the next turn to progress tools"
+                f"🧭 [FSM recovery] {orientation_turns_without_mutation} turns without mutation; "
+                f"restricting the next turn to {'mutation' if evidence_available and contract.requires('MUTATE') else 'progress'} "
+                f"tools (evidence={'yes' if evidence_available else 'no'})"
             )
 
         if validation_required:
@@ -1111,6 +1171,13 @@ You have this focused toolbelt: {offered_tool_names}.
                     # leaking a llama.cpp-specific choice into the agent.
                     chat_kwargs["tool_choice"] = "required"
                     chat_kwargs["max_tokens"] = 2048
+                if (orientation_recovery_active and orientation_evidence_available
+                        and contract.requires("MUTATE") and backend == "llama-cpp"):
+                    # The FSM has reduced the legal registry to mutation
+                    # tools. Require one tool call at the provider boundary as
+                    # well, so a plain explanation cannot consume another
+                    # recovery turn.
+                    chat_kwargs["tool_choice"] = "required"
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
@@ -1234,9 +1301,19 @@ You have this focused toolbelt: {offered_tool_names}.
         # real function for whatever's actually allowed).
         allowed_names = {t.__name__ for t in tools_for_call}
         blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
+        blocked_command_calls = set()
+        if orientation_recovery_active and orientation_evidence_available:
+            for call in msg.tool_calls:
+                if call.function.name in {"run_command", "run_shell"}:
+                    args = call.function.arguments or {}
+                    if lifecycle_policy.is_inspection_command(
+                        args.get("command", args.get("argv"))
+                    ):
+                        blocked_command_calls.add(_call_key(call.function.name, args))
         tool_messages = dispatch_tool_calls(
             msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls,
             blocked_mutation_paths=blocked_mutation_paths,
+            blocked_command_calls=blocked_command_calls,
         )
         messages.extend(tool_messages)
         # This runs regardless of which optional memory mode is enabled.

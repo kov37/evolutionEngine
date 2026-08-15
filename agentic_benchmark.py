@@ -117,6 +117,11 @@ def _run_completed(timed_out: bool, returncode: int | None) -> bool:
     return not timed_out and returncode == 0
 
 
+def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed: bool) -> bool:
+    """Require a correct artifact, clean process exit, and explicit finish."""
+    return bool(artifact_passed and finish_called and run_completed)
+
+
 def _event_kind(line: str) -> str:
     """Classify one live actor line for the durable monitor stream."""
     stripped = line.strip()
@@ -713,10 +718,15 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "finish_called": metrics["done_signal"],
         "run_completed": _run_completed(timed_out, returncode),
     }
-    passed = artifact_passed and scorecard["run_completed"]
-    if not passed and artifact_passed and not scorecard["run_completed"]:
+    # A correct partial artifact is useful evidence, but it is not a complete
+    # agent run. Require the actor's explicit finish signal so a model that
+    # mutates successfully and then stalls in validation is scored honestly.
+    passed = _scorecard_passed(
+        artifact_passed, scorecard["finish_called"], scorecard["run_completed"]
+    )
+    if not passed and artifact_passed:
         detail = (
-            "Artifact passed, but the agent run did not complete normally: "
+            "Artifact passed, but the agent did not complete the required handoff: "
             + json.dumps(scorecard, sort_keys=True)
         )
     if task.max_success_iterations is not None:

@@ -25,6 +25,11 @@ class InvalidTransition(RuntimeError):
 _TRANSITIONS = {
     (LifecycleState.ORIENT, "turn"): LifecycleState.ACT,
     (LifecycleState.ACT, "turn"): LifecycleState.ACT,
+    # Once the actor has spent its orientation budget without changing the
+    # workspace, recovery is a lifecycle transition—not a loose counter that
+    # independently rewrites the tool list.  RECOVER keeps the existing
+    # evidence and narrows the next legal action surface.
+    (LifecycleState.ACT, "orientation_stalled"): LifecycleState.RECOVER,
     (LifecycleState.VALIDATE, "turn"): LifecycleState.VALIDATE,
     (LifecycleState.REPAIR, "turn"): LifecycleState.REPAIR,
     (LifecycleState.RECOVER, "turn"): LifecycleState.RECOVER,

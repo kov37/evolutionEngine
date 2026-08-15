@@ -1,10 +1,11 @@
 import tempfile
 import urllib.error
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error, _worker_triage_enabled
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -15,10 +16,10 @@ from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import _failure_diagnostic, assertion_driven_tool_contract, from_task
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
-from lifecycle_policy import build_validation_policy, orientation_action_tools
+from lifecycle_policy import build_validation_policy, is_inspection_command, orientation_action_tools
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
-from agentic_benchmark import TASKS, _profile_limits, _run_completed
+from agentic_benchmark import TASKS, _profile_limits, _run_completed, _scorecard_passed
 
 
 class _FakeMessage:
@@ -32,15 +33,45 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_llama_adapter_sends_explicit_thinking_switch(self):
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {},
+                }).encode()
+
+        def fake_urlopen(request, timeout=None):
+            captured.update(json.loads(request.data.decode()))
+            return Response()
+
+        with patch("agent._fit_llama_prompt", return_value=([], 3, 100)), \
+             patch("agent.urllib.request.urlopen", side_effect=fake_urlopen):
+            _llama_cpp_chat(
+                base_url="http://provider/v1", timeout_seconds=1,
+                model="model", messages=[], tools=[], think=False,
+            )
+        self.assertEqual(captured["chat_template_kwargs"], {"enable_thinking": False})
+
     def test_lifecycle_fsm_has_deterministic_repair_path(self):
         fsm = LifecycleFSM()
         self.assertEqual(fsm.transition("turn"), LifecycleState.ACT)
+        self.assertEqual(fsm.transition("orientation_stalled"), LifecycleState.RECOVER)
+        self.assertEqual(fsm.transition("turn"), LifecycleState.RECOVER)
         self.assertEqual(fsm.transition("mutation"), LifecycleState.VALIDATE)
         self.assertEqual(fsm.transition("validation_failed"), LifecycleState.REPAIR)
         self.assertEqual(fsm.transition("recovery_budget_exhausted"), LifecycleState.RECOVER)
         self.assertEqual(fsm.transition("mutation"), LifecycleState.VALIDATE)
         self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
-        self.assertEqual(fsm.metrics()["transitions"], 6)
+        self.assertEqual(fsm.metrics()["transitions"], 8)
 
     def test_lifecycle_fsm_rejects_impossible_transition(self):
         fsm = LifecycleFSM()
@@ -125,6 +156,39 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("patch_file", tools)
         self.assertNotIn("list_workspace", tools)
 
+    def test_orientation_recovery_closes_reads_after_evidence_exists(self):
+        tools = orientation_action_tools(evidence_available=True)
+        self.assertNotIn("read_file", tools)
+        self.assertNotIn("search_file", tools)
+        self.assertIn("patch_file", tools)
+        self.assertIn("run_command", tools)
+
+    def test_orientation_evidence_ignores_empty_and_error_reads(self):
+        self.assertFalse(_has_orientation_evidence([
+            {"role": "tool", "tool_name": "read_file", "content": ""},
+            {"role": "tool", "tool_name": "read_file", "content": "ERROR: missing"},
+            {"role": "tool", "tool_name": "read_file", "content": "--- app.py [lines 1-0 of 12] (0 chars) ---"},
+        ]))
+        self.assertTrue(_has_orientation_evidence([
+            {"role": "tool", "tool_name": "read_file", "content": "line 1: implementation"},
+        ]))
+
+    def test_orientation_shell_guard_blocks_only_simple_inspection(self):
+        self.assertTrue(is_inspection_command(["cat", "server.js"]))
+        self.assertTrue(is_inspection_command("sed -n '1,20p' index.html"))
+        self.assertTrue(is_inspection_command([
+            "node", "-e", "console.log(require('fs').readFileSync('server.js','utf8'))",
+        ]))
+        self.assertTrue(is_inspection_command([
+            "python3", "-c", "print(open('index.html').read())",
+        ]))
+        self.assertFalse(is_inspection_command(["npm", "install"]))
+        self.assertFalse(is_inspection_command(["node", "smoke_test.js"]))
+        self.assertFalse(is_inspection_command([
+            "node", "-e", "const fs=require('fs'); console.log(fs.readFileSync('x')); assert(true)",
+        ]))
+        self.assertFalse(is_inspection_command("cat server.js && node smoke_test.js"))
+
     def test_recovery_guard_is_safe_before_first_validation(self):
         self.assertFalse(_force_repair_recovery(False, False, False))
 
@@ -183,6 +247,11 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_run_completed(False, -15))
         self.assertFalse(_run_completed(True, -15))
         self.assertTrue(_run_completed(False, 0))
+
+    def test_artifact_without_finish_signal_is_not_a_pass(self):
+        self.assertFalse(_scorecard_passed(True, False, True))
+        self.assertFalse(_scorecard_passed(True, True, False))
+        self.assertTrue(_scorecard_passed(True, True, True))
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:

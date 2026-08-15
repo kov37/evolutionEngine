@@ -1564,3 +1564,121 @@ NoveltyEngine implementation.
 Do not add mini-SWE-agent-specific branches to the engine. Future comparisons
 should use the smoke profile first, then a full run only after a real mutation
 and validation boundary are observed.
+
+### 2026-08-15 — evidence-aware orientation gate and shell inspection guard
+
+The first short WebSocket smoke run ended after 4 actor iterations with no
+mutation. The actor had inspected both files, then the orientation recovery
+surface removed `read_file`; it bypassed that restriction by issuing
+`run_command cat ...` for both files. This is a generic shell/tool-plane
+failure: restricting tool names does not prevent a shell tool from recreating
+the restricted action.
+
+The orientation policy now has two deterministic surfaces. Before useful
+inspection evidence exists, one targeted read/search remains legal. After
+evidence exists, only mutation, validation, finish, exact recall, and diff
+tools remain. In addition, simple single-command file/list inspection commands
+(`cat`, `sed`, `head`, `tail`, `grep`, `rg`, `find`, `ls`, and similar) are
+blocked during evidence-ready orientation recovery, even when emitted through
+`run_command` or `run_shell`. Pipelines, interpreters, test runners,
+installers, service probes, and compound commands remain available because they
+can produce behavioral evidence or perform legitimate setup.
+
+The deterministic suite had passed 74 tests in the preceding run. The current
+portable `unittest` invocation passes 72 tests because two pytest-dependent
+checks are not collected in this environment. The next WebSocket smoke run must
+verify the actor reaches a mutation rather than merely receiving a rejection;
+the independent grader remains unchanged.
+
+### 2026-08-15 — command-plane guard covers inline interpreter readbacks
+
+The next WebSocket smoke trace confirmed that blocking `read_file` and simple
+shell readers was not sufficient. After receiving usable source evidence, the
+actor switched to two commands of the form
+`node -e "console.log(require('fs').readFileSync(...))"` and printed both
+application files through the command tool. It made no mutation and no
+validation call. This was another generic action-plane escape hatch, not a
+WebSocket-specific rule.
+
+`lifecycle_policy.is_inspection_command()` now also recognizes a narrow class
+of inline interpreter commands from Node, Python, Ruby, Perl, PHP, Bun, and
+Deno when they both read a file and print it. It deliberately leaves ordinary
+scripts, test/assertion snippets, process or network probes, installers, and
+mutating snippets available. Dispatch rejects the command only during the
+evidence-ready orientation recovery state; the shell remains available for
+behavioral validation and setup recovery.
+
+The deterministic suite passes 72 tests with one environment-dependent skip.
+The next check is the same bounded WebSocket run, looking specifically for a
+mutation after the first useful reads. If the model still finds a new generic
+readback route, classify that route and extend the policy with a focused test
+rather than adding a WebSocket-specific prompt.
+
+### 2026-08-15 — fixed false orientation evidence from zero-line reads
+
+The guarded run revealed why the actor remained stuck even after every shell
+readback was rejected. The model had requested `read_file` with `limit: 0`.
+The tool returned a non-empty header such as
+`--- server.js [lines 1-0 of 27] (0 chars) ---`, and the orientation detector
+mistook that header for useful source evidence. The engine then removed the
+read tools even though the actor had never seen the file contents.
+
+`_has_orientation_evidence()` now rejects zero-character and `lines 1-0`
+read results. This keeps targeted reading legal until actual evidence exists;
+it is a generic tool-result contract fix, not a benchmark-specific exception.
+The next WebSocket run should distinguish this case from true post-inspection
+paralysis. The per-request Qwen thinking probe also confirmed that this MLX
+server accepts `chat_template_kwargs: {"enable_thinking": true|false}`; that
+will remain an optional provider capability experiment, not a replacement for
+the deterministic action policy.
+
+### 2026-08-15 — FSM-owned orientation recovery and explicit thinking payload
+
+The live trace after the zero-line fix showed a second architectural gap: the
+actor had real source evidence, but the lifecycle still reported `ACT` while a
+separate counter changed the tool list. The engine could restrict tools without
+recording a state transition that made mutation mandatory.
+
+`LifecycleFSM` now has an explicit `ACT -> RECOVER` `orientation_stalled`
+transition. In `RECOVER`, a code-change contract with usable evidence exposes
+only `patch_file` and `write_file`, and the llama.cpp adapter requests a tool
+call. This is a generic contract-driven recovery path; diagnosis tasks are not
+forced to mutate. A second-pass live run reached the new state correctly, but
+the mutation-only provider call timed out, so the benchmark was not counted as
+success.
+
+The second pass also caught and fixed a missing `LifecycleState` import before
+the next run. The llama.cpp adapter now sends
+`chat_template_kwargs: {"enable_thinking": false}` explicitly when the agent
+is not using thinking, rather than relying on the server startup default. This
+keeps the provider behavior stable and leaves room for a later adaptive
+orientation/mutation experiment. The deterministic suite now passes 73 tests
+with one environment-dependent skip; compilation and `git diff --check` are
+clean.
+
+### 2026-08-15 — bounded WebSocket result and sampling-control smoke test
+
+The post-FSM WebSocket run reached real mutation and independent artifact
+success: first mutation at 110.6s, first validation at 186.7s, 4 mutations,
+4 validations, and an artifact grader pass in 312.5s. It did not call
+`finish_task`, so the benchmark exposed a completion-contract bug: the runner
+previously marked a correct partial artifact as `passed` whenever the child
+process exited normally.
+
+`agentic_benchmark.py` now requires all three conditions for a pass: artifact
+grader success, clean process completion, and the actor's explicit finish
+signal. The same run is therefore correctly classified as incomplete rather
+than fully passed. This preserves useful artifact evidence while preventing a
+false capability claim.
+
+A small direct llama.cpp A/B probe compared baseline sampling, explicit
+`repetition_penalty: 1.0`, and Qwen's suggested
+`presence_penalty: 1.5` plus `repetition_penalty: 1.0`. All three produced the
+same valid required `write_file` call in 3.61–3.88s; the 0.27s difference is
+too small to claim a real gain. No immediate tool-schema damage was observed.
+The next tuning test should use repeated multi-turn repair prompts and measure
+first mutation, invalid tool calls, and finish rate before adopting the
+penalties as defaults.
+
+The deterministic suite now passes 74 tests with one environment-dependent
+skip.

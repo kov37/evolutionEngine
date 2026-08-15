@@ -5,6 +5,7 @@ validation-phase capabilities are legal.  Keeping the decision in one pure
 function prevents scattered prompt/tool branches from drifting apart.
 """
 
+import shlex
 from dataclasses import dataclass
 
 
@@ -21,11 +22,79 @@ ORIENTATION_TOOLS = frozenset({
     "read_file", "find_files", "search_file", "patch_file", "write_file",
     "finish_task", "recall",
 })
+ORIENTATION_PROGRESS_TOOLS = frozenset({
+    "patch_file", "write_file", "run_tests", "run_command", "run_shell",
+    "finish_task", "recall", "diff_files", "git_diff",
+})
 
 
-def orientation_action_tools() -> frozenset[str]:
-    """Return the narrow action surface after the orientation budget."""
-    return ORIENTATION_TOOLS
+def orientation_action_tools(*, evidence_available: bool = False) -> frozenset[str]:
+    """Return the action surface after the orientation budget.
+
+    Before the actor has obtained any useful evidence, one targeted read is
+    still legal. Once evidence exists, keeping read/search tools available
+    turns the recovery surface into another exploration loop, so only
+    mutation, validation, completion, and exact recall remain.
+    """
+    return ORIENTATION_PROGRESS_TOOLS if evidence_available else ORIENTATION_TOOLS
+
+
+def is_inspection_command(command) -> bool:
+    """Identify a simple shell read/list command, without parsing a shell DSL.
+
+    This intentionally blocks only an unambiguous single command. Pipelines,
+    conditionals, interpreters, test runners, installers, and service probes
+    remain available because they may carry behavioral evidence or change the
+    environment.
+    """
+    if isinstance(command, str):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+    elif isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    else:
+        return False
+    if not argv or any(token in {"&&", "||", ";", "|"} for token in argv):
+        return False
+    head = argv[0].rsplit("/", 1)[-1]
+    if head in {
+        "cat", "head", "tail", "less", "more", "sed", "awk", "grep",
+        "rg", "find", "ls", "pwd", "tree", "file", "wc",
+    }:
+        return True
+
+    # A command-plane guard must cover the shell's escape hatches too.  Small
+    # models commonly replace a blocked `read_file` with `node -e` or
+    # `python -c` that opens a file and prints it.  Keep this deliberately
+    # narrow: only classify an inline interpreter snippet as inspection when it
+    # both reads a file and prints the result, and do not block snippets that
+    # contain an obvious test, process, network, or mutation operation.
+    if head not in {
+        "node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "php",
+    }:
+        return False
+    try:
+        code_index = next(i for i, token in enumerate(argv[1:], 1) if token in {"-e", "-c"})
+    except StopIteration:
+        return False
+    code = " ".join(argv[code_index + 1:]).lower()
+    if not code:
+        return False
+    reads_file = any(marker in code for marker in {
+        "readfilesync", "readfile(", "read_text", "read_text(", "open(",
+        "fs.readfile", "fs.readfilesync",
+    })
+    prints_result = any(marker in code for marker in {
+        "console.log", "console.error", "print(", "puts ", "p ",
+    })
+    has_behavior = any(marker in code for marker in {
+        "assert", "pytest", "unittest", "test(", "spawn(", "exec(",
+        "request(", "fetch(", "listen(", "writefile", "write_text",
+        "unlink", "mkdir", ".send(", "websocket",
+    })
+    return reads_file and prints_result and not has_behavior
 
 
 @dataclass(frozen=True)
