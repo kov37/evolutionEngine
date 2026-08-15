@@ -1304,3 +1304,12 @@ three. This is a model-neutral convergence policy: it does not prescribe a
 file, patch, or benchmark-specific action; it simply prevents a third
 unchanged exploration turn. The next real run must compare first-mutation
 latency and artifact progress against the prior three-read baseline.
+
+The four-iteration comparison reached the new gate as expected: Mistral made
+its first mutation on iteration 3, then ran `npm install`; the new checkpoint
+classified that result as setup and withheld mutation plus unrestricted shell
+tools. The short run ended before the actor had a repair turn, so it is not a
+pass/fail capability result. First mutation was 182.9 seconds and first
+validation was 262.2 seconds on this CPU-only server. A longer unchanged run
+is required to measure whether the actor can now continue from setup into the
+real WebSocket verification probe.
