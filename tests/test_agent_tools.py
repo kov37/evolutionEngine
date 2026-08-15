@@ -1122,11 +1122,20 @@ class KernelToolTests(unittest.TestCase):
         accepted, reason, suggestion, *_ = contract.assess(
             "run_command",
             {"command": ["python3", "-c", "urllib.request.urlopen('http://127.0.0.1:8765')"]},
-            "Exit code: 0\nSTDOUT: checks: 15 failed: []\nSTDERR:\n",
+            "Exit code: 0\nSTDOUT: checks: 15 failed: ['websocket_round_trip']\nSTDERR:\n",
         )
         self.assertFalse(accepted)
         self.assertEqual(reason, "the executable behavioral check reported a failure")
         self.assertIn("repair", suggestion)
+
+    def test_empty_checker_failure_list_is_successful_behavioral_evidence(self):
+        contract = from_task("Build a web artifact and run a real local HTTP check.")
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "-c", "urllib.request.urlopen('http://127.0.0.1:8765')"]},
+            "Exit code: 0\nSTDOUT: status 200 content-type text/html checks: 15 failed: []\nSTDERR:\n",
+        )
+        self.assertTrue(accepted, reason)
 
     def test_failure_diagnostic_extracts_assertion_diff(self):
         diagnostic = _failure_diagnostic(

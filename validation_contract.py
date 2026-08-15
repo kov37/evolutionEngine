@@ -303,10 +303,20 @@ class ValidationContract:
         # the distinction between a real behavioral failure and a weak probe:
         # explicit failure summaries are product evidence, so they must enter
         # repair rather than being treated as an uninformative readback.
+        checker_output = stdout + "\n" + stderr
+        # Normalize the common ``checks: N failed: []`` success summary before
+        # looking for failure words. The number is the count of checks, not
+        # the count of failures; a non-empty list remains a real failure.
+        checker_failure_text = re.sub(
+            r"\b(?:checks?|tests?)\s*:\s*\d+\s+failed\s*:\s*\[\s*\]",
+            "",
+            checker_output,
+            flags=re.IGNORECASE,
+        )
         behavioral_failure = re.search(
             r"(?:\bassert(?:ion)?error\b|\btests?\s+failed\b|\bfailed\s*[:=]|"
             r"\b\d+\s+failed\b|\bchecks?\s*:\s*\d+\s+failed\b)",
-            stdout + "\n" + stderr,
+            checker_failure_text,
             re.IGNORECASE,
         )
         if behavioral_failure:
@@ -392,7 +402,7 @@ class ValidationContract:
                 and not re.search(
                     r"\b(assert(?:ion)?|verif(?:y|ied)|pass(?:ed)?|success(?:ful)?|"
                     r"received|connected|response|message|pong|websocket|"
-                    r"handshake|round[- ]?trip|sent)\b",
+                    r"handshake|round[- ]?trip|sent|checks?|content[- ]?type)\b",
                     stdout + " " + stderr,
                     re.I,
                 )):

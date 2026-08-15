@@ -2513,4 +2513,18 @@ file inspection before its response was assessed.
 The inline-reader rule now requires a function-boundary match for Python's
 filesystem `open`, while preserving `readFileSync`, `read_text`, and the other
 file-read forms. A standard-library HTTP `urlopen` probe is classified as
-validation. The adversarial suite now passes 123 tests.
+validation. The adversarial suite now passes 124 tests.
+
+### 2026-08-15 — parse empty checker failure lists as success
+
+The next live 3D run found a grader parsing bug rather than an artifact bug.
+The checker output used the common summary form `checks: 15 failed: []`:
+fifteen checks were performed and the failure list was empty. A broad `N
+failed` match incorrectly treated that as a product failure, causing the actor
+to edit a working scene and consume recovery turns.
+
+The validation contract now removes the explicit empty-list form before looking
+for failure markers. A non-empty list still enters product repair. Checker
+summaries also count as interaction evidence for web artifacts when they report
+an HTTP status/content type. Regression tests cover both cases, the focused
+suite passes 124 tests, and the offline adversarial preflight remains green.
