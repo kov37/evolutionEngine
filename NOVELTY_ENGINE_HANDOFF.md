@@ -2489,3 +2489,16 @@ the FSM in validation, preserves the artifact, and reopens the executable
 validation surface. This is a wording-independent plane rule: a successful
 readback is not a failed product behavior, regardless of whether the artifact
 is HTML, an API, a CLI, or a library.
+
+### 2026-08-15 — treat explicit checker failures as behavioral failures
+
+The next live `3d_scene` probe made a real HTTP request, but its checker caught
+the failed assertions and printed `checks: 15 failed: []` while returning exit
+code 0. The contract saw a clean process exit and categorized the result as
+weak evidence, so it did not produce a targeted repair packet.
+
+Validation now recognizes explicit checker-failure summaries (`AssertionError`,
+`tests failed`, `N failed`, and `checks: N failed`) even when the wrapper exits
+zero. Those results enter product repair; file readbacks and genuinely weak
+probes remain in validation recovery. The distinction is based on the observed
+failure shape, not on the task or model.

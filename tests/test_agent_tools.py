@@ -1117,6 +1117,17 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertTrue(accepted)
 
+    def test_zero_exit_checker_failure_enters_product_repair(self):
+        contract = from_task("Build a WebSocket server and run a real local client smoke test.")
+        accepted, reason, suggestion, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "-c", "urllib.request.urlopen('http://127.0.0.1:8765')"]},
+            "Exit code: 0\nSTDOUT: checks: 15 failed: []\nSTDERR:\n",
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "the executable behavioral check reported a failure")
+        self.assertIn("repair", suggestion)
+
     def test_failure_diagnostic_extracts_assertion_diff(self):
         diagnostic = _failure_diagnostic(
             "AssertionError: values differ\n"

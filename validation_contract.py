@@ -307,6 +307,24 @@ class ValidationContract:
         )
         stdout = text.split("STDOUT:", 1)[1].split("STDERR:", 1)[0].strip() if "STDOUT:" in text else text
         stderr = text.split("STDERR:", 1)[1].strip() if "STDERR:" in text else ""
+        # A checker can catch its own assertion and still exit zero. Preserve
+        # the distinction between a real behavioral failure and a weak probe:
+        # explicit failure summaries are product evidence, so they must enter
+        # repair rather than being treated as an uninformative readback.
+        behavioral_failure = re.search(
+            r"(?:\bassert(?:ion)?error\b|\btests?\s+failed\b|\bfailed\s*[:=]|"
+            r"\b\d+\s+failed\b|\bchecks?\s*:\s*\d+\s+failed\b)",
+            stdout + "\n" + stderr,
+            re.IGNORECASE,
+        )
+        if behavioral_failure:
+            return (
+                False,
+                "the executable behavioral check reported a failure",
+                "inspect the failed check output and repair the implicated behavior, then rerun the check",
+                None,
+                (),
+            )
         if direct_test_file and not stdout and not stderr and "-m" not in str(command):
             return (
                 False,
