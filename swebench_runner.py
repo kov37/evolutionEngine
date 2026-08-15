@@ -167,6 +167,15 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     ])
     started = time.time()
     agent_env = os.environ.copy()
+    # Tool commands launched by the actor must resolve the same interpreter
+    # and package manager that launched the agent. Without this, a model's
+    # ordinary `python`/`pip` probe can silently hit the host installation
+    # while the independent grader uses the configured virtual environment.
+    interpreter_bin = str(Path(sys.executable).resolve().parent)
+    agent_env["PATH"] = os.pathsep.join(
+        part for part in (interpreter_bin, agent_env.get("PATH")) if part
+    )
+    agent_env["VIRTUAL_ENV"] = sys.prefix
     existing_pythonpath = agent_env.get("PYTHONPATH")
     agent_env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(compatibility_dir), existing_pythonpath) if part

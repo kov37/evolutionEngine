@@ -3027,3 +3027,16 @@ status are preserved at
 
 Deterministic regression after the timeout guard: 136 focused tests pass, 35
 subtests pass, and all edited modules compile.
+
+The bounded verification run proved the timeout behavior: it exited cleanly in
+154.5 seconds at iteration 7 with the explicit `llama.cpp chat exceeded 30.0s`
+error. Before that boundary, the actor had one mutation and six `_cdf`
+methods, but its setup probe used the host `python` and reported missing
+`mpmath`; the independent grader still passed 19/20 selected tests. This is a
+runner environment mismatch, not product evidence.
+
+`swebench_runner.py` now prepends the interpreter directory of the configured
+agent Python to `PATH` and sets `VIRTUAL_ENV` for the actor subprocess. That
+makes ordinary `python` and `pip` tool calls resolve to the same environment
+used by the agent and grader, while retaining the external legacy compatibility
+shim. This is a generic execution-contract repair, not a SymPy-specific rule.
