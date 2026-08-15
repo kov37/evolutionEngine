@@ -2829,3 +2829,17 @@ snapshot, the controller now restores both `validation_required` and
 fresh checkpoint builder and its mutation-only tool surface. The focused suite
 remains 108/108 and compilation is clean. Rerun the unchanged Todo benchmark
 to verify the actor receives the checkpoint rather than another probe.
+
+### 2026-08-15 — preserve rejected mutation evidence in fresh checkpoints
+
+The next run reached the mutation-only checkpoint and forced `patch_file`, but
+the actor's proposed patch had invalid Python syntax. The engine rejected it
+without writing, then the actor repeated the same invalid patch because the
+fresh checkpoint retained only the last accepted mutation and the older POST
+failure; it had discarded the new syntax error.
+
+Rejected mutation results are now promoted into the current repair packet with
+an explicit instruction to change the patch. This keeps the checkpoint bounded
+while preserving the newest evidence needed to correct a malformed edit. The
+focused suite remains 108/108 and compilation is clean. Rerun the unchanged
+Todo task to verify malformed repair attempts converge instead of repeating.

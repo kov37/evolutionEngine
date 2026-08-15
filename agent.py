@@ -435,7 +435,8 @@ def _repair_checkpoint_messages(
             "[fresh repair checkpoint] The previous repair action was rejected by the engine. "
             "The old action transcript is intentionally omitted. Use only the current failure evidence "
             "and the accepted mutation below; make one concrete product patch now. Do not repeat a "
-            "rejected non-mutation action, start a service, run another probe, or return a plan."
+            "rejected non-mutation action, start a service, run another probe, or return a plan. "
+            "If the previous patch was rejected, change its contents and do not repeat it."
         ),
     }]
     if mutation_checkpoint:
@@ -1648,6 +1649,13 @@ You have this focused toolbelt: {offered_tool_names}.
                 repair_inspection_used = True
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 last_mutation_rejected = True
+                # A fresh recovery checkpoint intentionally drops the old
+                # action tail. Preserve the rejection itself so a malformed
+                # patch is not replayed without its syntax/error evidence.
+                last_repair_packet = (
+                    f"Previous {tool_name} mutation was rejected; change the patch rather than "
+                    f"repeating it.\n{result}"
+                )[-3000:]
             success = action_governor.infer_success(capability, tool_name, result)
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 # A governor heuristic must never turn a failed mutation into
