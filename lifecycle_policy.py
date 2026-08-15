@@ -6,6 +6,7 @@ function prevents scattered prompt/tool branches from drifting apart.
 """
 
 import shlex
+import re
 from dataclasses import dataclass
 
 
@@ -46,6 +47,61 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     "patch_file", "write_file", "run_tests", "run_command", "run_shell",
     "finish_task", "recall", "diff_files", "git_diff",
 })
+
+
+_FILE_MUTATION_HEADS = frozenset({"tee", "cp", "mv", "rm", "touch", "install"})
+_INTERPRETER_HEADS = frozenset({
+    "node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "php",
+})
+
+
+def _contains_file_mutation(argv) -> bool:
+    """Recognize common file-write forms before classifying a read command."""
+    tokens = [str(token) for token in (argv or [])]
+    if not tokens:
+        return False
+    head = tokens[0].rsplit("/", 1)[-1].lower()
+    if head in _FILE_MUTATION_HEADS:
+        return True
+    if any(
+        (token in {">", ">>"}
+         or (token.startswith((">", "1>", "2>", "3>"))
+             and not token.startswith((">&", "1>&", "2>&", "3>&"))))
+        for token in tokens[1:]
+    ):
+        return True
+    if head == "sed" and any(token in {"-i", "--in-place"} or token.startswith("-i") for token in tokens[1:]):
+        return True
+    if head == "perl" and any(token == "-i" or token.startswith("-i") or token == "--in-place" for token in tokens[1:]):
+        return True
+    if head not in _INTERPRETER_HEADS:
+        return False
+    try:
+        code_index = next(i for i, token in enumerate(tokens[1:], 1) if token in {"-e", "-c"})
+    except StopIteration:
+        return False
+    code = " ".join(tokens[code_index + 1:]).lower()
+    if any(marker in code for marker in {
+        "writefilesync", "appendfilesync", "unlinksync", "mkdirsync",
+        "fs.writefile", "fs.appendfile", "write_text", ".write(",
+        ".write (", ".unlink(",
+    }):
+        return True
+    return bool(re.search(r"\bopen\s*\([^)]*,\s*['\"][wax+]", code))
+
+
+def is_output_only_command(command) -> bool:
+    """Return true when a command can only print text, not test behavior."""
+    if isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    else:
+        try:
+            argv = shlex.split(str(command or ""))
+        except ValueError:
+            return False
+    if not argv or any(token in {"&&", "||", ";", "|"} for token in argv):
+        return False
+    return argv[0].rsplit("/", 1)[-1].lower() in {"echo", "printf"}
 
 
 def counts_as_repair_inspection(tool_name: str) -> bool:
@@ -100,6 +156,8 @@ def is_inspection_command(command) -> bool:
     else:
         return False
     if not argv or any(token in {"&&", "||", ";", "|"} for token in argv):
+        return False
+    if _contains_file_mutation(argv):
         return False
     head = argv[0].rsplit("/", 1)[-1]
     # Shell wrappers are a common command-plane escape hatch. Inspect the

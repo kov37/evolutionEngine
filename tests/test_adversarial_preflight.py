@@ -67,6 +67,50 @@ class AdversarialPreflightTests(unittest.TestCase):
                     "MUTATE",
                 )
 
+    def test_read_classifier_never_calls_obvious_writes_inspection(self):
+        commands = [
+            ["sed", "-i", "s/http/ws/", "index.html"],
+            ["cat", ">", "copy.html"],
+            ["bash", "-c", "sed -i 's/http/ws/' index.html"],
+            ["bash", "-c", "cat index.html > copy.html"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertFalse(is_inspection_command(command))
+
+    def test_common_interpreter_writes_are_mutations_case_insensitively(self):
+        commands = [
+            ["node", "-e", "require('fs').writeFileSync('index.html','x')"],
+            ["node", "-e", "require('fs').appendFileSync('index.html','x')"],
+            ["perl", "-pi", "-e", "s/a/b/", "index.html"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    action_governor.classify("run_command", {"command": command}),
+                    "MUTATE",
+                )
+
+    def test_interpreter_reads_are_not_mutations(self):
+        command = ["node", "-e", "console.log(require('fs').readFileSync('index.html','utf8'))"]
+        self.assertTrue(is_inspection_command(command))
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": command}),
+            "OBSERVE",
+        )
+
+    def test_output_only_claims_cannot_be_validation_evidence(self):
+        contract = from_task("Build a service and run a real behavioral check.")
+        for command in (["echo", "assert passed"], ["printf", "connected\\n"]):
+            with self.subTest(command=command):
+                result = "Exit code: 0\\nSTDOUT: assert passed\\nSTDERR:\\n"
+                accepted, *_ = contract.assess("run_command", {"command": command}, result)
+                self.assertFalse(accepted)
+                self.assertEqual(
+                    action_governor.classify("run_command", {"command": command}),
+                    "OBSERVE",
+                )
+
     def test_file_text_cannot_fake_web_behavior(self):
         contract = from_task("Build a WebSocket server and run a real local client smoke test.")
         deceptive_outputs = [

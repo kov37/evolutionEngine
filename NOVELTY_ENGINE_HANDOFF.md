@@ -2102,3 +2102,23 @@ requires the repair pass itself to finish whenever verifier feedback starts a
 repair. Its prompt also tells the actor not to invoke the generated grader
 directly—the harness runs it after handoff—keeping the repair budget focused on
 the reported evidence.
+
+### 2026-08-15 — expand model-free adversarial preflight coverage
+
+The deterministic sweep found four command-plane edge cases without using a
+model call: `sed -i` and shell redirection could be mistaken for inspection,
+JavaScript `writeFileSync` was missed by a case-sensitive mutation check,
+`perl -pi` was missed, and `readFileSync` was incorrectly treated as a write
+because it shares a substring with `writeFileSync`. It also found that
+`echo "assert passed"` and `printf "connected"` could look like behavioral
+validation merely because their text contained assertion words.
+
+The command classifiers now reject obvious writes from the inspection path,
+recognize common interpreter writes case-insensitively, preserve interpreter
+reads as observation, and classify output-only commands as non-evidence. New
+adversarial preflight cases cover these combinations. The targeted deterministic
+suite and benchmark preflight pass 104 tests. This is the intended fast gate:
+probe control-plane invariants and representation boundaries locally first,
+then spend real-model calls only on behavior that cannot be simulated safely.
+The shared output-only classification lives in `lifecycle_policy.py` so the
+action governor and validation contract cannot silently drift apart.

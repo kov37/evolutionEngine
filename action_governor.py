@@ -30,6 +30,8 @@ name differed.
 import hashlib
 import re
 
+from lifecycle_policy import is_output_only_command
+
 CAPABILITY_CLASS = {
     "read_file": "OBSERVE",
     "grep_dir": "OBSERVE",
@@ -76,8 +78,11 @@ _ASSERTIVE_CHECK_RE = re.compile(
 # can never be a real mutation of anything the task cares about, so it's
 # safe to exclude unconditionally.
 _SHELL_MUTATE_RE = re.compile(
-    r"(>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
-    r"\btee\b|(?:readfilesync|writefilesync)|\.write_text\s*\(|\.write\s*\()"
+    r"(?:>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
+    r"\btee\b|\binstall\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
+    r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync)|"
+    r"(?:fs\.)?(?:writefile|appendfile)\s*\(|\.write_text\s*\(|\.write\s*\()",
+    re.IGNORECASE,
 )
 
 
@@ -87,6 +92,8 @@ def classify_run_shell(command: str) -> str:
     conservative on purpose, since silently treating an ambiguous action as
     "progress" when it's really just another read is the exact failure
     mode this module exists to catch."""
+    if is_output_only_command(command):
+        return "OBSERVE"
     if _SHELL_MUTATE_RE.search(command):
         return "MUTATE"
     if _SHELL_VALIDATE_RE.search(command):
@@ -105,6 +112,8 @@ def classify(tool_name: str, arguments: dict) -> str:
             command_text = argv
         else:
             command_text = ""
+        if is_output_only_command(command_text):
+            return "OBSERVE"
         if _SHELL_MUTATE_RE.search(command_text):
             return "MUTATE"
         if _SHELL_VALIDATE_RE.search(command_text):
@@ -163,6 +172,8 @@ def is_substantive_validation(tool_name: str, arguments: dict, result_content: s
     command = (arguments or {}).get("command", "")
     if isinstance(command, list):
         command = " ".join(str(part) for part in command)
+    if is_output_only_command(str(command)):
+        return False
     return bool(_ASSERTIVE_CHECK_RE.search(str(command)) or
                 _ASSERTIVE_CHECK_RE.search(result_content))
 

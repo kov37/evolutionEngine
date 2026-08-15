@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import re
 import shlex
 
-from lifecycle_policy import is_inspection_command
+from lifecycle_policy import is_inspection_command, is_output_only_command
 
 
 def _failure_diagnostic(text: str) -> str:
@@ -73,6 +73,9 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
         command = args.get("command", "")
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
+        if is_output_only_command(command):
+            return {"success": True, "evidence": False, "setup_only": True,
+                    "plane": "setup", "reason": "output-only command is not executable evidence"}
         evidence = bool(re.search(
             r"\b(assert(?:ion)?|received|connected|response|message|pong|websocket|"
             r"handshake|round[- ]?trip|passed|success(?:ful)?)\b",
