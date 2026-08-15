@@ -2246,3 +2246,24 @@ continuing to classify real `> file` and `>> file` writes as mutations. A
 regression test covers a Python probe containing the printable arrow. The
 interrupted live run is not scored; the model-free preflight will be rerun
 before the next real-model attempt.
+
+### 2026-08-15 — parse redirects instead of scanning raw command text
+
+Static adversarial probing found two more guard false positives: `assert 2 > 1`
+and HTML such as `<div>ok</div>` were classified as file writes. The common
+cause was treating every `>` character in a command as a shell redirect,
+including characters inside quoted Python/JavaScript code.
+
+The command classifier now tokenizes shell punctuation with `shlex`. It sees
+real `> file` and `>> file` operators, ignores quoted comparisons/markup/arrows,
+and retains interpreter write detection such as `open(..., 'w')`. Regression
+coverage now includes comparisons, markup, JavaScript strings, and a genuine
+redirect. The model-free preflight is the required gate before the next live
+run.
+
+One follow-up check caught an interaction between the new parser and the
+output-only shortcut: `echo ok > result.txt` was initially recognized as
+output-only before the redirect guard ran. Output-only classification now
+defers to the shared file-mutation detector, so redirected `echo`/`printf`
+commands remain mutations. The deterministic suite and preflight are the gate
+for the next live attempt.

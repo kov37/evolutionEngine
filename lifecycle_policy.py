@@ -101,6 +101,8 @@ def is_output_only_command(command) -> bool:
             return False
     if not argv or any(token in {"&&", "||", ";", "|"} for token in argv):
         return False
+    if _contains_file_mutation(argv):
+        return False
     return argv[0].rsplit("/", 1)[-1].lower() in {"echo", "printf"}
 
 

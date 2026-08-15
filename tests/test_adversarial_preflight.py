@@ -124,6 +124,29 @@ class AdversarialPreflightTests(unittest.TestCase):
             "MUTATE",
         )
 
+    def test_quoted_program_operators_are_not_shell_redirects(self):
+        for command in (
+            ["python3", "-c", "assert 2 > 1"],
+            ["python3", "-c", "print('<div>ok</div>')"],
+            ["node", "-e", "console.log('a > b')"],
+        ):
+            self.assertNotEqual(
+                action_governor.classify("run_command", {"command": command}),
+                "MUTATE",
+            )
+        self.assertEqual(
+            action_governor.classify(
+                "run_shell", {"command": "python3 -c \"print('ok')\" > result.txt"}
+            ),
+            "MUTATE",
+        )
+        self.assertEqual(
+            action_governor.classify(
+                "run_shell", {"command": "echo ok > result.txt"}
+            ),
+            "MUTATE",
+        )
+
     def test_output_only_claims_cannot_be_validation_evidence(self):
         contract = from_task("Build a service and run a real behavioral check.")
         for command in (["echo", "assert passed"], ["printf", "connected\\n"]):

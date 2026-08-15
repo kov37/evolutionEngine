@@ -79,10 +79,59 @@ _ASSERTIVE_CHECK_RE = re.compile(
 # can never be a real mutation of anything the task cares about, so it's
 # safe to exclude unconditionally.
 _SHELL_MUTATE_RE = re.compile(
-    r"(?:(?<![-=<>!])>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
+    r"(?:sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
     r"\btee\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
     r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync)|"
     r"(?:fs\.)?(?:writefile|appendfile)\s*\(|\.write_text\s*\(|\.write\s*\()",
+    re.IGNORECASE,
+)
+
+
+def _has_shell_file_redirect(command: str) -> bool:
+    """Detect real shell redirects without scanning quoted program text.
+
+    A raw ``>`` search mistakes Python comparisons, HTML strings, and printed
+    arrows for redirects. ``shlex`` with shell punctuation preserves quoted
+    interpreter code as one token while exposing operators such as ``>`` and
+    ``>>``. File writes to /dev/null and fd-to-fd redirects remain harmless.
+    """
+    try:
+        lexer = shlex.shlex(str(command or ""), posix=True, punctuation_chars="><|;&")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {">", ">>"}:
+            continue
+        previous = tokens[index - 1] if index else ""
+        target = tokens[index + 1]
+        if previous in {"=", "-"} or target == "/dev/null":
+            continue
+        return True
+    return False
+
+
+def _shell_wrapper_body(command: str):
+    """Return the body of a quoted ``sh -c``/``bash -c`` command, if any."""
+    if isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    else:
+        try:
+            argv = shlex.split(str(command or ""))
+        except ValueError:
+            return None
+    if not argv or argv[0].rsplit("/", 1)[-1].lower() not in {"sh", "bash", "zsh", "fish"}:
+        return None
+    try:
+        index = argv.index("-c")
+    except ValueError:
+        return None
+    return argv[index + 1] if index + 1 < len(argv) else None
+
+
+_INTERPRETER_WRITE_RE = re.compile(
+    r"\bopen\s*\([^)]*,\s*['\"][wax+]",
     re.IGNORECASE,
 )
 
@@ -104,9 +153,12 @@ def classify_run_shell(command: str) -> str:
     mode this module exists to catch."""
     if is_output_only_command(command):
         return "OBSERVE"
+    wrapped = _shell_wrapper_body(command)
+    if wrapped is not None:
+        return classify_run_shell(wrapped)
     if _file_install_command(command):
         return "MUTATE"
-    if _SHELL_MUTATE_RE.search(command):
+    if _has_shell_file_redirect(command) or _SHELL_MUTATE_RE.search(command):
         return "MUTATE"
     if _SHELL_VALIDATE_RE.search(command):
         return "VALIDATE"
@@ -119,14 +171,26 @@ def classify(tool_name: str, arguments: dict) -> str:
     if tool_name == "run_command":
         argv = (arguments or {}).get("command", [])
         if isinstance(argv, list):
-            command_text = " ".join(str(part) for part in argv)
+            argv = [str(part) for part in argv]
         elif isinstance(argv, str):
-            command_text = argv
+            try:
+                argv = shlex.split(argv)
+            except ValueError:
+                argv = [argv]
         else:
-            command_text = ""
+            argv = []
+        command_text = " ".join(argv)
         if is_output_only_command(command_text):
             return "OBSERVE"
         if _file_install_command(command_text):
+            return "MUTATE"
+        head = argv[0].rsplit("/", 1)[-1].lower() if argv else ""
+        if head in {"sh", "bash", "zsh", "fish"}:
+            wrapped = _shell_wrapper_body(argv)
+            if wrapped is not None:
+                return classify_run_shell(wrapped)
+        if (head in {"python", "python3", "node", "nodejs", "ruby", "perl"}
+                and _INTERPRETER_WRITE_RE.search(command_text)):
             return "MUTATE"
         if _SHELL_MUTATE_RE.search(command_text):
             return "MUTATE"
