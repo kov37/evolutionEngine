@@ -313,6 +313,15 @@ class ValidationContract:
             checker_output,
             flags=re.IGNORECASE,
         )
+        # unittest-style summaries report successful zero counts as ``0
+        # failed, 0 errors``. Remove only those zero-count terms; a positive
+        # failure or error remains product evidence.
+        checker_failure_text = re.sub(
+            r"\b0\s+(?:failed|errors?)\b",
+            "",
+            checker_failure_text,
+            flags=re.IGNORECASE,
+        )
         behavioral_failure = re.search(
             r"(?:\bassert(?:ion)?error\b|\btests?\s+failed\b|\bfailed\s*[:=]|"
             r"\b\d+\s+failed\b|\bchecks?\s*:\s*\d+\s+failed\b)",

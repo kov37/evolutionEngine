@@ -2652,3 +2652,17 @@ false tool rejection but did not reduce model-turn latency. It reduced worker
 calls from 3 to 2 and kept stale-result observations at 6. The dominant cost
 is now the actor's first mutation at about 111 seconds and the subsequent
 Qwen3.8 calls, not context growth or recovery looping.
+
+### 2026-08-15 — distinguish zero-count test summaries from failures
+
+The frozen cascading repair run found another generic evidence-parser edge.
+After the actor fixed both code defects, the local runner returned the success
+summary `(True, 'Ran 1 function-style tests: 1 passed, 0 failed, 0 errors')`.
+The contract's broad `N failed` pattern interpreted `0 failed` as a failure and
+prevented completion even though the independent artifact was correct.
+
+The parser now removes only zero-count `0 failed` and `0 errors` terms before
+looking for positive failure markers. A positive error count still fails the
+contract. The focused suite now passes 127 tests and preflight is green. The
+cascading fixture remains unchanged and must be rerun from the new commit to
+verify the full two-repair/clean-exit workflow.

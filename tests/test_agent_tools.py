@@ -1167,6 +1167,15 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertTrue(accepted, reason)
 
+    def test_zero_count_test_summary_is_successful_behavioral_evidence(self):
+        contract = from_task("Run the supplied test and verify the calculation.")
+        accepted, reason, *_ = contract.assess(
+            "run_tests",
+            {"path": "."},
+            "(True, 'Ran 1 function-style tests: 1 passed, 0 failed, 0 errors')",
+        )
+        self.assertTrue(accepted, reason)
+
     def test_failure_diagnostic_extracts_assertion_diff(self):
         diagnostic = _failure_diagnostic(
             "AssertionError: values differ\n"
