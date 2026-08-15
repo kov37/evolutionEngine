@@ -48,6 +48,12 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     "patch_file", "write_file", "run_tests", "run_command", "run_shell",
     "finish_task", "recall", "diff_files", "git_diff",
 })
+# RECOVER may need one last focused source read when an earlier read was
+# incomplete or covered the wrong file. Keep that escape hatch bounded.
+ORIENTATION_RECOVERY_READ_TOOLS = frozenset({
+    "read_file", "search_file", "list_symbols", "grep_dir",
+    "patch_file", "write_file", "finish_task", "recall",
+})
 
 
 _FILE_MUTATION_HEADS = frozenset({"tee", "cp", "mv", "rm", "touch", "install"})
@@ -178,14 +184,18 @@ def is_validation_helper_path(path: str) -> bool:
     return len(parts) >= 2 and parts[0] == ".agentic"
 
 
-def orientation_action_tools(*, evidence_available: bool = False) -> frozenset[str]:
+def orientation_action_tools(*, evidence_available: bool = False,
+                             recovery_read_used: bool = False) -> frozenset[str]:
     """Return the action surface after the orientation budget.
 
     Before the actor has obtained any useful evidence, one targeted read is
-    still legal. Once evidence exists, keeping read/search tools available
-    turns the recovery surface into another exploration loop, so only
-    mutation, validation, completion, and exact recall remain.
+    still legal. If evidence exists but the actor has not used the bounded
+    recovery read, allow one focused read because an earlier malformed or
+    mis-targeted read may have left a required file unseen. After that read,
+    only mutation, validation, completion, and exact recall remain.
     """
+    if evidence_available and not recovery_read_used:
+        return ORIENTATION_RECOVERY_READ_TOOLS
     return ORIENTATION_PROGRESS_TOOLS if evidence_available else ORIENTATION_TOOLS
 
 

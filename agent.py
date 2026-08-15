@@ -31,6 +31,7 @@ import sidecar
 import status_report
 import structured_state
 import task_contract
+import transaction_buffer
 import validation_contract
 import worker
 import working_state
@@ -482,7 +483,9 @@ def _repair_checkpoint_messages(
     return checkpoint
 
 
-def _source_backed_repair_messages(messages, *, last_repair_packet, state_text=""):
+def _source_backed_repair_messages(
+    messages, *, last_repair_packet, state_text="", inspection_checkpoint=None
+):
     """Build a compact repair prompt when the traceback already localized code.
 
     A source excerpt is sufficient localization evidence. Keeping the entire
@@ -502,6 +505,14 @@ def _source_backed_repair_messages(messages, *, last_repair_packet, state_text="
     }]
     if state_text:
         checkpoint.append({"role": "system", "content": state_text})
+    if inspection_checkpoint:
+        checkpoint.append({
+            "role": "system",
+            "content": (
+                "Most recent targeted inspection results (already available; do not reread these files):\n"
+                + "\n\n".join(str(item.get("content", "")) for item in inspection_checkpoint)
+            )[:5000],
+        })
     checkpoint.append({
         "role": "system",
         "content": "Latest executable failure evidence:\n" + str(last_repair_packet or "(not available)")[:2600],
@@ -962,6 +973,10 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     contract = task_contract.CONTRACTS_BY_TYPE.get(task_type, task_contract.CODE_CHANGE_CONTRACT)
     escalation = escalation_governor.EscalationState() if _governed else None
     risk = risk_layer.RiskLayer() if _governed else None
+    transaction = (
+        transaction_buffer.TransactionBuffer(get_root(), followup_turns=1)
+        if _governed else None
+    )
     if risk is not None:
         risk.protect_existing_tests(get_root())
     # adaptive_budget.py's repo_size_hint — computed ONCE here (not derived
@@ -1025,6 +1040,11 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # from surviving a blocked inspection without throwing away the code the
     # actor just created.
     last_mutation_checkpoint = None
+    # Preserve the most recent focused repair reads when the next prompt is
+    # compacted to a mutation checkpoint. Without this, the policy correctly
+    # removes broad read tools but also removes the source the actor just
+    # inspected, encouraging guessed paths and placeholder patches.
+    last_repair_inspection_checkpoint = []
     # Permit a small bounded set of related product mutations after the first
     # successful write so multi-file changes can reach a coherent validation
     # point. The allowance is consumed immediately and never opens an
@@ -1035,6 +1055,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # model turn on a validation request the engine already knows is needed.
     last_failed_test_request = None
     orientation_turns_without_mutation = 0
+    orientation_recovery_read_used = False
     no_action_turns = 0
     lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
@@ -1055,6 +1076,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
             "orientation_turns_without_mutation": orientation_turns_without_mutation,
             "revalidation_attempts": revalidation_attempts,
             "successful_repair_cycles": successful_repair_cycles,
+            "transaction": transaction.metrics() if transaction is not None else None,
         }
 
     def timing_metrics():
@@ -1353,21 +1375,24 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # read/validation tools forever while the lifecycle stayed ACT.
             evidence_available = _has_orientation_evidence(messages)
             orientation_evidence_available = evidence_available
-            if evidence_available and contract.requires("MUTATE"):
-                orientation_tools = {"patch_file", "write_file"}
+            orientation_tools = lifecycle_policy.orientation_action_tools(
+                evidence_available=evidence_available,
+                recovery_read_used=orientation_recovery_read_used,
+            )
+            if evidence_available and not orientation_recovery_read_used:
                 orientation_instruction = (
-                    "The FSM is in RECOVER and source evidence is available. A code mutation is now "
-                    "required. Use patch_file or write_file immediately; do not read, search, run a "
-                    "probe, or return a plan."
+                    "Source evidence exists, but one bounded focused read/search remains available in case "
+                    "the required file was not actually seen. Use it only if needed; after that, make one "
+                    "concrete implementation change immediately. Do not browse broadly or return a plan."
+                )
+            elif evidence_available:
+                orientation_instruction = (
+                    "The bounded recovery read has been used and source evidence is available. A code "
+                    "mutation is now required. Use patch_file or write_file immediately; do not read, "
+                    "search, run a probe, or return a plan."
                 )
             else:
-                orientation_tools = lifecycle_policy.orientation_action_tools(
-                    evidence_available=evidence_available
-                )
                 orientation_instruction = (
-                    "Useful inspection evidence is already present. Make one concrete implementation "
-                    "change now, or run focused validation if the artifact is complete."
-                    if evidence_available else
                     "No useful inspection evidence is present yet. Take at most one targeted read/search, "
                     "then make one concrete implementation change or run focused validation."
                 )
@@ -1382,8 +1407,9 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             }]
             print(
                 f"🧭 [FSM recovery] {orientation_turns_without_mutation} turns without mutation; "
-                f"restricting the next turn to {'mutation' if evidence_available and contract.requires('MUTATE') else 'progress'} "
-                f"tools (evidence={'yes' if evidence_available else 'no'})"
+                f"restricting the next turn to {'mutation' if evidence_available and orientation_recovery_read_used else 'focused-progress'} "
+                f"tools (evidence={'yes' if evidence_available else 'no'}, "
+                f"recovery_read_used={'yes' if orientation_recovery_read_used else 'no'})"
             )
 
         if validation_required:
@@ -1475,6 +1501,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 messages,
                 last_repair_packet=last_repair_packet,
                 state_text=checkpoint_state,
+                inspection_checkpoint=last_repair_inspection_checkpoint,
             )
 
         # Apply the novelty gate after every lifecycle/validation policy. A
@@ -1538,6 +1565,19 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 "role": "system",
                 "content": "[novelty context action gate] " + gate_message,
             }]
+
+        # The transaction buffer is a short-lived control-plane pin.  Add it
+        # after repair/context checkpoint construction so a source-backed or
+        # compacted prompt cannot accidentally drop the list of files that
+        # must be aligned.  It is derived entirely by the host and never
+        # becomes mutable model state.
+        if transaction is not None:
+            transaction_status = transaction.control_block()
+            if transaction_status:
+                messages_for_call = messages_for_call + [{
+                    "role": "system",
+                    "content": transaction_status,
+                }]
 
         # The stable system prompt lists the full registry for orientation,
         # but lifecycle policy may narrow the legal surface for this turn.
@@ -1855,9 +1895,18 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             and not tmsg.get("content", "").startswith(("ERROR:", "REJECTED:"))
             for call, tmsg in zip(turn_calls, tool_messages)
         )
+        # A failed validation may describe a coherent multi-file refactor.
+        # Keep the first repair edit and defer the automatic replay while the
+        # bounded mutation batch is open; otherwise the proactive hook makes
+        # the batch allowance unreachable by validating after every file.
+        transaction_window_open = (
+            (validation_required and repair_required)
+            or validation_batch_remaining > 1
+        )
         if (
             product_mutation_landed
             and last_failed_test_request
+            and not transaction_window_open
             and not any(call.function.name == "run_tests" for call in turn_calls)
             and "run_tests" in tool_map
         ):
@@ -1877,7 +1926,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 blocked_command_reasons=blocked_command_reasons,
             ))
             print("⚡ [proactive test validation] reran the last failed test after mutation")
-        if validation_required and "run_command" in allowed_names:
+        if validation_required and not transaction_window_open and "run_command" in allowed_names:
             for call, tmsg in zip(turn_calls, tool_messages):
                 if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
                     continue
@@ -1947,6 +1996,13 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     print(f"🛡️ [risk layer] {result}")
             if repair_required and lifecycle_policy.counts_as_repair_inspection(tool_name):
                 repair_inspection_used = True
+                if not result.startswith(("ERROR:", "REJECTED:")):
+                    last_repair_inspection_checkpoint.append({
+                        "role": "tool",
+                        "content": result,
+                        "tool_name": tool_name,
+                    })
+                    last_repair_inspection_checkpoint = last_repair_inspection_checkpoint[-4:]
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 last_mutation_rejected = True
                 # A fresh recovery checkpoint intentionally drops the old
@@ -2113,6 +2169,8 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")
         if turn_mutated:
+            orientation_recovery_read_used = False
+            last_repair_inspection_checkpoint = []
             successful_mutation_messages = []
             if tool_start_idx > 0:
                 successful_mutation_messages.append(messages[tool_start_idx - 1])
@@ -2121,6 +2179,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 result = tmsg.get("content", "")
                 if capability == "MUTATE" and not result.startswith(("ERROR:", "REJECTED:")):
                     successful_mutation_messages.append(tmsg)
+                    if transaction is not None:
+                        transaction.record_mutation(
+                            (call.function.arguments or {}).get("path", ""),
+                            checkpoint_id=iteration,
+                        )
             last_mutation_checkpoint = successful_mutation_messages or last_mutation_checkpoint
             mutation_was_in_validation_batch = validation_phase_before_turn and not repair_turn_before_dispatch
             lifecycle.transition("mutation")
@@ -2158,6 +2221,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 orientation_turns_without_mutation = 0
             else:
                 orientation_turns_without_mutation += 1
+                if orientation_recovery_active and any(
+                    lifecycle_policy.counts_as_repair_inspection(call.function.name)
+                    for call in turn_calls
+                ):
+                    orientation_recovery_read_used = True
         if turn_validation_failed:
             # A failed executable check on the first turn is already useful
             # diagnostic evidence. Promote it into the normal validation /
@@ -2210,6 +2278,29 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             messages.append({"role": "system", "content": (
                 last_repair_packet or ("Validation feedback: " + "; ".join(dict.fromkeys(s for s in validation_suggestions if s)))
             )})
+            if transaction is not None:
+                transaction_decision = transaction.note_validation_failed(last_repair_packet)
+                transaction_status = transaction.control_block()
+                if transaction_status:
+                    messages.append({"role": "system", "content": transaction_status})
+                    print(
+                        f"🔁 [transaction buffer] action={transaction_decision.action}; "
+                        f"files={list(transaction.files)}; "
+                        f"turns_remaining={transaction_decision.turns_remaining}"
+                    )
+                if transaction_decision.action == "recover":
+                    # Expiration is a deterministic lifecycle event, not an
+                    # instruction to erase product work. RiskLayer retains
+                    # the available checkpoint for an explicit recovery path.
+                    repair_recovery_mode = True
+                    repair_recovery_entries += 1
+                    if lifecycle.state == LifecycleState.REPAIR:
+                        lifecycle.transition("recovery_budget_exhausted")
+                    messages.append({"role": "system", "content": (
+                        "Transaction window expired. Keep the accepted files available for recovery; "
+                        "do not perform a destructive reset automatically. Use the latest failure and "
+                        "the existing checkpoint to make one deliberate recovery decision."
+                    )})
             if (novelty_context is not None and last_repair_packet
                     and _worker_triage_enabled(novelty_action_critic, novelty_action_gate)):
                 gate_judgment = novelty_context.synchronous_triage(
@@ -2276,6 +2367,8 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 validation_required = False
                 validation_failures = 0
                 validation_batch_remaining = 0
+                if transaction is not None and transaction.note_validation_passed():
+                    print("✅ [transaction buffer] authoritative validation passed; cleared transaction state")
                 # Independent validation is the authoritative completion
                 # signal. Waiting for one more model turn to call
                 # finish_task wastes tokens and can strand a correct artifact

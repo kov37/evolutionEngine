@@ -511,6 +511,49 @@ TASKS = {
         budget=8,
         max_success_iterations=3,
     ),
+    "multi_file_transaction": Task(
+        name="multi_file_transaction",
+        prompt=(
+            "Refactor the isolated Python project so the supplied test passes. The requested change "
+            "intentionally spans the two implementation modules: inspect their relationship and use "
+            "the test failure as the contract. Preserve the supplied test, keep the intermediate edit "
+            "recoverable, and do not stop after changing only one side of the dependency. Run the "
+            "tests after the coherent refactor and call finish_task only after they pass."
+        ),
+        setup={
+            "core_math.py": (
+                "class Symbol:\n"
+                "    def __init__(self):\n"
+                "        self.is_real = True\n"
+            ),
+            "matrix_solver.py": (
+                "from core_math import Symbol\n\n"
+                "def solve(s):\n"
+                "    return s.is_real\n"
+            ),
+            "test_solver.py": (
+                "from core_math import Symbol\n"
+                "from matrix_solver import solve\n\n"
+                "def test_symbolic_contract():\n"
+                "    symbol = Symbol()\n"
+                "    assert not hasattr(symbol, 'is_real')\n"
+                "    assert getattr(symbol, 'is_symbolic', False) is True\n"
+                "    assert solve(symbol) is True\n"
+            ),
+        },
+        grade=(
+            "from core_math import Symbol\n"
+            "from matrix_solver import solve\n"
+            "symbol = Symbol()\n"
+            "assert not hasattr(symbol, 'is_real')\n"
+            "assert getattr(symbol, 'is_symbolic', False) is True\n"
+            "assert solve(symbol) is True\n"
+            "solver_source = open('matrix_solver.py', encoding='utf-8').read()\n"
+            "assert 'is_symbolic' in solver_source and 'is_real' not in solver_source\n"
+        ),
+        budget=10,
+        max_success_iterations=6,
+    ),
     "websocket_chat": Task(
         name="websocket_chat",
         prompt=(

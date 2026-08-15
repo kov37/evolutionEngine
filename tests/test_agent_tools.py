@@ -18,7 +18,7 @@ from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
-    _failure_diagnostic, assertion_driven_tool_contract, from_task,
+    _failure_diagnostic, _looks_like_file_listing, assertion_driven_tool_contract, from_task,
     is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
     source_context_from_failure,
 )
@@ -137,6 +137,20 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("Source context from the failure location", rendered)
         self.assertIn("patch_file or write_file", rendered)
         self.assertNotIn("old validation plan", rendered)
+
+    def test_source_backed_repair_checkpoint_keeps_latest_inspection(self):
+        checkpoint = _source_backed_repair_messages(
+            [{"role": "system", "content": "foundation"}, {"role": "user", "content": "task"}],
+            last_repair_packet="Assertion failed",
+            inspection_checkpoint=[{
+                "role": "tool",
+                "tool_name": "read_file",
+                "content": "--- core.py ---\nreturn value.is_real",
+            }],
+        )
+        rendered = "\n".join(str(message) for message in checkpoint)
+        self.assertIn("return value.is_real", rendered)
+        self.assertIn("do not reread these files", rendered)
 
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}
@@ -421,8 +435,15 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("patch_file", tools)
         self.assertNotIn("list_workspace", tools)
 
-    def test_orientation_recovery_closes_reads_after_evidence_exists(self):
-        tools = orientation_action_tools(evidence_available=True)
+    def test_orientation_recovery_allows_one_focused_read_after_partial_evidence(self):
+        tools = orientation_action_tools(evidence_available=True, recovery_read_used=False)
+        self.assertIn("read_file", tools)
+        self.assertIn("search_file", tools)
+        self.assertIn("patch_file", tools)
+        self.assertNotIn("list_workspace", tools)
+
+    def test_orientation_recovery_closes_reads_after_bounded_read(self):
+        tools = orientation_action_tools(evidence_available=True, recovery_read_used=True)
         self.assertNotIn("read_file", tools)
         self.assertNotIn("search_file", tools)
         self.assertIn("patch_file", tools)
@@ -782,6 +803,30 @@ class KernelToolTests(unittest.TestCase):
             finally:
                 outside.unlink(missing_ok=True)
 
+    def test_failure_source_excerpt_parses_pytest_locations_and_prefers_product(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_solver.py").write_text("assert False\n", encoding="utf-8")
+            (root / "matrix_solver.py").write_text(
+                "def solve(value):\n    return value.is_real\n",
+                encoding="utf-8",
+            )
+            result = (
+                "E       assert solve(symbol) is True\n"
+                "test_solver.py:8: AssertionError\n"
+                "matrix_solver.py:4: AttributeError\n"
+            )
+            excerpt = source_context_from_failure(result, root)
+            self.assertIn("matrix_solver.py (failure line 4)", excerpt)
+            self.assertIn("return value.is_real", excerpt)
+
+    def test_failure_source_excerpt_does_not_treat_test_only_location_as_product(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_solver.py").write_text("assert False\n", encoding="utf-8")
+            result = "test_solver.py:1: AssertionError\n"
+            self.assertEqual(source_context_from_failure(result, root), "")
+
     def test_failure_feedback_replaces_zero_test_runner_with_explicit_assertion(self):
         contract = from_task("Repair the function and run the supplied test.")
         packet = contract.synthesize_failure_feedback(
@@ -791,6 +836,18 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertIn("did not execute any assertions", packet)
         self.assertIn("test function directly", packet)
+
+    def test_file_listing_output_is_not_behavioral_validation(self):
+        listing = "./core.py\n./test_core.py\n./.pytest_cache/README.md\n"
+        self.assertTrue(_looks_like_file_listing(listing))
+        contract = from_task("Repair the implementation and run its focused test.")
+        accepted = contract.assess(
+            "run_command",
+            {"command": ["python", "probe.py"]},
+            "Exit code: 0\nSTDOUT:\n" + listing + "\nSTDERR:\n",
+        )
+        self.assertFalse(accepted[0])
+        self.assertIn("file listing", accepted[1])
 
     def test_task_contract_does_not_extract_url_host_as_endpoint(self):
         contract = from_task(

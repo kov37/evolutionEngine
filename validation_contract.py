@@ -29,6 +29,24 @@ def _failure_diagnostic(text: str) -> str:
     return "\n".join(dict.fromkeys(useful))[:1200]
 
 
+def _looks_like_file_listing(text: str) -> bool:
+    """Recognize a successful command whose output is only path inventory.
+
+    A helper can exit zero while printing every file in the workspace.  That
+    is useful orientation evidence, but it is not proof that the product
+    behavior works.  This check is intentionally output-shaped rather than
+    command-shaped so it remains independent of whether the model used
+    ``find``, ``ls``, Python, Node, or another shell helper.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    path_line = re.compile(
+        r"^(?:\.\.?/)?[^\s:]+(?:/[^\s:]*)*(?:\.[A-Za-z0-9_-]+)?$"
+    )
+    return len(lines) >= 2 and all(path_line.match(line) for line in lines)
+
+
 def source_context_from_failure(result_content: str, project_root, max_chars: int = 800) -> str:
     """Return a bounded source excerpt for a traceback that names this project.
 
@@ -47,6 +65,11 @@ def source_context_from_failure(result_content: str, project_root, max_chars: in
     patterns = (
         re.compile(r"File [\"']([^\"']+)[\"'], line (\d+)"),
         re.compile(r"(?:\(|\s)([^()\s]+):(\d+):\d+\)?"),
+        # Pytest's compact failure locations commonly omit the column:
+        # ``test_module.py:12`` or ``src/handler.py:47``. Keep the path
+        # candidate root-confined below; this is format handling, not a
+        # language- or benchmark-specific parser.
+        re.compile(r"(?:^|\s)([^()\s:]+\.(?:py|js|jsx|ts|tsx|java|go|rb|rs|php|c|cpp|h)):(\d+)\b"),
     )
     for pattern in patterns:
         for match in pattern.finditer(text):
@@ -66,7 +89,27 @@ def source_context_from_failure(result_content: str, project_root, max_chars: in
                 continue
             if not resolved.is_file():
                 continue
-            locations.append((resolved, line_number))
+            location = (resolved, line_number)
+            if location not in locations:
+                locations.append(location)
+
+    def is_test_source(path: Path) -> bool:
+        name = path.name.lower()
+        return name.startswith(("test_", "test-", "tests.")) or name.endswith(("_test.py", ".test.js", ".spec.js"))
+
+    # Test assertions are useful context, but a product traceback is the
+    # higher-value repair target. Prefer non-test files while still retaining
+    # the test location as a bounded fallback when no product source exists.
+    locations.sort(key=lambda item: is_test_source(item[0]))
+    # A test-only location proves where the assertion failed, not which
+    # implementation should be changed. Treating it as source-backed evidence
+    # prematurely removes read tools and caused small actors to patch a
+    # protected test. Keep the normal inspect-then-mutate repair path until a
+    # product file is named by the failure itself.
+    if not any(not is_test_source(path) for path, _ in locations):
+        return ""
+    rendered_parts = []
+    rendered_chars = 0
     for resolved, line_number in locations:
         try:
             lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -82,8 +125,14 @@ def source_context_from_failure(result_content: str, project_root, max_chars: in
             f"{number + 1:>4}: {lines[number]}" for number in range(start, end)
         )
         rendered = f"{relative} (failure line {line_number}):\n{excerpt}"
-        return rendered[:max_chars]
-    return ""
+        remaining = max_chars - rendered_chars
+        if remaining <= 0:
+            break
+        rendered_parts.append(rendered[:remaining])
+        rendered_chars += min(len(rendered), remaining)
+        if rendered_chars >= max_chars:
+            break
+    return "\n\n".join(rendered_parts)
 
 
 _CRITERION_RE = re.compile(
@@ -403,6 +452,14 @@ class ValidationContract:
                 False,
                 "the command only inspected files or reported environment metadata",
                 "run an executable behavioral assertion or client exchange instead of listing or printing source",
+                None,
+                (),
+            )
+        if tool_name in {"run_command", "run_shell"} and _looks_like_file_listing(stdout):
+            return (
+                False,
+                "the command exited cleanly but returned only a file listing",
+                "use the supplied test runner or an executable behavioral assertion instead of a workspace inventory",
                 None,
                 (),
             )

@@ -3279,3 +3279,57 @@ The next generic recovery change is committed and pushed as `adb590e` (`Escalate
 The following runner correction is committed and pushed as `12c8f7f` (`Preserve project imports during test discovery`). `run_tests` now adds the active project root during nested-package discovery, normalizes macOS `/var` symlinks, and avoids evicting loaded packages merely because they contain `__init__.py`. Deterministic coverage is `147 passed, 35 subtests passed`.
 
 The short SymPy verification run from `12c8f7f` was intentionally stopped before completion to keep the cycle lean. The earlier false `ModuleNotFoundError: sympy` did not recur; the runner reached real validation. The actor made one mutation and reached iteration 7 with three validations, one 4B judgment, and no requested `_cdf` methods. It then exposed a separate generic command-boundary error: `path escapes the sandbox root` caused by an actor-issued command resolving to `/`. This run is incomplete and is not a SymPy capability result. Do not add SymPy- or NumPy-specific code; if this benchmark is resumed, first fix the generic relative-path/command validation contract or use a shorter cascading benchmark to validate that change.
+
+### 2026-08-15 — add a host-controlled multi-file transaction buffer
+
+The dirty worktree now contains a model-free `TransactionBuffer`. It tracks
+accepted root-relative product mutations in a private set, excludes supplied
+tests, dependency manifests, temporary `.agentic` helpers, and cache paths,
+and exposes only bounded metrics plus a short host-generated status block to
+the actor. It does not write files, call a model, or create a second FSM.
+
+The buffer opens on the first accepted product mutation, preserves that edit
+when the next validation fails, permits one bounded follow-up repair turn, and
+clears only after authoritative validation succeeds. Expiration enters the
+existing recovery path without automatically deleting product work; the
+existing `RiskLayer` remains the only component with rollback capability.
+Normal failed product validation still does not roll back. Protected supplied
+test edits and destructive rewrites retain their existing narrow rollback
+guards.
+
+The repair checkpoint was also corrected to preserve the latest focused
+`read_file`/inspection results when broad history is compacted. A test-only
+pytest traceback no longer counts as product source evidence, and successful
+commands whose output is only a file listing are rejected as behavioral
+validation. These are generic evidence and context fixes, not benchmark- or
+model-specific rules.
+
+Deterministic evidence after these changes: `156 passed, 35 subtests passed`.
+The explicit offline two-file transaction test now requires removal of the old
+property, addition of the new property, alignment of the dependent module,
+preservation through the intermediate failure, and buffer cleanup after the
+final pass.
+
+The clean real-model run used Qwen3.8-27B-4bit through the local MLX server,
+qwen3.5:4b as the asynchronous worker, and action critic/gate mode. The actor
+read the files, changed `core_math.py`, received a failed validation, the
+transaction buffer preserved that edit and reported `core_math.py`, then the
+actor changed `matrix_solver.py` and passed the final test. Artifact and
+completion evidence passed in 7 iterations with 2 product mutations and 3
+validations. The benchmark workflow score was intentionally recorded as
+false because its fixed six-iteration target was missed by one; do not lower
+or rewrite that threshold merely to manufacture a pass. The result proves the
+transaction behavior works, but not yet that it meets the benchmark's speed
+budget.
+
+The preceding stale run, started before the final verifier correction, is not
+evidence against the new buffer: it never made a product mutation and was
+fooled by a file-listing helper. The clean run is the authoritative behavioral
+evidence for this change. Next work should be a generic way to measure and,
+if justified, reduce unnecessary orientation/validation turns without
+injecting the expected two-file patch or changing the fixture.
+
+The checkpoint for this change is commit `485af02` (`Add bounded multi-file
+transaction recovery`). It is ready to push after the telemetry head is
+reconciled; the benchmark result JSONL and historical monitor logs remain
+local evidence rather than source changes.

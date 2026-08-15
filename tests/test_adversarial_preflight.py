@@ -13,6 +13,8 @@ import action_governor
 from agentic_benchmark import _scorecard_passed, _verifier_repair_prompt
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import is_inspection_command, is_output_only_command
+from risk_layer import RiskLayer
+from transaction_buffer import TransactionBuffer
 from validation_contract import from_task
 from workspace.run_tests_tool import run_tests
 
@@ -292,6 +294,82 @@ class AdversarialPreflightTests(unittest.TestCase):
                 "1 function-style tests" in passed_summary
                 or "pytest passed" in passed_summary
             )
+
+    def test_multi_file_transaction_resilience(self):
+        """A failed intermediate state must preserve the first product edit.
+
+        This is a control-plane test, so the two mutations are deliberately
+        explicit. The model-facing benchmark uses the same dependency shape
+        but does not reveal these patches to the actor.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_a = root / "core_math.py"
+            file_b = root / "matrix_solver.py"
+            test_file = root / "test_solver.py"
+            file_a.write_text(
+                "class Symbol:\n"
+                "    def __init__(self):\n"
+                "        self.is_real = True\n",
+                encoding="utf-8",
+            )
+            file_b.write_text(
+                "from core_math import Symbol\n"
+                "def solve(s):\n"
+                "    return s.is_real\n",
+                encoding="utf-8",
+            )
+            test_file.write_text(
+                "from core_math import Symbol\n"
+                "from matrix_solver import solve\n\n"
+                "def test_solver_contract():\n"
+                "    symbol = Symbol()\n"
+                "    assert not hasattr(symbol, 'is_real')\n"
+                "    assert getattr(symbol, 'is_symbolic', False) is True\n"
+                "    assert solve(symbol) is True\n",
+                encoding="utf-8",
+            )
+
+            fsm = LifecycleFSM()
+            risk = RiskLayer()
+            transaction = TransactionBuffer(root, followup_turns=1)
+            fsm.transition("turn")
+
+            first_version = (
+                "class Symbol:\n"
+                "    def __init__(self):\n"
+                "        self.is_symbolic = True\n"
+            )
+            risk.checkpoint("core_math.py", str(file_a), turn=1)
+            file_a.write_text(first_version, encoding="utf-8")
+            self.assertTrue(transaction.record_mutation("core_math.py", checkpoint_id=1))
+            fsm.transition("mutation")
+
+            intermediate_ok, intermediate_summary = run_tests(tmp)
+            self.assertFalse(intermediate_ok, intermediate_summary)
+            self.assertIn("AttributeError", intermediate_summary)
+            self.assertEqual(fsm.transition("validation_failed"), LifecycleState.REPAIR)
+            self.assertEqual(file_a.read_text(encoding="utf-8"), first_version)
+            decision = transaction.note_validation_failed(intermediate_summary)
+            self.assertEqual(decision.action, "preserve")
+            self.assertIn("core_math.py", transaction.control_block())
+
+            final_b = (
+                "from core_math import Symbol\n"
+                "def solve(s):\n"
+                "    return s.is_symbolic\n"
+            )
+            risk.checkpoint("matrix_solver.py", str(file_b), turn=2)
+            file_b.write_text(final_b, encoding="utf-8")
+            self.assertTrue(transaction.record_mutation("matrix_solver.py", checkpoint_id=2))
+            fsm.transition("mutation")
+
+            final_ok, final_summary = run_tests(tmp)
+            self.assertTrue(final_ok, final_summary)
+            self.assertTrue(transaction.note_validation_passed())
+            self.assertFalse(transaction.active)
+            self.assertEqual(transaction.files, ())
+            self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
 
     def test_fsm_recovery_has_no_implicit_transition(self):
         fsm = LifecycleFSM()
