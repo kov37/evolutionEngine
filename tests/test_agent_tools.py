@@ -318,6 +318,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(is_tool_plane_failure(
             "run_command", "ERROR: bad arguments for run_command: command is required"
         ))
+        self.assertTrue(is_tool_plane_failure(
+            "run_command", "ERROR: command arguments must be single-line strings"
+        ))
         self.assertFalse(is_tool_plane_failure(
             "run_command", "Exit code: 1\nSTDERR: AssertionError: expected 201, got 500"
         ))

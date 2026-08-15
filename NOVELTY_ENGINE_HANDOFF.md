@@ -2261,6 +2261,15 @@ coverage now includes comparisons, markup, JavaScript strings, and a genuine
 redirect. The model-free preflight is the required gate before the next live
 run.
 
+### 2026-08-15 — recover malformed command arguments as transport errors
+
+The next live confirmation exposed one more instance of the same class: the
+actor sent a multi-line argv argument and the execution tool rejected it before
+launching anything. The command-plane classifier now also recognizes
+single-line/schema/option errors as transport failures, so they reopen the
+validation surface without entering product repair. A regression test covers
+the multi-line argument rejection.
+
 One follow-up check caught an interaction between the new parser and the
 output-only shortcut: `echo ok > result.txt` was initially recognized as
 output-only before the redirect guard ran. Output-only classification now

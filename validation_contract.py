@@ -112,6 +112,9 @@ def is_tool_plane_failure(tool_name, result_content):
         "is unavailable this turn",
         "only [",
         "bad arguments for ",
+        "command arguments must be single-line",
+        "command must be a non-empty list",
+        "invalid command options",
         "unknown tool",
         "invalid tool call",
     ))
