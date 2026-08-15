@@ -1901,6 +1901,12 @@ You have this focused toolbelt: {offered_tool_names}.
             # checkpoint on the next turn.
             lifecycle.transition("recovery_budget_exhausted")
             repair_recovery_mode = True
+            # The earlier tool-plane branch may have reopened VALIDATE and
+            # cleared the ordinary repair flag. Preserve the pre-dispatch
+            # repair intent so the next loop actually builds the checkpoint
+            # instead of returning to the rejected validation surface.
+            validation_required = True
+            repair_required = True
             repair_recovery_entries += 1
             repair_turns_used = max(repair_turns_used, REPAIR_TURN_BUDGET)
             print(

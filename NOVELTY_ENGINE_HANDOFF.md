@@ -2814,3 +2814,18 @@ a temporary validation-plane reopen and routes it to the existing targeted
 mutation surface. The focused suite passes 108/108 and the modified modules
 compile cleanly. Rerun the unchanged Todo benchmark; the prior run stopped at
 the FSM guard before the actor could receive the checkpoint.
+
+### 2026-08-15 — retain repair flags when checkpointing after a blocked action
+
+The FSM transition fix allowed `VALIDATE -> RECOVER`, but the subsequent live
+turn showed that the older tool-plane branch had also cleared the boolean
+`repair_required`. `repair_recovery_mode` was true without its companion flag,
+so policy construction reopened the validation tools and the actor replayed
+the failed POST probe.
+
+When a rejected non-mutation action is detected using the pre-dispatch repair
+snapshot, the controller now restores both `validation_required` and
+`repair_required` before the next loop. The recovery mode therefore reaches the
+fresh checkpoint builder and its mutation-only tool surface. The focused suite
+remains 108/108 and compilation is clean. Rerun the unchanged Todo benchmark
+to verify the actor receives the checkpoint rather than another probe.
