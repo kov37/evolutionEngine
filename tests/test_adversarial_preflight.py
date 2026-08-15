@@ -99,6 +99,16 @@ class AdversarialPreflightTests(unittest.TestCase):
             "OBSERVE",
         )
 
+    def test_dependency_install_is_not_file_mutation(self):
+        self.assertNotEqual(
+            action_governor.classify("run_command", {"command": ["npm", "install", "ws"]}),
+            "MUTATE",
+        )
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": ["install", "src", "dest"]}),
+            "MUTATE",
+        )
+
     def test_output_only_claims_cannot_be_validation_evidence(self):
         contract = from_task("Build a service and run a real behavioral check.")
         for command in (["echo", "assert passed"], ["printf", "connected\\n"]):

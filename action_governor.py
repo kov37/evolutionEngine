@@ -29,6 +29,7 @@ name differed.
 
 import hashlib
 import re
+import shlex
 
 from lifecycle_policy import is_output_only_command
 
@@ -79,11 +80,20 @@ _ASSERTIVE_CHECK_RE = re.compile(
 # safe to exclude unconditionally.
 _SHELL_MUTATE_RE = re.compile(
     r"(?:>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
-    r"\btee\b|\binstall\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
+    r"\btee\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
     r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync)|"
     r"(?:fs\.)?(?:writefile|appendfile)\s*\(|\.write_text\s*\(|\.write\s*\()",
     re.IGNORECASE,
 )
+
+
+def _file_install_command(command: str) -> bool:
+    """Recognize Unix's file-copying `install`, not npm/pip install."""
+    try:
+        argv = shlex.split(str(command or ""))
+    except ValueError:
+        return False
+    return bool(argv) and argv[0].rsplit("/", 1)[-1].lower() == "install"
 
 
 def classify_run_shell(command: str) -> str:
@@ -94,6 +104,8 @@ def classify_run_shell(command: str) -> str:
     mode this module exists to catch."""
     if is_output_only_command(command):
         return "OBSERVE"
+    if _file_install_command(command):
+        return "MUTATE"
     if _SHELL_MUTATE_RE.search(command):
         return "MUTATE"
     if _SHELL_VALIDATE_RE.search(command):
@@ -114,6 +126,8 @@ def classify(tool_name: str, arguments: dict) -> str:
             command_text = ""
         if is_output_only_command(command_text):
             return "OBSERVE"
+        if _file_install_command(command_text):
+            return "MUTATE"
         if _SHELL_MUTATE_RE.search(command_text):
             return "MUTATE"
         if _SHELL_VALIDATE_RE.search(command_text):

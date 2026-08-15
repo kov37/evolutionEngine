@@ -2138,3 +2138,15 @@ remains legal and the prompt directs the actor to hand off rather than rewrite
 product code. Rejected validation evidence is also logged with its reason and
 next action, making this boundary diagnosable in the live monitor. The
 deterministic suite and preflight pass 105 tests.
+
+### 2026-08-15 — keep package-manager setup separate from file mutation
+
+The first live confirmation of the previous change found a false positive:
+the mutation regex treated the word `install` in `npm install ws` as a file
+write. That blocked the normal dependency setup path before the WebSocket
+smoke test could run. The classifier now recognizes only the Unix `install`
+file-copying utility as a mutation; npm, pip, and similar package-manager
+commands remain setup commands. A regression matrix covers both forms. The
+deterministic suite and preflight now pass 106 tests. The interrupted live run
+was discarded because its failure was fully explained by this deterministic
+classifier bug.
