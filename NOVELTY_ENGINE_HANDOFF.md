@@ -2563,3 +2563,28 @@ any product edit is legal. The centralized FSM has an explicit
 The deterministic suite now passes 125 tests and the offline preflight is green.
 The interrupted WebSocket trace is retained as the regression case; rerun it
 from the latest commit before evaluating the next failure.
+
+### 2026-08-15 — WebSocket rerun passes through tool-plane recovery
+
+The unchanged WebSocket benchmark was rerun from `b9e71da` with Qwen3.8-27B
+through the local MLX server. The actor initially made two orientation reads,
+wrote the repaired `server.js`, `index.html`, and `package.json`, installed
+`ws`, and generated a smoke helper. The first helper invocation failed because
+the server had not been started. The actor then attempted a malformed
+background command; the new FSM reopened validation, and the next correctly
+shaped command started the server.
+
+The first real probe exposed a race in the actor-generated helper, not in the
+server: its one-shot listener could be registered after the sender's own
+message arrived. The actor changed only `.agentic/smoke.js`, reran it, and the
+final checker reported all checks passed, including ping/pong, JSON message
+contract, XSS-safe text preservation, peer disconnect, malformed payload
+stability, and server survival. The independent grader completed successfully.
+
+Run metrics: 16 iterations, 16 tool calls, 5 total mutations (product files
+plus helper), 8 validations, 2 validation failures, 0 repair mutations, 6
+worker calls, 19 stale worker judgments, 760 seconds of engine time, and 764
+seconds wall time. This is a functional pass, but not yet an efficiency pass:
+the stale 4B advisory stream and repeated model turns remain the next generic
+optimization target. The worker did not control the final decision; the
+deterministic validation ledger did.
