@@ -34,6 +34,12 @@ _TRANSITIONS = {
     (LifecycleState.REPAIR, "turn"): LifecycleState.REPAIR,
     (LifecycleState.RECOVER, "turn"): LifecycleState.RECOVER,
     (LifecycleState.ACT, "mutation"): LifecycleState.VALIDATE,
+    # An initial executable check is still validation evidence. If it fails
+    # before any product mutation, move directly into the same repair phase
+    # used after a post-mutation check; otherwise the actor can reopen broad
+    # orientation and spend turns inventorying a workspace whose failure
+    # already identifies the next repair target.
+    (LifecycleState.ACT, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.REPAIR, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.RECOVER, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_failed"): LifecycleState.REPAIR,

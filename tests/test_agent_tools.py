@@ -79,6 +79,12 @@ class KernelToolTests(unittest.TestCase):
         with self.assertRaises(InvalidTransition):
             fsm.transition("validation_passed")
 
+    def test_lifecycle_fsm_routes_initial_check_failure_to_repair(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        self.assertEqual(fsm.transition("validation_failed"), LifecycleState.REPAIR)
+        self.assertEqual(fsm.transition("turn"), LifecycleState.REPAIR)
+
     def test_lifecycle_fsm_completes_from_setup_recovery(self):
         fsm = LifecycleFSM()
         fsm.transition("turn")

@@ -1454,7 +1454,15 @@ You have this focused toolbelt: {offered_tool_names}.
                 orientation_turns_without_mutation = 0
             else:
                 orientation_turns_without_mutation += 1
-        if turn_validation_failed and validation_required:
+        if turn_validation_failed:
+            # A failed executable check on the first turn is already useful
+            # diagnostic evidence. Promote it into the normal validation /
+            # repair FSM instead of leaving the actor in unrestricted ACT,
+            # where it can discard the failure and start broad orientation.
+            # This is provider- and task-agnostic; setup failures still flow
+            # through the deterministic setup-plane policy below.
+            if not validation_required:
+                validation_required = True
             lifecycle.transition("validation_failed")
             if not repair_required:
                 repair_mode_entries += 1

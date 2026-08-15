@@ -1807,3 +1807,21 @@ repair. It verifies that each stage reports the current failure and never
 falls back to “no tests discovered.” The combined deterministic suite passes
 86 tests. This gives us a cheap regression gate for both context evidence and
 the validation runner before another real-model call.
+
+### 2026-08-15 — initial failure enters the repair FSM
+
+The live cascade completed correctly but spent three turns orienting before
+the first patch. The cause was structural: the initial `run_tests` failure was
+recorded as evidence, but the lifecycle remained in `ACT`, so the next actor
+turn could list the workspace instead of repairing the failure already in
+hand.
+
+`LifecycleFSM` now permits the explicit `ACT -> REPAIR` transition for a failed
+initial executable check. The loop promotes that failure into the same
+validation/repair policy used after a mutation. Setup failures still remain on
+the setup plane and cannot unlock product mutation. This is a generic
+failure-driven transition, not a benchmark-specific hint.
+
+The deterministic suite passes 87 tests, including the new FSM transition
+assertion. The next live cascade will measure whether this removes the wasted
+orientation turns without weakening evidence or mutation safety.
