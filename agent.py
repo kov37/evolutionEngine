@@ -51,6 +51,14 @@ REPAIR_TURN_BUDGET = 3
 # the governor must switch to an executable progress surface sooner.
 ORIENTATION_TURN_BUDGET = 2
 
+# These aliases are exposed only when the novelty progress gate has detected
+# that the actor is replaying a temporary validation-helper edit.  Keeping the
+# product scope in the tool name removes an ambiguity that a prompt warning
+# alone cannot reliably resolve for a small model: the actor still gets a
+# normal mutation operation, but the engine can replace the generic mutation
+# surface with one whose contract explicitly names the required target plane.
+PRODUCT_MUTATION_TOOLS = frozenset({"patch_product_file", "write_product_file"})
+
 
 class ChatTimeoutError(TimeoutError):
     """The acting model stopped responding within one bounded turn."""
@@ -792,12 +800,44 @@ def _novelty_progress_tool_names(novelty_context, *, helper_mutation_blocked=Fal
     if novelty_context.recovery_reads_allowed() and not repeated_action:
         names.update({"read_file", "find_files", "search_file"})
     if helper_mutation_blocked:
-        # A stale model commonly replays write_file after its temporary helper
-        # was rejected. Leave patch_file available for the product artifact,
-        # but remove the exact capability it has just demonstrated it will
-        # misuse.
-        names.discard("write_file")
+        # A stale model commonly replays the generic mutation call after its
+        # temporary helper was rejected. Replace both generic mutation names
+        # with explicit product-scoped aliases. This is stronger than merely
+        # removing write_file: the live SymPy trace showed the actor then
+        # replayed patch_file with the same helper path.
+        names -= {"patch_file", "write_file"}
+        names.update(PRODUCT_MUTATION_TOOLS)
     return names
+
+
+def patch_product_file(path: str, search: str, replace: str) -> str:
+    """Patch a product source file during novelty recovery.
+
+    The alias is intentionally only offered after a validation-helper
+    mutation has been rejected. Its name is a model-facing contract: the
+    target must be the product artifact implicated by the task, never a
+    temporary verifier below ``.agentic/``.
+    """
+    if lifecycle_policy.is_validation_helper_path(path):
+        return (
+            "REJECTED: patch_product_file accepts product artifacts only; "
+            "choose the source file implicated by the failure or call finish_task."
+        )
+    return io_tools.patch_file(path, search, replace)
+
+
+def write_product_file(path: str, content: str) -> str:
+    """Create or replace a product source file during novelty recovery.
+
+    Temporary validation helpers are deliberately excluded; use an inline
+    command for a probe instead of spending the progress turn on a verifier.
+    """
+    if lifecycle_policy.is_validation_helper_path(path):
+        return (
+            "REJECTED: write_product_file accepts product artifacts only; "
+            "choose the source file implicated by the failure or call finish_task."
+        )
+    return io_tools.write_file(path, content)
 
 
 NO_ACTION_TOOL_FORCE_THRESHOLD = 2
@@ -821,7 +861,7 @@ def _completion_ready(messages, task_type, validation_plan=None, validation_evid
             continue
         name = message.get("tool_name")
         content = str(message.get("content", ""))
-        if name in {"write_file", "patch_file"} and not content.startswith(("ERROR:", "REJECTED")):
+        if name in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS and not content.startswith(("ERROR:", "REJECTED")):
             mutated = True
         if (validation_plan.assess(name, {}, content)[0] if validation_plan
                 else action_governor.is_substantive_validation(name, {}, content)):
@@ -883,6 +923,11 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
         # pruned entry, without every caller needing to remember to wire
         # this in — it's a direct consequence of enabling pruning below.
         tools = tools + [memory.recall]
+    if novelty_context_enabled:
+        # Keep the aliases in the registry so the final per-turn contract can
+        # swap them in after a rejected helper mutation. They are not offered
+        # by the novelty gate until that recovery condition is true.
+        tools = tools + [patch_product_file, write_product_file]
     tool_map = {fn.__name__: fn for fn in tools}
     sidecar_log = []
     context_summary = ""
@@ -1444,8 +1489,19 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         )
         if novelty_progress_tools is not None:
             repeated_action = novelty_context.repeated_validation_loop()
+            # Validation/lifecycle policy may have removed the recovery-only
+            # product aliases before this final gate runs. Add only those
+            # aliases back from the trusted registry; never re-expand the
+            # rest of the tool surface here.
+            progress_candidates = list(tools_for_call)
+            if blocked_progress_helper_paths:
+                progress_candidates.extend(
+                    tool for tool in tools
+                    if tool.__name__ in PRODUCT_MUTATION_TOOLS
+                    and tool not in progress_candidates
+                )
             tools_for_call = [
-                tool for tool in tools_for_call
+                tool for tool in progress_candidates
                 if tool.__name__ in novelty_progress_tools
             ]
             if repeated_action:
@@ -1465,8 +1521,9 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 )
             if blocked_progress_helper_paths:
                 gate_message += (
-                    " A validation-helper write was rejected on the previous turn; write_file is unavailable. "
-                    "Use patch_file on the product source implicated by the task, or call finish_task."
+                    " A validation-helper mutation was rejected on the previous turn. The generic mutation "
+                    "tools are unavailable; use patch_product_file or write_product_file on the product "
+                    "source implicated by the task, or call finish_task."
                 )
             messages_for_call = messages_for_call + [{
                 "role": "system",
@@ -1642,10 +1699,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     legal_actions=tuple(legal_names),
                 )
                 print(f"🧬 [novelty recovery] {novelty_context.render_for_model(action_critic=True)}")
-            if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & {"patch_file", "write_file"}:
+            if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & ({"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS):
                 next_action = "run_command, run_shell, or run_tests to produce the required behavioral evidence"
-            elif legal_names & {"patch_file", "write_file"}:
-                next_action = "patch_file or write_file to make the targeted repair"
+            elif legal_names & ({"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS):
+                next_action = "the offered mutation tool to make the targeted repair"
             else:
                 next_action = "the next executable tool offered for this lifecycle phase"
             messages.append({
@@ -1698,7 +1755,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # validation, but do not let a helper write satisfy this specific
             # product-progress boundary.
             for call in turn_calls:
-                if call.function.name not in {"write_file", "patch_file"}:
+                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
                     continue
                 path = (call.function.arguments or {}).get("path", "")
                 if lifecycle_policy.is_validation_helper_path(path):
@@ -1730,7 +1787,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             command_mutation_blocked = not repair_required or setup_failure
             if setup_failure:
                 for call in turn_calls:
-                    if call.function.name not in {"patch_file", "write_file"}:
+                    if call.function.name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
                         continue
                     args = call.function.arguments or {}
                     path = args.get("path", "")
@@ -1765,10 +1822,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         for call, tmsg in zip(turn_calls, tool_messages):
             path = (call.function.arguments or {}).get("path", "")
             if (
+                novelty_action_gate
+                and novelty_context is not None
+                and _novelty_progress_tool_names(
+                    novelty_context,
+                    helper_mutation_blocked=bool(blocked_progress_helper_paths),
+                ) is not None
+                and
                 lifecycle_policy.is_validation_helper_path(path)
-                and tmsg["content"].startswith(
-                    "REJECTED: the novelty progress gate requires a product mutation"
-                )
+                and tmsg["content"].startswith("REJECTED:")
             ):
                 blocked_progress_helper_paths.add(path)
 
@@ -1808,7 +1870,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             print("⚡ [proactive test validation] reran the last failed test after mutation")
         if validation_required and "run_command" in allowed_names:
             for call, tmsg in zip(turn_calls, tool_messages):
-                if call.function.name not in {"write_file", "patch_file"}:
+                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
                     continue
                 path = (call.function.arguments or {}).get("path", "")
                 command = _auto_validation_command(path)

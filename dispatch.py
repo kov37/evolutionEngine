@@ -110,7 +110,9 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
     for call in tool_calls:
         call_arguments = call.function.arguments or {}
         if (blocked_mutation_paths
-                and call.function.name in {"write_file", "patch_file"}
+                and call.function.name in {
+                    "write_file", "patch_file", "write_product_file", "patch_product_file"
+                }
                 and call_arguments.get("path") in blocked_mutation_paths):
             result = (
                 f"REJECTED: mutation path '{call_arguments.get('path')}' is blocked after a protected-test "
@@ -121,7 +123,9 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
             continue
         mutation_key = _call_key(call.function.name, call.function.arguments)
         if (blocked_mutation_reasons
-                and call.function.name in {"write_file", "patch_file"}
+                and call.function.name in {
+                    "write_file", "patch_file", "write_product_file", "patch_product_file"
+                }
                 and mutation_key in blocked_mutation_reasons):
             result = blocked_mutation_reasons[mutation_key]
             print(f"🚫 blocked progress mutation {call.function.name}({call_arguments})")

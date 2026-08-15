@@ -49,6 +49,8 @@ CAPABILITY_CLASS = {
     "recall": "OBSERVE",
     "patch_file": "MUTATE",
     "write_file": "MUTATE",
+    "patch_product_file": "MUTATE",
+    "write_product_file": "MUTATE",
     "run_tests": "VALIDATE",
     "finish_task": "DELIVER",
 }
@@ -468,6 +470,8 @@ def _self_test() -> bool:
     # --- classify() ---
     assert classify("read_file", {}) == "OBSERVE"
     assert classify("patch_file", {}) == "MUTATE"
+    assert classify("patch_product_file", {}) == "MUTATE"
+    assert classify("write_product_file", {}) == "MUTATE"
     assert classify("finish_task", {}) == "DELIVER"
     assert classify("run_shell", {"command": "cd x && python3 -m pytest test_foo.py"}) == "VALIDATE"
     assert classify("run_shell", {"command": "cat -n crv_types.py | sed -n '1,50p'"}) == "OBSERVE"
