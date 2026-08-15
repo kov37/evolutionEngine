@@ -1869,3 +1869,22 @@ Only tools that return source evidence consume that allowance. The
 deterministic suite remains green at 89 tests. This is the third preflight
 edge case found through the test cycle: inventory, localization, and actual
 source inspection are separate control-plane events.
+
+The following live run reached the intended targeted path and completed the
+task correctly: `find_files` on turn 2, `read_file` on turn 3, first mutation
+at 64.5 seconds, then the second repair and passing validation. It still used
+7 model turns because the actor chose localization before reading. The
+artifact passed and `finish_task` was called; only the frozen 3-turn efficiency
+target remained unmet.
+
+### 2026-08-15 — preserve traceback file locations in failure evidence
+
+The remaining avoidable localization came from the validation summary itself.
+The runner retained exception names and source lines but discarded traceback
+frames such as `File .../target.py, line N`. The actor therefore had to search
+for a file whose location was already known to the test runner.
+
+Failure summaries now preserve bounded `File ...` frames for both unittest and
+function-style fallback results. This is generic error evidence, not a
+benchmark hint, and the cascade preflight asserts that the implicated source
+filename survives. The deterministic suite remains green at 89 tests.

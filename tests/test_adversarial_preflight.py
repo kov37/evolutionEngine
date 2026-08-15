@@ -104,6 +104,7 @@ class AdversarialPreflightTests(unittest.TestCase):
             syntax_ok, syntax_summary = run_tests(tmp)
             self.assertFalse(syntax_ok)
             self.assertIn("SyntaxError", syntax_summary)
+            self.assertIn("target.py", syntax_summary)
 
             (root / "target.py").write_text(
                 "def calculate(values):\n"

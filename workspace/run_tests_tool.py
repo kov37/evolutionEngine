@@ -169,6 +169,7 @@ def _function_style_fallback(path: str, absolute_path: str) -> tuple[bool, str] 
             lines = [line.strip() for line in traceback_text.splitlines() if line.strip()]
             evidence = [line for line in lines if (
                 line.startswith(("-", "+"))
+                or line.startswith("File ")
                 or "AssertionError" in line
                 or "TypeError" in line
                 or "SyntaxError" in line
@@ -325,6 +326,7 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
             # hides the actual/expected contract that the repair actor needs.
             evidence = [line for line in detail if (
                 line.startswith(("-", "+"))
+                or line.startswith("File ")
                 or "AssertionError" in line
                 or "TypeError" in line
                 or "SyntaxError" in line
