@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _authoritative_gate_restrictions, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -74,6 +74,13 @@ class KernelToolTests(unittest.TestCase):
             _authoritative_gate_restrictions({"patch_file", "write_file"}, True),
             {"patch_file", "write_file"},
         )
+
+    def test_worker_gate_is_opt_in(self):
+        class Worker:
+            def consume_gate_restrictions(self):
+                return {"patch_file"}
+        self.assertEqual(_consume_worker_gate(False, Worker()), set())
+        self.assertEqual(_consume_worker_gate(True, Worker()), {"patch_file"})
 
     def test_validation_policy_is_setup_then_command(self):
         first = build_validation_policy(

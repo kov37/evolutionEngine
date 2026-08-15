@@ -528,6 +528,13 @@ def _authoritative_gate_restrictions(gate_banned, setup_failure):
     return banned
 
 
+def _consume_worker_gate(novelty_action_gate, novelty_context):
+    """Consume 4B tool restrictions only when gating is explicitly enabled."""
+    if not novelty_action_gate or novelty_context is None:
+        return set()
+    return novelty_context.consume_gate_restrictions()
+
+
 def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
@@ -1022,7 +1029,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 repair_recovery_mode=repair_recovery_mode,
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
-            gate_banned = novelty_context.consume_gate_restrictions() if novelty_context is not None else set()
+            gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
             # The synchronous worker is advisory.  Once the deterministic
             # validation policy has classified the active failure as product
             # behavior, stale setup advice must not remove the only legal

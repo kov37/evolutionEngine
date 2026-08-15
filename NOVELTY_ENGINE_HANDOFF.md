@@ -1467,3 +1467,11 @@ judgment still described setup. The deterministic policy now filters worker
 restrictions by the active plane. A behavior repair always retains its legal
 mutation tool; a setup recovery may still retain the worker's mutation ban.
 Added regression coverage. The deterministic suite passes 67 tests.
+
+The attempted observation-only ablation found a flag-wiring defect: the agent
+was consuming synchronous 4B gate restrictions whenever novelty context was
+enabled, even when `--novelty-action-gate` was off. Gate consumption is now
+explicitly opt-in. This makes the planned ablation honest: novelty context can
+observe and record events without changing the actor's legal tools. Added
+coverage for both disabled and enabled gate behavior; the deterministic suite
+passes 68 tests.
