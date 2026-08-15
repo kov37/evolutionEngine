@@ -48,7 +48,13 @@ def _start_background(command, cwd, shell):
     log.close()
     handle = "proc-" + uuid.uuid4().hex[:12]
     with _BACKGROUND_LOCK:
-        _BACKGROUND[handle] = {"proc": proc, "log_path": log_path, "command": str(command)}
+        _BACKGROUND[handle] = {
+            "proc": proc,
+            "log_path": log_path,
+            "command": command,
+            "cwd": cwd,
+            "shell": shell,
+        }
     return (
         "Started background process.\n"
         f"Handle: {handle}\nPID: {proc.pid}\nLog: {log_path}\n"
@@ -107,6 +113,33 @@ def active_background_handles() -> list[str]:
     with _BACKGROUND_LOCK:
         items = list(_BACKGROUND.items())
     return [handle for handle, item in items if item["proc"].poll() is None]
+
+
+def restart_background(handle: str) -> str:
+    """Restart one live managed process with its original command and cwd.
+
+    This is an orchestrator hook for refreshing a service after product code
+    changes. It does not invent a command or bypass the normal process
+    registry; it reuses the exact argv/shell mode that the actor previously
+    approved. The caller must still run an independent behavioral check.
+    """
+    with _BACKGROUND_LOCK:
+        item = _BACKGROUND.get(handle)
+    if item is None:
+        return f"ERROR: unknown process handle: {handle}"
+    if item["proc"].poll() is not None:
+        return f"ERROR: process {handle} is already stopped; no restart performed"
+    command = item["command"]
+    cwd = item["cwd"]
+    shell = item["shell"]
+    stopped = stop_process(handle)
+    if stopped.startswith("ERROR:"):
+        return stopped
+    try:
+        started = _start_background(command, cwd, shell)
+    except OSError as exc:
+        return f"ERROR: could not restart process {handle}: {exc}"
+    return f"{stopped}\n{started}"
 
 
 def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bool = False) -> str:

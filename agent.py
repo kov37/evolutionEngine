@@ -35,7 +35,7 @@ import validation_contract
 import worker
 import working_state
 from lifecycle_fsm import LifecycleFSM, LifecycleState
-from kernel.exec_tools import active_background_handles, cleanup_background_processes, stop_process
+from kernel.exec_tools import active_background_handles, cleanup_background_processes, restart_background, stop_process
 from dispatch import _call_key, dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
@@ -825,6 +825,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     no_action_turns = 0
     lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
+    stale_service_restart_note = ""
     agent_started_at = time.monotonic()
     first_tool_elapsed = None
     first_mutation_elapsed = None
@@ -1021,13 +1022,17 @@ You have this focused toolbelt: {offered_tool_names}.
                     action_critic=novelty_action_critic),
             }]
 
-        if stale_service_restart_pending:
-            messages_for_call = messages_for_call + [{"role": "system", "content": (
-                "One-time stale-service recovery: stop the old background process, launch exactly one fresh "
-                "process from the updated workspace, then run the focused behavioral validation. Once the "
-                "fresh process is running, do not repeat this restart instruction."
-            )}]
+        if stale_service_restart_pending or stale_service_restart_note:
+            restart_text = (
+                "The engine could not automatically refresh the old managed service. Stop it, launch exactly "
+                "one fresh process from the updated workspace, then run the focused behavioral validation."
+                if stale_service_restart_pending else
+                "The engine automatically refreshed the managed service using its original command. Run the "
+                "focused behavioral validation now; do not restart it again."
+            )
+            messages_for_call = messages_for_call + [{"role": "system", "content": restart_text}]
             stale_service_restart_pending = False
+            stale_service_restart_note = ""
 
         # The graduated progress governor — evaluated using the ledger's
         # state as of the END of the previous iteration (this iteration's
@@ -1716,11 +1721,16 @@ You have this focused toolbelt: {offered_tool_names}.
             print("🔒 [validation phase] mutation succeeded; validation required before another edit")
             stale_service_handles = active_background_handles()
             if stale_service_handles:
-                for handle in stale_service_handles:
-                    print(f"♻️ [stale service] automatic stop: {stop_process(handle)}")
-                stale_service_restart_pending = True
+                restart_results = [restart_background(handle) for handle in stale_service_handles]
+                for result in restart_results:
+                    print(f"♻️ [stale service] automatic refresh: {result}")
+                stale_service_restart_pending = any(result.startswith("ERROR:") for result in restart_results)
+                if not stale_service_restart_pending:
+                    stale_service_restart_note = (
+                        "The engine refreshed the managed service after the mutation; validation is still required."
+                    )
                 process_status_used = False
-                print(f"♻️ [stale service] restart required after mutation: {stale_service_handles}")
+                print(f"♻️ [stale service] refresh complete; validation required: {stale_service_handles}")
         if not validation_required and not repair_required:
             if turn_mutated:
                 orientation_turns_without_mutation = 0

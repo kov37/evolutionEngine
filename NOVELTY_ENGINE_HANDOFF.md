@@ -2700,3 +2700,17 @@ legitimate workflow failure, not a grader failure: artifact correctness is
 true, but handoff completion is false. The next generic optimization should
 make service restart and repeat-validation deterministic after a product
 mutation, so a valid final artifact is not stranded behind a slow model turn.
+
+### 2026-08-15 — deterministic managed-service refresh after mutation
+
+The service lifecycle now retains the exact argv, shell mode, and confined cwd
+used to start each managed background process. When product mutation succeeds,
+the orchestrator refreshes the live process automatically with that same
+command and tells the actor to run validation; it does not claim the behavior
+passed and does not invent a new startup command. If refresh fails, the actor
+receives the existing manual-restart recovery path.
+
+This directly addresses the Todo timeout's final stranded state while keeping
+process control generic and bounded. The deterministic suite remains at 127
+passing tests and preflight is green. The next real-app run should measure
+whether automatic refresh leaves enough model budget for the final HTTP check.
