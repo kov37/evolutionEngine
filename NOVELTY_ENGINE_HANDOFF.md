@@ -2996,3 +2996,12 @@ safe fallback path. This changes scheduling only; it does not make a model
 name, task, or benchmark authoritative.
 
 Focused deterministic regression: 114 tests pass after this change.
+
+The real-model cascading regression also passed unchanged: Qwen3.8-27B
+completed the two-defect fixture in 3 iterations and 36.9 seconds, with one
+mutation, two accepted validations, an independent artifact pass, and a valid
+completion signal. The 4B made one call with no worker failure. This short run
+did not have an overlapping live worker at the repair boundary
+(`worker_busy_drops=0`), so it validates compatibility of the new scheduler
+but not the cancellation branch itself. Its monitor is
+`state/benchmark/agentic/monitor-cascading_loop-novelty-1786821348050935000.jsonl`.
