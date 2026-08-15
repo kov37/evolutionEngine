@@ -2345,3 +2345,16 @@ state-changing request blocks. It tells the actor to inspect that handler for a
 deadlock, blocking lock, or I/O wait, preserve the passing health behavior, and
 make one targeted repair. This is a generic request-lifecycle heuristic, not a
 hardcoded Todo fix.
+
+### 2026-08-15 — make deterministic repair evidence outrank stale worker advice
+
+The live repair trace showed the 4B worker repeatedly calling a passing health
+check a false alarm and steering the actor toward `/health`, while the
+deterministic evidence identified a different request that timed out. The
+worker is advisory, but its stale diagnosis still influenced the actor's target.
+
+Repair prompts now append a deterministic authority clause after worker output:
+a failed or timed-out check cannot be dismissed because another check passed;
+the actor must preserve unrelated passing behavior and inspect the endpoint or
+artifact named by the failure packet. This is a general precedence rule, not a
+Todo-specific instruction.

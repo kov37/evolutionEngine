@@ -1190,6 +1190,10 @@ You have this focused toolbelt: {offered_tool_names}.
                     "the probe. When actual and expected values differ, repair the implementation's meaning, "
                     "shape, ordering, or state transition—not just formatting. Failure evidence:\n"
                     + last_repair_packet
+                    + "\nDeterministic repair authority: do not dismiss this failed or timed-out check "
+                    "because a different check passed. Preserve unrelated passing behavior and inspect "
+                    "the endpoint, handler, or artifact named by this failure packet; do not edit a "
+                    "different healthy component merely to create a mutation."
                 )
             messages_for_call = messages_for_call + [{
                 "role": "system",
