@@ -827,17 +827,32 @@ class NoveltyContext:
             return len(self.events) < self.action_after_events
 
     def repeated_validation_loop(self) -> bool:
-        """Whether the latest two events repeat the same validation call."""
+        """Whether the latest two events repeat the same non-mutating action.
+
+        The historical method name is retained for callers, but the signal is
+        intentionally broader than a provider-supplied ``validation`` flag.
+        Providers disagree about whether probes are validation.  A stable
+        duplicate result is still objective evidence that the actor made no
+        progress, so the action gate must respond to it the same way as an
+        explicitly labeled repeated validation.
+        """
         with self._lock:
             action_events = [event for event in self.events if event.tool != "repair_checkpoint"]
             if len(action_events) < 2:
                 return False
             previous, latest = action_events[-2:]
-            return (
+            explicit_repeat = (
                 previous.validation and latest.validation
                 and _call_key(previous.tool, previous.arguments)
                 == _call_key(latest.tool, latest.arguments)
             )
+            fingerprint_repeat = (
+                previous.result_fingerprint == latest.result_fingerprint
+                and not previous.mutation and not latest.mutation
+                and previous.tool not in {"actor_turn_no_action"}
+                and latest.tool not in {"actor_turn_no_action"}
+            )
+            return bool(explicit_repeat or fingerprint_repeat)
 
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.

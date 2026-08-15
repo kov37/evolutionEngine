@@ -3149,3 +3149,15 @@ did not consistently match the full provider argument shape. The gate now also
 uses identical event fingerprints for adjacent non-mutating actor actions,
 while never treating a mutation as a duplicate-progress failure. This closes
 the provider-format loophole without inspecting model names or task text.
+
+The next frozen SymPy run completed cleanly in 318.5 seconds with the bounded
+10-second independent grader. It still made one irrelevant mutation, added zero
+of the twelve requested `_cdf` methods, and graded 19/20 selected tests. The
+trace confirmed a small implementation mismatch: `requires_progress()` saw the
+duplicate fingerprint, but the method used by the tool gate still required an
+explicit validation label. `repeated_validation_loop()` now uses the same
+fingerprint rule as `requires_progress()`, and a regression test covers an
+unlabeled repeated command. The deterministic suite is 140 tests and 35
+subtests. This is a generic consistency fix; it does not encode SymPy names or
+formulas. The next live run must use the new commit before judging whether the
+tool surface now forces a mutation.

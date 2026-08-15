@@ -1199,6 +1199,14 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(context.requires_progress())
         context.close()
 
+    def test_action_gate_matches_duplicate_results_without_validation_label(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=8)
+        context.observe(1, "run_command", {"command": "probe"}, "Exit code: 0")
+        context.observe(2, "run_command", {"command": "probe"}, "Exit code: 0")
+        self.assertTrue(context.requires_progress())
+        self.assertTrue(context.repeated_validation_loop())
+        context.close()
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])
