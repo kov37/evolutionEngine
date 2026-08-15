@@ -1194,6 +1194,7 @@ class KernelToolTests(unittest.TestCase):
         context.observe(1, "patch_file", {"path": "src/app.py"}, "Wrote app.py", mutation=True)
         context.observe(2, "run_command", {"command": "pytest -q"}, "Exit code: 0", validation=True)
         context.observe(3, "run_command", {"command": "pytest -q"}, "Exit code: 0", validation=True)
+        self.assertTrue(context.repeated_validation_loop())
         self.assertTrue(context.requires_progress())
         context.close()
 

@@ -1238,7 +1238,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         if novelty_action_gate and novelty_context is not None and novelty_context.requires_progress():
             progress_tools = {"patch_file", "write_file", "run_tests", "run_command", "run_shell",
                               "finish_task", "recall"}
-            if novelty_context.recovery_reads_allowed():
+            repeated_validation_loop = novelty_context.repeated_validation_loop()
+            if repeated_validation_loop:
+                # A second identical validation is deterministic evidence of
+                # a control-loop failure. Offering another validator or
+                # inspection tool merely gives the actor a way to evade the
+                # progress gate with a different command. Keep only a
+                # product mutation or explicit completion at this boundary.
+                progress_tools = {"patch_file", "write_file", "finish_task"}
+            if novelty_context.recovery_reads_allowed() and not repeated_validation_loop:
                 progress_tools.update({"read_file", "find_files", "search_file"})
             gated_names = {t.__name__ for t in tools_for_call} & progress_tools
             tools_for_call = [t for t in tools_for_call if t.__name__ in gated_names]
@@ -1249,6 +1257,8 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     "validation. Broad exploration tools are temporarily unavailable. Use targeted "
                     "read_file/find_files/search_file only to establish the exact file, then patch, validate, finish, "
                     "or recall exact prior text."
+                    + (" The same validation call repeated twice; validation and inspection tools are now "
+                       "unavailable—make one targeted mutation or call finish_task." if repeated_validation_loop else "")
                 ),
             }]
 

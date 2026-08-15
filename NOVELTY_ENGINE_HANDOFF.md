@@ -3128,3 +3128,11 @@ bounded-window behavior for broader exploration/validation loops. The
 progress surface still permits a focused mutation or `finish_task`; no model
 or task name is involved. Full deterministic coverage is now 139 tests and 35
 subtests.
+
+The follow-up 12-turn SymPy run confirmed that the first repeated-probe fix
+triggered, but the actor then substituted a different inspection command
+(`git diff`) rather than editing. The novelty gate now detects the repeated
+validation state before building the per-turn tool list and removes validation,
+inspection, and recall tools entirely; only `patch_file`, `write_file`, and
+`finish_task` remain. This makes the control-plane boundary enforceable rather
+than advisory. Deterministic coverage remains 139 tests and 35 subtests.

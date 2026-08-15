@@ -818,6 +818,18 @@ class NoveltyContext:
             # progress policy rather than a model-specific instruction.
             return len(self.events) < self.action_after_events
 
+    def repeated_validation_loop(self) -> bool:
+        """Whether the latest two events repeat the same validation call."""
+        with self._lock:
+            if len(self.events) < 2:
+                return False
+            previous, latest = self.events[-2:]
+            return (
+                previous.validation and latest.validation
+                and _call_key(previous.tool, previous.arguments)
+                == _call_key(latest.tool, latest.arguments)
+            )
+
     def close(self) -> None:
         # A real 4B call is advisory. Never make task completion wait for it.
         self.collect(wait=False)
