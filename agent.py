@@ -1451,6 +1451,7 @@ You have this focused toolbelt: {offered_tool_names}.
         turn_validation_succeeded = False
         turn_validation_failed = False
         turn_tool_plane_failure = False
+        turn_probe_quality_failure = False
         validation_suggestions = []
         for call, tmsg in zip(msg.tool_calls, tool_messages):
             tool_name = call.function.name
@@ -1534,12 +1535,33 @@ You have this focused toolbelt: {offered_tool_names}.
                         turn_validation_failed = True
                         validation_suggestions.append(assessment[2])
                 elif phase_validation:
-                    turn_validation_failed = True
-                    validation_suggestions.append(assessment[1])
-                    print(
-                        f"⚠️ [validation evidence rejected] {tool_name}: "
-                        f"{assessment[1]} — {assessment[2]}"
-                    )
+                    if validation_contract.is_probe_quality_failure(assessment[1]):
+                        turn_probe_quality_failure = True
+                        validation_suggestions.append(assessment[2])
+                        print(
+                            f"⚠️ [probe-quality recovery] {tool_name}: "
+                            f"{assessment[1]} — improve the check; do not patch product code"
+                        )
+                    else:
+                        turn_validation_failed = True
+                        validation_suggestions.append(assessment[1])
+                        print(
+                            f"⚠️ [validation evidence rejected] {tool_name}: "
+                            f"{assessment[1]} — {assessment[2]}"
+                        )
+        if turn_probe_quality_failure and not turn_validation_failed:
+            validation_required = True
+            repair_required = False
+            validation_failures = 0
+            repair_turns_used = 0
+            repair_recovery_mode = False
+            repair_inspection_used = False
+            messages.append({"role": "system", "content": (
+                "Probe-quality recovery: the application check executed, but it did not explicitly "
+                "assert every required response shape or interface. This is not a product defect. "
+                "Improve or replace the validation command, rerun it, and do not patch the product."
+            )})
+            print("⚠️ [probe-quality recovery] reopening behavioral validation without product repair")
         if turn_tool_plane_failure and not turn_validation_failed:
             # A dispatch/schema/allow-list failure is not evidence that the
             # implementation is wrong. Return to the validation surface so a

@@ -245,7 +245,10 @@ def build_validation_policy(
         return None
 
     if not repair_required:
-        validation_tools = set(VALIDATION_TOOLS)
+        # Process status/cleanup is setup bookkeeping, not evidence. Once the
+        # app has been launched, leaving those tools in the validation surface
+        # invites repeated status checks instead of a behavioral probe.
+        validation_tools = set(VALIDATION_TOOLS - {"process_status", "stop_process"})
         # A temporary behavioral probe is a validation artifact, not a
         # product mutation. Dispatch restricts this write surface to .agentic/.
         validation_tools.add("write_file")
@@ -289,6 +292,7 @@ def build_validation_policy(
         )
     else:
         tools -= READ_TOOLS - BEHAVIOR_REPAIR_READ_TOOLS
+        tools -= {"process_status", "stop_process"}
         if repair_inspection_used:
             tools -= READ_TOOLS
         prompt = (

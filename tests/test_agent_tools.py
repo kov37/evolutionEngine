@@ -17,7 +17,7 @@ from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
     _failure_diagnostic, assertion_driven_tool_contract, from_task,
-    is_dependency_setup_command, is_tool_plane_failure,
+    is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
@@ -320,6 +320,12 @@ class KernelToolTests(unittest.TestCase):
         ))
         self.assertTrue(is_tool_plane_failure(
             "run_command", "ERROR: command arguments must be single-line strings"
+        ))
+        self.assertTrue(is_probe_quality_failure(
+            "the passing API check does not assert response shape: object"
+        ))
+        self.assertFalse(is_probe_quality_failure(
+            "AssertionError: expected 201, got 500"
         ))
         self.assertFalse(is_tool_plane_failure(
             "run_command", "Exit code: 1\nSTDERR: AssertionError: expected 201, got 500"

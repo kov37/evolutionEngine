@@ -120,6 +120,22 @@ def is_tool_plane_failure(tool_name, result_content):
     ))
 
 
+def is_probe_quality_failure(reason):
+    """Return true when the implementation was not tested strongly enough.
+
+    A probe can execute successfully yet omit a required assertion, response
+    shape, or interface. That is a verification-plan defect, not evidence that
+    product code needs mutation.
+    """
+    lower = str(reason or "").lower()
+    return any(marker in lower for marker in (
+        "does not assert response shape",
+        "does not show an assertion",
+        "not executable evidence",
+        "not behavioral evidence",
+    ))
+
+
 def is_dependency_setup_command(command) -> bool:
     """Identify normal dependency installation, not a behavioral check."""
     if isinstance(command, (list, tuple)):

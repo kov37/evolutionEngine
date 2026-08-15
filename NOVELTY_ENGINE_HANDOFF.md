@@ -2276,3 +2276,19 @@ output-only before the redirect guard ran. Output-only classification now
 defers to the shared file-mutation detector, so redirected `echo`/`printf`
 commands remain mutations. The deterministic suite and preflight are the gate
 for the next live attempt.
+
+### 2026-08-15 — separate weak probes from product failures
+
+The final live confirmation built a working app and exercised health, HTML,
+creation, and collection behavior, but the probe did not explicitly assert the
+required JSON response shapes. The validator correctly rejected that evidence;
+the old repair packet nevertheless told the actor to mutate the implementation,
+and the actor spent turns checking process status instead of strengthening the
+probe.
+
+The contract now has a deterministic probe-quality classification. Missing
+response-shape/assertion evidence reopens behavioral validation without entering
+product repair, and process-status/cleanup tools are removed from ordinary
+validation turns once execution is underway. Real assertion failures still use
+the product-repair path. This prevents correct artifacts from being rewritten
+because the test itself was too weak.
