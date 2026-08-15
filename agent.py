@@ -815,6 +815,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     repair_turns_used = 0
     repair_recovery_mode = False
     process_status_used = False
+    tool_plane_recovery_attempts = 0
     repair_recovery_entries = 0
     # Permit a small bounded set of related product mutations after the first
     # successful write so multi-file changes can reach a coherent validation
@@ -1665,21 +1666,35 @@ You have this focused toolbelt: {offered_tool_names}.
                 # helper. Keeping mutation-only repair tools here creates a
                 # generic failure loop in which a healthy product is edited
                 # because its checker was never actually executed.
-                validation_required = True
-                repair_required = False
-                validation_failures = 0
-                repair_turns_used = 0
-                repair_recovery_mode = False
-                repair_inspection_used = False
-                lifecycle.transition("tool_plane_recovery")
-                messages.append({"role": "system", "content": (
-                    "Tool-plane recovery: the previous validation call was rejected before execution. "
-                    "This is not evidence that the product is defective. Reopen the validation target "
-                    "or service if needed, then use run_command/run_shell with the declared argument "
-                    "schema to execute the focused behavioral check. Product files remain frozen until "
-                    "a real check reports a product failure."
-                )})
-                print("⚠️ [tool-plane recovery] reopening validation after a blocked repair-phase call")
+                if tool_plane_recovery_attempts == 0:
+                    validation_required = True
+                    repair_required = False
+                    validation_failures = 0
+                    repair_turns_used = 0
+                    repair_recovery_mode = False
+                    repair_inspection_used = False
+                    tool_plane_recovery_attempts += 1
+                    lifecycle.transition("tool_plane_recovery")
+                    messages.append({"role": "system", "content": (
+                        "Tool-plane recovery: the previous validation call was rejected before execution. "
+                        "This is not evidence that the product is defective. Reopen the validation target "
+                        "or service if needed, then use run_command/run_shell with the declared argument "
+                        "schema to execute the focused behavioral check. Product files remain frozen until "
+                        "a real check reports a product failure."
+                    )})
+                    print("⚠️ [tool-plane recovery] reopening validation after a blocked repair-phase call")
+                else:
+                    # One grace recovery is enough. A second rejected probe
+                    # means the actor is trying to evade the repair plane; keep
+                    # the FSM in repair and force inspection/mutation instead
+                    # of reopening the same failing validation loop.
+                    messages.append({"role": "system", "content": (
+                        "Repeated tool-plane failure: validation recovery was already attempted. "
+                        "Do not call run_command, run_shell, or process_status again. Inspect the "
+                        "implementation named by the latest failure and make one targeted product "
+                        "repair with read_file followed by patch_file or write_file."
+                    )})
+                    print("⚠️ [tool-plane recovery] grace exhausted; preserving repair state")
             else:
                 # A dispatch/schema/allow-list failure during validation is
                 # not evidence that the implementation is wrong. Reopen the
@@ -1690,6 +1705,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 repair_turns_used = 0
                 repair_recovery_mode = False
                 repair_inspection_used = False
+                tool_plane_recovery_attempts = 0
                 lifecycle.transition("tool_plane_recovery")
                 messages.append({"role": "system", "content": (
                     "Tool-plane recovery: the previous validation call was rejected before execution "
@@ -1711,6 +1727,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 validation_failures = 0
                 repair_turns_used = 0
                 repair_recovery_mode = False
+                tool_plane_recovery_attempts = 0
                 print("🛠️  [repair phase] targeted mutation landed; returning to validation")
             validation_required = True
             validation_failures = 0

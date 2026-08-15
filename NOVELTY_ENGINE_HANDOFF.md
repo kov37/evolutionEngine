@@ -2714,3 +2714,18 @@ This directly addresses the Todo timeout's final stranded state while keeping
 process control generic and bounded. The deterministic suite remains at 127
 passing tests and preflight is green. The next real-app run should measure
 whether automatic refresh leaves enough model budget for the final HTTP check.
+
+### 2026-08-15 — bound repeated tool-plane recovery
+
+The first automatic-refresh rerun exposed a separate loop: after a timed-out
+POST check, the actor repeatedly submitted the same validation command while
+the FSM alternated between REPAIR and validation recovery. Each blocked retry
+reset repair mode, so the model never reached `patch_file`.
+
+The controller now grants one tool-plane recovery grace transition. If a second
+validation call is blocked or malformed, the FSM preserves REPAIR, removes
+command/process tools, and explicitly requires inspection followed by a
+targeted mutation. Successful mutation resets the grace counter. This is a
+model-agnostic convergence bound, not a task-specific rule. The deterministic
+suite remains at 127 passing tests; rerun the real Todo task from this commit
+to verify the deadlock repair can no longer be hidden by repeated probes.
