@@ -53,7 +53,11 @@ CAPABILITY_CLASS = {
     "finish_task": "DELIVER",
 }
 
-_SHELL_VALIDATE_RE = re.compile(r"\b(pytest|py\.test|python3?\s+-m\s+pytest|unittest)\b")
+_SHELL_VALIDATE_RE = re.compile(
+    r"\b(pytest|py\.test|python3?\s+-m\s+pytest|unittest|"
+    r"assert(?:ion)?\s+|curl|wget|urllib|fetch|websocket|health)\b",
+    re.IGNORECASE,
+)
 _ASSERTIVE_CHECK_RE = re.compile(
     r"\b(assert|check|verify|test|pytest|unittest|curl|wget|http|urllib|health|status|exit\s+code)\b|"
     r"(?:^|[\s/])test[_-][^\s/]+",
@@ -81,7 +85,9 @@ _ASSERTIVE_CHECK_RE = re.compile(
 _SHELL_MUTATE_RE = re.compile(
     r"(?:sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
     r"\btee\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
-    r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync)|"
+    r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync|"
+    r"(?:fs\.)?promises?\.(?:writefile|appendfile|unlink|mkdir))|"
+    r"[\"'](?:writefilesync|appendfilesync|writefile|appendfile|unlink|mkdir)[\"']\s*\]|"
     r"(?:fs\.)?(?:writefile|appendfile)\s*\(|\.write_text\s*\(|\.write\s*\()",
     re.IGNORECASE,
 )
@@ -145,6 +151,26 @@ def _file_install_command(command: str) -> bool:
     return bool(argv) and argv[0].rsplit("/", 1)[-1].lower() == "install"
 
 
+def _inline_validation(argv) -> bool:
+    """Recognize an assertion in interpreter code without trusting prose.
+
+    This is narrower than the command-wide regex: a real inline assertion is
+    validation, while ``print('assert passed')`` is handled as output-only
+    before this function is reached.
+    """
+    tokens = [str(token) for token in (argv or [])]
+    if not tokens or tokens[0].rsplit("/", 1)[-1].lower() not in {
+        "python", "python3", "node", "nodejs", "bun", "deno", "ruby", "perl", "php",
+    }:
+        return False
+    try:
+        code_index = next(i for i, token in enumerate(tokens[1:], 1) if token in {"-e", "-c"})
+    except StopIteration:
+        return False
+    code = " ".join(tokens[code_index + 1:])
+    return bool(re.search(r"(?:^|[;\n])\s*assert(?:ion)?\b|\b(?:pytest|unittest)\b", code, re.I))
+
+
 def classify_run_shell(command: str) -> str:
     """run_shell is a wildcard tool — classify by what the command actually
     does, not the tool name. Defaults to OBSERVE for anything ambiguous:
@@ -180,7 +206,10 @@ def classify(tool_name: str, arguments: dict) -> str:
         else:
             argv = []
         command_text = " ".join(argv)
-        if is_output_only_command(command_text):
+        # Preserve argv boundaries here. Flattening ``python -c
+        # "print('assert passed')"`` before classification makes quoted fake
+        # evidence look like an assertion token.
+        if is_output_only_command(argv):
             return "OBSERVE"
         if _file_install_command(command_text):
             return "MUTATE"
@@ -194,7 +223,7 @@ def classify(tool_name: str, arguments: dict) -> str:
             return "MUTATE"
         if _SHELL_MUTATE_RE.search(command_text):
             return "MUTATE"
-        if _SHELL_VALIDATE_RE.search(command_text):
+        if _inline_validation(argv) or _SHELL_VALIDATE_RE.search(command_text):
             return "VALIDATE"
         return "OBSERVE"
     return CAPABILITY_CLASS.get(tool_name, "OBSERVE")

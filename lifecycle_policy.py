@@ -7,6 +7,7 @@ function prevents scattered prompt/tool branches from drifting apart.
 
 import shlex
 import re
+import ast
 from dataclasses import dataclass
 
 
@@ -63,12 +64,19 @@ def _contains_file_mutation(argv) -> bool:
     head = tokens[0].rsplit("/", 1)[-1].lower()
     if head in _FILE_MUTATION_HEADS:
         return True
-    if any(
-        (token in {">", ">>"}
-         or (token.startswith((">", "1>", "2>", "3>"))
-             and not token.startswith((">&", "1>&", "2>&", "3>&"))))
-        for token in tokens[1:]
-    ):
+    # Redirections are mutations only when they target a real file. The
+    # common ``2>/dev/null`` and ``2>&1`` forms merely discard or merge
+    # diagnostics and must not turn a read/validation command into a write.
+    redirect_re = re.compile(r"^(?P<fd>[0-9]*)(?P<op>>|>>)(?P<target>.*)$")
+    for index, token in enumerate(tokens[1:], 1):
+        match = redirect_re.match(token)
+        if not match:
+            continue
+        target = match.group("target")
+        if not target and index + 1 < len(tokens):
+            target = tokens[index + 1]
+        if target.startswith("&") or target == "/dev/null":
+            continue
         return True
     if head == "sed" and any(token in {"-i", "--in-place"} or token.startswith("-i") for token in tokens[1:]):
         return True
@@ -83,9 +91,14 @@ def _contains_file_mutation(argv) -> bool:
     code = " ".join(tokens[code_index + 1:]).lower()
     if any(marker in code for marker in {
         "writefilesync", "appendfilesync", "unlinksync", "mkdirsync",
-        "fs.writefile", "fs.appendfile", "write_text", ".write(",
-        ".write (", ".unlink(",
+        "fs.writefile", "fs.appendfile", "fs.promises.writefile",
+        "write_text", ".write(", ".write (", ".unlink(",
     }):
+        return True
+    if re.search(
+        r"[\"'](?:writefilesync|appendfilesync|writefile|appendfile|unlink|mkdir)"
+        r"[\"']\s*\]", code, re.IGNORECASE,
+    ):
         return True
     return bool(re.search(r"\bopen\s*\([^)]*,\s*['\"][wax+]", code))
 
@@ -103,7 +116,43 @@ def is_output_only_command(command) -> bool:
         return False
     if _contains_file_mutation(argv):
         return False
-    return argv[0].rsplit("/", 1)[-1].lower() in {"echo", "printf"}
+    head = argv[0].rsplit("/", 1)[-1].lower()
+    if head in {"echo", "printf"}:
+        return True
+    # A model can hide the same fake evidence in an inline interpreter. Only
+    # classify a single print/log statement as output-only; a real assertion,
+    # request, test runner, or file read remains available to the other
+    # classifiers.
+    if head in _INTERPRETER_HEADS:
+        try:
+            code_index = next(i for i, token in enumerate(argv[1:], 1) if token in {"-e", "-c"})
+        except StopIteration:
+            return False
+        code = " ".join(argv[code_index + 1:]).strip()
+        if head in {"python", "python3"}:
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                return False
+            if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
+                return False
+            expression = tree.body[0].value
+            if not isinstance(expression, ast.Call):
+                return False
+            if not isinstance(expression.func, ast.Name) or expression.func.id not in {"print", "puts", "p"}:
+                return False
+            # ``print(open(...).read())`` is a readback, not fake output.
+            return not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                           and node.func.id in {"open", "request", "fetch"}
+                           for node in ast.walk(expression))
+        code_without_strings = re.sub(r"(['\"]).*?\1", "", code, flags=re.DOTALL)
+        if re.search(r"\b(?:assert|pytest|unittest|request|fetch|websocket|readfile|open|test)\b", code_without_strings, re.I):
+            return False
+        return bool(re.fullmatch(
+            r"console\.(?:log|error)\s*\(.*\)\s*;?",
+            code, re.IGNORECASE | re.DOTALL,
+        ))
+    return False
 
 
 def counts_as_repair_inspection(tool_name: str) -> bool:

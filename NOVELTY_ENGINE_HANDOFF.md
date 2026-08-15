@@ -2412,3 +2412,19 @@ This is not counted as a context or validation failure: the task asks a local
 actor never reached a product mutation. The result establishes a useful
 capacity boundary. We are advancing to the smaller `3d_scene` artifact to
 separate artifact complexity from the generic orchestration path.
+
+### 2026-08-15 — model-free adversarial preflight catches control-plane edge cases
+
+We added offline adversarial cases so common orchestration failures are found
+without spending a real-model call. The corpus now covers diagnostic redirects
+(`2>/dev/null`, `2>&1`, and `>&2`), dynamic JavaScript filesystem writes,
+bracketed write methods, inline interpreter assertions, and fake evidence such
+as `python -c "print('assert passed')"`. The deterministic suite passes 120
+tests and `_run_preflight()` is green.
+
+The fixes are deliberately model-agnostic: argv boundaries are preserved at
+the classifier boundary, harmless diagnostic redirects are not mutations,
+dynamic write APIs are treated as mutations, and output-only interpreter calls
+cannot satisfy behavioral validation merely because their printed text contains
+words such as “assert” or “passed”. Use this preflight corpus before another
+long actor run; reserve live calls for cases that pass the control-plane checks.

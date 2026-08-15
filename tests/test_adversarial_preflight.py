@@ -12,7 +12,7 @@ from pathlib import Path
 import action_governor
 from agentic_benchmark import _scorecard_passed, _verifier_repair_prompt
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
-from lifecycle_policy import is_inspection_command
+from lifecycle_policy import is_inspection_command, is_output_only_command
 from validation_contract import from_task
 from workspace.run_tests_tool import run_tests
 
@@ -78,6 +78,21 @@ class AdversarialPreflightTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(is_inspection_command(command))
 
+    def test_diagnostic_redirects_are_not_file_mutations(self):
+        commands = [
+            ["cat", "index.html", "2>/dev/null"],
+            ["cat", "index.html", "2>", "/dev/null"],
+            ["bash", "-c", "cat index.html 2>/dev/null"],
+            ["bash", "-c", "cat index.html >&2"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(is_inspection_command(command))
+                self.assertNotEqual(
+                    action_governor.classify("run_command", {"command": command}),
+                    "MUTATE",
+                )
+
     def test_common_interpreter_writes_are_mutations_case_insensitively(self):
         commands = [
             ["node", "-e", "require('fs').writeFileSync('index.html','x')"],
@@ -98,6 +113,39 @@ class AdversarialPreflightTests(unittest.TestCase):
             action_governor.classify("run_command", {"command": command}),
             "OBSERVE",
         )
+
+    def test_dynamic_interpreter_writes_are_mutations(self):
+        commands = [
+            ["node", "-e", "fs.promises.writeFile('index.html','x')"],
+            ["node", "-e", "require('fs')['writeFileSync']('index.html','x')"],
+            ["python3", "-c", "Path('index.html').write_text('x')"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    action_governor.classify("run_command", {"command": command}),
+                    "MUTATE",
+                )
+
+    def test_inline_assertion_is_validation_but_printed_assertion_is_not(self):
+        real_check = ["python3", "-c", "assert 2 > 1"]
+        fake_check = ["python3", "-c", "print('assert passed')"]
+        self.assertFalse(is_output_only_command(real_check))
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": real_check}),
+            "VALIDATE",
+        )
+        self.assertTrue(is_output_only_command(fake_check))
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": fake_check}),
+            "OBSERVE",
+        )
+        contract = from_task("Build a service and run a real behavioral check.")
+        accepted, *_ = contract.assess(
+            "run_command", {"command": fake_check},
+            "Exit code: 0\nSTDOUT: assert passed\n",
+        )
+        self.assertFalse(accepted)
 
     def test_dependency_install_is_not_file_mutation(self):
         self.assertNotEqual(

@@ -70,10 +70,14 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
         if "Exit code: 0" not in text:
             return {"success": False, "evidence": False, "setup_only": False,
                     "plane": "non_evidence", "reason": "command did not exit successfully"}
-        command = args.get("command", "")
+        raw_command = args.get("command", "")
+        command = raw_command
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
-        if is_output_only_command(command):
+        # Keep argv boundaries for inline-interpreter checks. Flattening a
+        # quoted ``print('assert passed')`` command makes fake evidence look
+        # like a real assertion.
+        if is_output_only_command(raw_command):
             return {"success": True, "evidence": False, "setup_only": True,
                     "plane": "setup", "reason": "output-only command is not executable evidence"}
         evidence = bool(re.search(
