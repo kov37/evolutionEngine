@@ -3202,3 +3202,20 @@ a helper below `.agentic/` that imports a package from the workspace. This is
 language/tooling infrastructure, not a SymPy exception. Deterministic coverage
 is now 142 tests and 35 subtests. Rerun the unchanged frozen benchmark before
 making another policy change.
+
+The rerun from `c107436` confirmed the command-environment repair. The
+actor-authored `.agentic/validate_cdf.py` imported the workspace SymPy source;
+the previous `ModuleNotFoundError` disappeared. The helper then failed on its
+own assertion expression (`S.pi` instead of `pi`), which the independent trace
+correctly classified as a behavioral checker failure rather than setup. The
+run ended at the 16-turn budget after 692.6 seconds with two mutations, seven
+validations, one stale-worker cancellation, zero requested `_cdf` methods, and
+a 19/20 independent grade. The final repair call hit the explicit 90-second
+llama.cpp wall-clock guard, so the process terminated cleanly.
+
+This separates two concerns: workspace imports are fixed; the actor still
+spends its forced mutation on a large self-authored checker and then has too
+little effective repair time to reach product code. The next generic change
+should make source-backed repair packets smaller and prioritize the exact
+failing source expression, while preserving the independent grader and frozen
+fixture. Do not add SymPy formulas or special-case `S.pi`.
