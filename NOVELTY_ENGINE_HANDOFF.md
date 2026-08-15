@@ -2639,3 +2639,16 @@ removing a predictable false tool failure. The focused suite now passes 126
 tests and preflight remains green. Rerun the WebSocket task from the new commit
 to measure whether the bounded status capability removes a turn without
 reintroducing status loops.
+
+### 2026-08-15 — bounded status check verified live
+
+The WebSocket benchmark was rerun from `4f230f8` with the same actor and task.
+The actor received one legal `process_status` call, observed `RUNNING` and the
+server startup log, then ran the smoke helper. All six behavioral checks passed
+and the independent grader completed successfully.
+
+The run remained at 11 iterations and 399 seconds, so this change removed a
+false tool rejection but did not reduce model-turn latency. It reduced worker
+calls from 3 to 2 and kept stale-result observations at 6. The dominant cost
+is now the actor's first mutation at about 111 seconds and the subsequent
+Qwen3.8 calls, not context growth or recovery looping.
