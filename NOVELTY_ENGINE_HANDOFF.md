@@ -2399,3 +2399,16 @@ workflow. The next task should be a different artifact shape rather than
 another Todo variation; `wifi_simulator` is next because it stresses a larger
 single-file UI, interactive controls, safety constraints, and static/runtime
 validation without external dependencies.
+
+### 2026-08-15 — wifi_simulator exposes a large-artifact capacity boundary
+
+The first live run on `wifi_simulator` timed out before the actor's first
+mutation. Its bounded verifier-repair pass read the grader and README, entered
+mutation recovery, but still produced no file before the provider timeout. The
+independent grader consequently found no `wifi-simulator.html`.
+
+This is not counted as a context or validation failure: the task asks a local
+27B model to emit a large polished single-file UI in one response, and the
+actor never reached a product mutation. The result establishes a useful
+capacity boundary. We are advancing to the smaller `3d_scene` artifact to
+separate artifact complexity from the generic orchestration path.
