@@ -1791,3 +1791,19 @@ were correct, but the benchmark scorecard remained false because its separate
 iteration target is 3. This is now a turn-efficiency problem, not a context or
 test-discovery failure; do not loosen the scorecard or alter the frozen task
 to make it pass.
+
+### 2026-08-15 — cascading validation replay and project-module isolation
+
+The new model-free cascade replay initially caught one more cache defect. A
+previous temporary workspace had left `target` in `sys.modules`; the next
+workspace imported that stale module and reported an unrelated ImportError
+instead of its current SyntaxError. The runner now evicts matching Python
+modules for the whole target project, including non-test modules, before
+discovery and after function-style collection.
+
+The preflight now replays a three-stage generic cascade without a model:
+syntax failure, repaired syntax exposing a TypeError, and final passing
+repair. It verifies that each stage reports the current failure and never
+falls back to “no tests discovered.” The combined deterministic suite passes
+86 tests. This gives us a cheap regression gate for both context evidence and
+the validation runner before another real-model call.

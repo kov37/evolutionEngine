@@ -226,6 +226,14 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     # matching discovered test modules regardless of their stale directory.
     if os.path.isfile(absolute_path):
         discovered_basenames = {os.path.basename(absolute_path)}
+        project_basenames = {
+            os.path.basename(absolute_path),
+            *(
+                filename
+                for filename in os.listdir(os.path.dirname(absolute_path) or os.curdir)
+                if filename.endswith(".py")
+            ),
+        }
     elif os.path.isdir(absolute_path):
         discovered_basenames = {
             filename
@@ -233,12 +241,19 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
             for filename in files
             if filename.startswith("test") and filename.endswith(".py")
         }
+        project_basenames = {
+            filename
+            for root, dirs, files in os.walk(absolute_path)
+            for filename in files
+            if filename.endswith(".py")
+        }
     else:
         discovered_basenames = set()
-    if discovered_basenames:
+        project_basenames = set()
+    if discovered_basenames or project_basenames:
         for module_name, module in list(sys.modules.items()):
             module_file = getattr(module, "__file__", None)
-            if module_file and os.path.basename(module_file) in discovered_basenames:
+            if module_file and os.path.basename(module_file) in (discovered_basenames | project_basenames):
                 sys.modules.pop(module_name, None)
     importlib.invalidate_caches()
     if os.path.isfile(absolute_path):

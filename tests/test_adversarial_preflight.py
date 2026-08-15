@@ -6,12 +6,15 @@ previously fooled the live actor loop without starting a model or a service.
 """
 
 import unittest
+import tempfile
+from pathlib import Path
 
 import action_governor
 from agentic_benchmark import _scorecard_passed
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import is_inspection_command
 from validation_contract import from_task
+from workspace.run_tests_tool import run_tests
 
 
 class AdversarialPreflightTests(unittest.TestCase):
@@ -80,6 +83,48 @@ class AdversarialPreflightTests(unittest.TestCase):
             "Exit code: 0\nSTDOUT: connected; sent ping; received pong; assertion passed",
         )
         self.assertTrue(accepted)
+
+    def test_cascading_function_tests_report_the_current_failure(self):
+        """A repair must reveal the next defect, not collapse into zero tests."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "target.py").write_text(
+                "def calculate(values):\n"
+                "    total = sum(values\n"
+                "    return total / '2'\n",
+                encoding="utf-8",
+            )
+            (root / "test_target.py").write_text(
+                "from target import calculate\n\n"
+                "def test_calculate():\n"
+                "    assert calculate([10, 20]) == 15\n",
+                encoding="utf-8",
+            )
+
+            syntax_ok, syntax_summary = run_tests(tmp)
+            self.assertFalse(syntax_ok)
+            self.assertIn("SyntaxError", syntax_summary)
+
+            (root / "target.py").write_text(
+                "def calculate(values):\n"
+                "    total = sum(values)\n"
+                "    return total / '2'\n",
+                encoding="utf-8",
+            )
+            type_ok, type_summary = run_tests(tmp)
+            self.assertFalse(type_ok)
+            self.assertIn("TypeError", type_summary)
+            self.assertNotIn("no tests discovered", type_summary.lower())
+
+            (root / "target.py").write_text(
+                "def calculate(values):\n"
+                "    total = sum(values)\n"
+                "    return total / 2\n",
+                encoding="utf-8",
+            )
+            passed, passed_summary = run_tests(tmp)
+            self.assertTrue(passed)
+            self.assertIn("1 function-style tests", passed_summary)
 
     def test_fsm_recovery_has_no_implicit_transition(self):
         fsm = LifecycleFSM()
