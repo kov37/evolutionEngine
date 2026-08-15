@@ -2277,6 +2277,19 @@ defers to the shared file-mutation detector, so redirected `echo`/`printf`
 commands remain mutations. The deterministic suite and preflight are the gate
 for the next live attempt.
 
+### 2026-08-15 — allow multiline argv probes safely
+
+The next live run showed that the model could produce a valid multiline Python
+probe, but `run_command` rejected it and returned the actor to repair. That
+restriction was unnecessary: `run_command` executes an argv list without a
+shell, so newlines inside one argument cannot become redirects or shell code.
+
+The command boundary now accepts multiline interpreter arguments while keeping
+the shell-free argv semantics. Guidance still prefers short one-line probes for
+provider compatibility, but a valid multiline probe is no longer converted into
+a false product/validation failure. The deterministic suite and preflight are
+the gate for the next live attempt.
+
 ### 2026-08-15 — separate weak probes from product failures
 
 The final live confirmation built a working app and exercised health, HTML,

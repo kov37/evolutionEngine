@@ -163,8 +163,6 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
     """
     if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
         return "ERROR: command must be a non-empty list of strings."
-    if any("\n" in token or "\r" in token for token in command):
-        return "ERROR: command arguments must be single-line strings; use an escaped newline or a one-line probe."
     try:
         timeout = max(1, min(int(timeout), MAX_COMMAND_TIMEOUT_SECONDS))
         workdir = confine(cwd)

@@ -1026,9 +1026,12 @@ class KernelToolTests(unittest.TestCase):
             self.assertIn("ok", result)
         self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
 
-    def test_run_command_rejects_literal_newline_arguments(self):
-        result = run_command(["node", "-e", "console.log('a')\nconsole.log('b')"])
-        self.assertIn("single-line", result)
+    def test_run_command_accepts_literal_newline_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            result = run_command(["python3", "-c", "print('a')\nprint('b')"])
+            self.assertIn("Exit code: 0", result)
+            self.assertIn("a\nb", result)
 
     def test_run_command_normalizes_missing_python_alias(self):
         with tempfile.TemporaryDirectory() as tmp:

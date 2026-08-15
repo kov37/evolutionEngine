@@ -965,7 +965,8 @@ You have this focused toolbelt: {offered_tool_names}.
                     "and response structure; for CLIs, check exit status and output; for libraries, "
                     "run the focused regression test. If a temporary probe is needed, run it inline "
                     "with run_command/run_shell (for example, a single-line node -e or python -c "
-                    "command). Keep tool arguments single-line. If a helper file is clearer, write it "
+                    "command). Keep short probes single-line when practical; multiline argv code is also "
+                    "valid for run_command. If a helper file is clearer, write it "
                     "only below .agentic/ and run that helper; do not edit product or supplied test files. "
                     "Record failures and repair from their evidence."
                     + batch_instruction + " "
@@ -1353,8 +1354,8 @@ You have this focused toolbelt: {offered_tool_names}.
                 "content": (
                     "Do not return another explanation. Take one executable action now: use "
                     + next_action
-                    + "; for a temporary validation probe, use a single-line inline run_command/run_shell "
-                    "or write the helper only below .agentic/; keep tool arguments single-line; call "
+                    + "; for a temporary validation probe, use an inline run_command/run_shell or write "
+                    "the helper only below .agentic/; call "
                     "finish_task only after verification."
                 ),
             })
