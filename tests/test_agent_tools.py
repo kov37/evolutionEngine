@@ -529,8 +529,6 @@ class KernelToolTests(unittest.TestCase):
 
     def test_run_tests_falls_back_to_function_style_pytest(self):
         """The generic runner must cover pytest-style modules without editing them."""
-        if __import__("importlib.util").util.find_spec("pytest") is None:
-            self.skipTest("pytest is not installed in this environment")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "test_function_style.py").write_text(
@@ -539,7 +537,26 @@ class KernelToolTests(unittest.TestCase):
             )
             success, summary = run_tests(tmp)
             self.assertTrue(success)
-            self.assertIn("pytest passed", summary)
+            self.assertTrue(
+                "pytest passed" in summary or "function-style tests" in summary,
+                summary,
+            )
+
+    def test_run_tests_function_fallback_does_not_depend_on_pytest(self):
+        """The same contract works when pytest is unavailable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "target.py").write_text("VALUE = 42\n", encoding="utf-8")
+            (root / "test_function_style.py").write_text(
+                "from target import VALUE\n\n"
+                "def test_value():\n"
+                "    assert VALUE == 42\n",
+                encoding="utf-8",
+            )
+            with patch.object(run_tests_tool.importlib.util, "find_spec", return_value=None):
+                success, summary = run_tests(tmp)
+            self.assertTrue(success)
+            self.assertIn("Ran 1 function-style tests", summary)
 
     def test_run_tests_preserves_assertion_diff_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

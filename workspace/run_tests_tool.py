@@ -24,8 +24,10 @@ import sys
 import tempfile
 import unittest
 import importlib
+import importlib.util
 import signal
 import re
+import hashlib
 from io import StringIO
 
 
@@ -74,6 +76,110 @@ def _pytest_fallback(path: str, absolute_path: str) -> tuple[bool, str] | None:
     return False, f"pytest failed (exit {probe.returncode}): {output or 'see pytest output'}"
 
 
+def _function_style_fallback(path: str, absolute_path: str) -> tuple[bool, str] | None:
+    """Run plain ``test_*`` functions without requiring pytest.
+
+    A workspace may use pytest's function collection convention while the
+    execution environment deliberately has no pytest installation.  The
+    agent's validation contract still needs an honest result in that case.
+    This fallback implements the dependency-free part of that convention:
+    import each matching module, collect zero-argument top-level functions
+    named ``test_*``, and execute them through unittest's result machinery.
+    It does not emulate pytest fixtures or plugins; unsupported signatures
+    fail as ordinary test errors instead of being silently counted as passes.
+    """
+    if os.path.isfile(absolute_path):
+        test_files = [absolute_path]
+    elif os.path.isdir(absolute_path):
+        test_files = []
+        for root, dirs, files in os.walk(absolute_path):
+            dirs[:] = sorted(name for name in dirs if name != "__pycache__")
+            test_files.extend(
+                os.path.join(root, name)
+                for name in sorted(files)
+                if name.startswith("test") and name.endswith(".py")
+            )
+        test_files.sort()
+    else:
+        return None
+
+    if not test_files:
+        return None
+
+    import_roots = sorted({os.path.dirname(filename) for filename in test_files})
+    old_sys_path = list(sys.path)
+    for root in reversed(import_roots):
+        if root and root not in sys.path:
+            sys.path.insert(0, root)
+
+    suite = unittest.TestSuite()
+    load_errors: list[str] = []
+    try:
+        for index, filename in enumerate(test_files):
+            digest = hashlib.sha1(os.path.realpath(filename).encode("utf-8")).hexdigest()[:12]
+            module_name = f"_novelty_function_tests_{digest}_{index}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, filename)
+                if spec is None or spec.loader is None:
+                    raise ImportError("could not create an import spec")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+            except BaseException as exc:
+                load_errors.append(f"{os.path.basename(filename)}: {type(exc).__name__}: {exc}")
+                continue
+
+            for name, value in sorted(vars(module).items()):
+                if name.startswith("test_") and callable(value) and not isinstance(value, type):
+                    suite.addTest(unittest.FunctionTestCase(value, description=f"{filename}:{name}"))
+    finally:
+        import_roots_real = [os.path.realpath(root) for root in import_roots if root]
+        for module_name, module in list(sys.modules.items()):
+            module_file = getattr(module, "__file__", None)
+            if not module_file:
+                continue
+            try:
+                module_real = os.path.realpath(module_file)
+                if any(os.path.commonpath((root, module_real)) == root for root in import_roots_real):
+                    sys.modules.pop(module_name, None)
+            except (OSError, ValueError):
+                continue
+        sys.path[:] = old_sys_path
+
+    if load_errors:
+        excerpt = " | ".join(load_errors)[:1800]
+        return False, f"function-style test collection failed: {excerpt}"
+    if suite.countTestCases() == 0:
+        return None
+
+    stream = StringIO()
+    runner = unittest.TextTestRunner(stream=stream, verbosity=0, warnings=None)
+    result = runner.run(suite)
+    tests_run = result.testsRun
+    fail_count = len(result.failures)
+    error_count = len(result.errors)
+    pass_count = tests_run - fail_count - error_count
+    summary = (
+        f"Ran {tests_run} function-style tests: "
+        f"{pass_count} passed, {fail_count} failed, {error_count} errors"
+    )
+    details: list[str] = []
+    for label, cases in (("FAIL", result.failures), ("ERROR", result.errors)):
+        for test_case, traceback_text in cases[:4]:
+            lines = [line.strip() for line in traceback_text.splitlines() if line.strip()]
+            evidence = [line for line in lines if (
+                line.startswith(("-", "+"))
+                or "AssertionError" in line
+                or "TypeError" in line
+                or "SyntaxError" in line
+            )]
+            evidence.extend(lines[-3:])
+            details.append(f"{label} {test_case}: {' | '.join(dict.fromkeys(evidence))[:1800]}")
+    if details:
+        summary += " — " + " || ".join(details)[:1800]
+    return pass_count == tests_run and tests_run > 0, summary
+
+
 def run_tests(path: str = ".") -> tuple[bool, str]:
     """Discover and run all tests under *path* using unittest APIs.
 
@@ -112,6 +218,28 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
                 del sys.modules[module_name]
         except (OSError, ValueError):
             continue
+
+    # unittest's discover imports a file such as ``test_api.py`` under its
+    # short module name.  That name can survive after a temporary workspace
+    # is removed, causing the next workspace with the same filename to fail
+    # with "module incorrectly imported" before collection begins.  Evict
+    # matching discovered test modules regardless of their stale directory.
+    if os.path.isfile(absolute_path):
+        discovered_basenames = {os.path.basename(absolute_path)}
+    elif os.path.isdir(absolute_path):
+        discovered_basenames = {
+            filename
+            for root, dirs, files in os.walk(absolute_path)
+            for filename in files
+            if filename.startswith("test") and filename.endswith(".py")
+        }
+    else:
+        discovered_basenames = set()
+    if discovered_basenames:
+        for module_name, module in list(sys.modules.items()):
+            module_file = getattr(module, "__file__", None)
+            if module_file and os.path.basename(module_file) in discovered_basenames:
+                sys.modules.pop(module_name, None)
     importlib.invalidate_caches()
     if os.path.isfile(absolute_path):
         start_dir = os.path.dirname(absolute_path) or os.curdir
@@ -131,6 +259,9 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
         pytest_result = _pytest_fallback(path, absolute_path)
         if pytest_result is not None:
             return pytest_result
+        function_result = _function_style_fallback(path, absolute_path)
+        if function_result is not None:
+            return function_result
         return (False, "Ran 0 tests: no tests discovered")
 
     # Run via TextTestRunner — its .run() returns a TestResult object

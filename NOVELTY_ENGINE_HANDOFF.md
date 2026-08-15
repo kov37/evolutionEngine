@@ -1758,3 +1758,25 @@ The benchmark preflight now runs both `tests.test_agent_tools` and
 tests with one environment-dependent skip in 0.13 seconds. This should be the
 first check before every long real-model cycle; model calls remain necessary
 only for actor action selection and convergence.
+
+### 2026-08-15 — dependency-free function-test fallback and cache isolation
+
+The first cascading-loop run after the preflight work found a real runner
+contract defect: after the actor repaired the syntax error, the workspace's
+valid `test_metrics.py` used a top-level `test_calculation()` function. Since
+pytest is not installed in this environment, `run_tests` returned
+`Ran 0 tests: no tests discovered` and prevented the actor from seeing the
+second, real TypeError.
+
+`workspace/run_tests_tool.py` now has a dependency-free fallback for ordinary
+top-level `test_*` functions. It loads matching test modules, executes the
+functions through unittest's result machinery, and reports bounded assertion
+or exception evidence. It does not pretend to implement pytest fixtures or
+plugins; unsupported behavior fails visibly. The runner also evicts stale
+temporary test and project modules after collection, preventing repeated
+validation calls from observing an earlier workspace's code.
+
+Regression coverage now passes 85 deterministic tests. This is model-agnostic
+runner behavior, not a special case for the cascading benchmark. The next
+real-model run should expose the TypeError after the syntax repair and allow a
+second product mutation instead of misclassifying the workspace as empty.
