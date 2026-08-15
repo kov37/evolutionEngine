@@ -1294,3 +1294,13 @@ can still use explicit argv commands to select a runner or install a declared
 dependency, but unrestricted `run_shell` is withheld along with file mutation
 tools. This is an engine policy, not a model or benchmark rule. Added plane
 classification regression checks; the deterministic suite passes 58 tests.
+
+### 2026-08-15 — earlier orientation convergence gate
+
+The Mistral control run and the Qwen3.8 probe both showed the actor spending
+its short real-model budget on repeated reads. The orientation governor now
+switches to executable progress tools after two read-only turns instead of
+three. This is a model-neutral convergence policy: it does not prescribe a
+file, patch, or benchmark-specific action; it simply prevents a third
+unchanged exploration turn. The next real run must compare first-mutation
+latency and artifact progress against the prior three-read baseline.

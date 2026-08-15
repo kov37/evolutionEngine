@@ -78,7 +78,7 @@ class KernelToolTests(unittest.TestCase):
             [m["content"] for m in checkpoint[-8:]],
             [f"evidence-{i}" for i in range(4, 12)],
         )
-        self.assertEqual(ORIENTATION_TURN_BUDGET, 3)
+        self.assertEqual(ORIENTATION_TURN_BUDGET, 2)
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -45,7 +45,10 @@ MODEL = "qwen3.6:35b-mlx"
 ITERATION_BUDGET = 20
 CHAT_TIMEOUT_SECONDS = 180
 REPAIR_TURN_BUDGET = 3
-ORIENTATION_TURN_BUDGET = 3
+# Two read-only turns are enough to establish a target in a normal workspace.
+# A third turn is a measurable convergence tax for small/medium actors, so
+# the governor must switch to an executable progress surface sooner.
+ORIENTATION_TURN_BUDGET = 2
 
 
 class ChatTimeoutError(TimeoutError):
