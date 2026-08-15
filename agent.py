@@ -9,6 +9,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 
 import argparse
 import json
+import re
 import signal
 import time
 import urllib.request
@@ -32,6 +33,7 @@ import task_contract
 import validation_contract
 import worker
 import working_state
+from lifecycle_fsm import LifecycleFSM
 from kernel.exec_tools import active_background_handles, cleanup_background_processes, stop_process
 from dispatch import dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
@@ -42,6 +44,8 @@ from registry import load_registry
 MODEL = "qwen3.6:35b-mlx"
 ITERATION_BUDGET = 20
 CHAT_TIMEOUT_SECONDS = 180
+REPAIR_TURN_BUDGET = 3
+ORIENTATION_TURN_BUDGET = 3
 
 
 class ChatTimeoutError(TimeoutError):
@@ -463,6 +467,44 @@ NUM_CTX = 65536
 MAX_CHAT_RETRIES = 20
 
 
+def _terminal_provider_error(error) -> bool:
+    """Return true for provider states where retrying cannot help."""
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(marker in text for marker in (
+        "connection refused",
+        "connection reset by peer",
+        "name or service not known",
+        "nodename nor servname",
+    ))
+
+
+def _is_validation_setup_failure(text: str) -> bool:
+    """Return whether a failed check needs command/runner recovery first.
+
+    A direct test module that exits cleanly without running a test is an
+    execution-contract failure, not a product failure. Keeping command tools
+    available lets the actor select a real runner or explicitly invoke the
+    supplied test function without editing the evidence.
+    """
+    lower = str(text or "").lower()
+    return any(marker in lower for marker in (
+        "could not start", "no such file or directory", "importerror",
+        "no tests discovered", "no test evidence", "dependency",
+        "permission denied",
+    ))
+
+
+def _force_repair_recovery(recovery_mode, repair_required, setup_failure):
+    """Return true only when a product mutation is justified by the failure.
+
+    A missing runner, dependency, or test discovery result is an execution
+    problem. Forcing an implementation rewrite in that state can destroy a
+    correct artifact, so setup recovery remains allowed to select a better
+    check instead.
+    """
+    return bool(recovery_mode and repair_required and not setup_failure)
+
+
 def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
@@ -481,7 +523,14 @@ def _completion_ready(messages, task_type, validation_plan=None, validation_evid
                 else action_governor.is_substantive_validation(name, {}, content)):
             validated = True
     if not mutated:
-        return False, "no successful write_file or patch_file call has been observed"
+        task_text = str(getattr(validation_plan, "task", "")) if validation_plan else ""
+        verification_only = bool(task_text) and not re.search(
+            r"\b(?:create|build|implement|fix|repair|modify|write|change|add|update)\b",
+            task_text,
+            re.IGNORECASE,
+        )
+        if not verification_only:
+            return False, "no successful write_file or patch_file call has been observed"
     # Validation was already assessed at dispatch time with the original
     # command arguments. Re-assessing a tool result here with ``{}`` loses the
     # endpoint/method that was present in the command and can falsely reject
@@ -560,11 +609,17 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # the governor doesn't care which state-summary mode is layered on top,
     # it only ever reads ledger.history. working_state_enabled's own branch
     # below records into this SAME ledger (no second ledger, no divergence).
-    _governed = structured_summary_enabled or working_state_enabled
+    # The risk/checkpoint layer is also part of novelty mode.  Previously it
+    # was accidentally limited to the older summary modes, so the very mode
+    # intended to improve small-model recovery could still rewrite a supplied
+    # test without a rollback path.
+    _governed = structured_summary_enabled or working_state_enabled or novelty_context_enabled
     ledger = action_governor.EvidenceLedger() if _governed else None
     contract = task_contract.CONTRACTS_BY_TYPE.get(task_type, task_contract.CODE_CHANGE_CONTRACT)
     escalation = escalation_governor.EscalationState() if _governed else None
     risk = risk_layer.RiskLayer() if _governed else None
+    if risk is not None:
+        risk.protect_existing_tests(get_root())
     # adaptive_budget.py's repo_size_hint — computed ONCE here (not derived
     # from the ledger, which would be circular, see adaptive_budget.py's
     # own docstring) from a cheap, non-recursive top-level listing. Real
@@ -608,6 +663,16 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     revalidation_attempts = 0
     successful_repair_cycles = 0
     repair_mutation_pending = False
+    completion_nudge_pending = False
+    repair_inspection_used = False
+    last_mutation_rejected = False
+    blocked_mutation_paths = set()
+    protected_edit_recovery_pending = False
+    repair_turns_used = 0
+    repair_recovery_mode = False
+    repair_recovery_entries = 0
+    orientation_turns_without_mutation = 0
+    lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
     agent_started_at = time.monotonic()
     first_tool_elapsed = None
@@ -616,9 +681,13 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
 
     def repair_metrics():
         return {
+            "lifecycle": lifecycle.metrics(),
             "validation_failures": validation_failures_total,
             "repair_mode_entries": repair_mode_entries,
             "repair_mutations": repair_mutations,
+            "repair_turns": repair_turns_used,
+            "repair_recovery_entries": repair_recovery_entries,
+            "orientation_turns_without_mutation": orientation_turns_without_mutation,
             "revalidation_attempts": revalidation_attempts,
             "successful_repair_cycles": successful_repair_cycles,
         }
@@ -692,6 +761,7 @@ You have this focused toolbelt: {offered_tool_names}.
     ]
 
     for iteration in range(1, iteration_budget + 1):
+        lifecycle.transition("turn")
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
         # The summary is appended fresh here, for this call only — never
@@ -748,6 +818,9 @@ You have this focused toolbelt: {offered_tool_names}.
         else:
             messages_for_call = messages
 
+        setup_failure = _is_validation_setup_failure(
+            f"{last_repair_packet}\n{last_validation_failure}"
+        )
         if validation_required:
             uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
             messages_for_call = messages_for_call + [{
@@ -768,6 +841,14 @@ You have this focused toolbelt: {offered_tool_names}.
                        "output to choose the next targeted check." if validation_failures else "")
                 ),
             }]
+
+        if completion_nudge_pending and not validation_required:
+            messages_for_call = messages_for_call + [{"role": "system", "content": (
+                "## Verified completion is available\n"
+                "The latest independent validation succeeded and all required evidence is covered. "
+                "Do not inspect or edit the workspace again. Call finish_task now with a short summary."
+            )}]
+            completion_nudge_pending = False
 
         if novelty_context is not None:
             if novelty_action_critic and novelty_context.requires_progress():
@@ -800,6 +881,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # quantization; it is an engine-level contract for agents that
             # need to begin changing a workspace promptly.
             first_action_names = {"write_file", "patch_file", "read_file",
+                                  "list_workspace", "find_files", "run_tests",
                                   "run_command", "finish_task"}
             tools_for_call = [t for t in tools if t.__name__ in first_action_names]
             messages_for_call = messages_for_call + [{
@@ -877,12 +959,30 @@ You have this focused toolbelt: {offered_tool_names}.
                 ),
             }]
 
+        if (not validation_required and not repair_required
+                and orientation_turns_without_mutation >= ORIENTATION_TURN_BUDGET):
+            orientation_tools = {"patch_file", "write_file", "finish_task", "recall"}
+            tools_for_call = [t for t in tools_for_call if t.__name__ in orientation_tools]
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": (
+                    "## Orientation budget exhausted\n"
+                    f"The last {orientation_turns_without_mutation} turns produced no mutation. "
+                    "You have enough evidence to act. Make one concrete implementation change now, "
+                    "or run the focused validation if the artifact is already complete. Do not reread "
+                    "unchanged files or return a plan."
+                ),
+            }]
+            print(
+                f"🧭 [orientation recovery] {orientation_turns_without_mutation} turns without mutation; "
+                "restricting the next turn to progress tools"
+            )
+
         if validation_required:
             # Validation and repair are separate states. After a failed
             # check, force an inspect/repair turn before offering another
             # check; otherwise a model can loop over superficially different
             # probes without ever changing the defective artifact.
-            setup_failure = False
             if repair_required:
                 validation_tools = {"read_file", "find_files", "search_file", "patch_file", "write_file",
                                     "diff_files", "git_diff", "process_status", "stop_process"}
@@ -892,15 +992,42 @@ You have this focused toolbelt: {offered_tool_names}.
                 # install an explicitly required dependency, or rerun from a
                 # valid target. Keep this conditional so ordinary failures
                 # still force an implementation mutation before probing again.
-                setup_failure = any(marker in last_repair_packet.lower() for marker in (
-                    "could not start", "no such file or directory", "importerror",
-                    "no tests discovered", "dependency", "permission denied",
-                ))
+                setup_failure = _is_validation_setup_failure(last_repair_packet)
                 if setup_failure:
                     validation_tools.update({"run_tests", "run_command", "run_shell"})
+                elif repair_inspection_used:
+                    # Give the actor one targeted look at the reported code,
+                    # then remove read-only escape hatches until it mutates.
+                    validation_tools -= {"read_file", "find_files", "search_file", "list_workspace",
+                                         "list_dir", "list_symbols", "grep_dir"}
+                if last_mutation_rejected:
+                    # A rejected mutation is a strong signal that a broad
+                    # rewrite is unsafe. Keep the recovery turn on the
+                    # checkpointed file and require a narrow patch instead of
+                    # letting the actor replace the whole artifact again.
+                    validation_tools.discard("write_file")
+                if validation_failures >= 2 and not setup_failure:
+                    # Repeated behavioral failures mean a full rewrite is
+                    # destroying useful state. Force the actor to preserve
+                    # the current artifact and make a localized patch.
+                    validation_tools.discard("write_file")
+                if protected_edit_recovery_pending:
+                    # After a protected-test rejection, force one fresh
+                    # executable check before allowing another edit proposal.
+                    validation_tools -= {"patch_file", "write_file"}
+                    validation_tools.update({"run_tests", "run_command", "run_shell"})
+                if _force_repair_recovery(repair_recovery_mode, repair_required, setup_failure):
+                    # Repeated non-progress makes more observation
+                    # counterproductive. Force a mutation representation,
+                    # while retaining diff/finish for a safe handoff.
+                    validation_tools = {"patch_file", "write_file", "diff_files", "git_diff", "finish_task"}
             else:
                 validation_tools = {"run_tests", "run_command", "run_shell", "process_status", "stop_process",
                                     "diff_files", "git_diff"}
+            gate_banned = novelty_context.consume_gate_restrictions() if novelty_context is not None else set()
+            if gate_banned:
+                validation_tools -= gate_banned
+                print(f"🚦 [4B triage gate] tools removed: {sorted(gate_banned)}")
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
             repair_instruction = (
                 "A validation check failed. Repair the execution/setup problem first; you may retry with an "
@@ -913,11 +1040,34 @@ You have this focused toolbelt: {offered_tool_names}.
                     repair_instruction
                     + "Do not run another check or finish until you have changed the defective artifact, unless "
                     + "the failure is solely execution/setup-related. "
+                    + "When the failure is an assertion or contract mismatch, compare the actual and expected "
+                    + "values semantically: fix the computation, shape, ordering, or value meaning—not merely "
+                    + "the reported types or formatting. "
+                    + "For stateful behavior, trace the test operations in their exact written order and identify "
+                    + "which state transition produced the observed value before editing. Do not narrate a hypothesis "
+                    + "without a tool call; make one concrete localized mutation, then validate it. "
+                    + "For unittest diffs, a '-' line is the actual value and a '+' line is the expected value; "
+                    + "preserve meaningful case, nesting, and ordering distinctions. "
+                    + ("The previous mutation was rejected by the tool. Do not repeat that exact edit; use a "
+                       "different valid mutation representation and account for the rejection message. "
+                       "Prefer patch_file with a small complete replacement; do not rewrite the whole file. "
+                       if last_mutation_rejected else "")
+                    + ("After two or more failed validations, use patch_file only and preserve the existing "
+                       "implementation structure; do not replace the whole file. "
+                       if validation_failures >= 2 and not setup_failure else "")
                     + "Treat the validation script as evidence, not the artifact: do not weaken or rewrite "
                     + "the probe to make it pass. Only change the probe for an explicit dependency, setup, "
                     + "or syntax failure; otherwise repair the implementation named by the evidence. "
                     + "Failure evidence:\n"
                     + last_repair_packet
+                    + ("\nRepeated semantic failure: trace the reported actual value back to each "
+                       "contributing input or state transition, compare that trace with the expected "
+                       "value, and then make one concrete mutation. Do not speculate, reread unchanged "
+                       "files repeatedly, or repeat the same edit."
+                       if validation_failures >= 2 and not setup_failure else "")
+                    + ("\nRepair lock: the failure has already been inspected. Make one targeted mutation now; "
+                       "do not reread the same file or explain the problem."
+                       if repair_inspection_used else "")
                 )
             else:
                 validation_prompt = (
@@ -927,6 +1077,22 @@ You have this focused toolbelt: {offered_tool_names}.
             messages_for_call = messages_for_call + [{
                 "role": "system",
                 "content": validation_prompt,
+            }]
+
+        if _force_repair_recovery(repair_recovery_mode, repair_required, setup_failure):
+            # Keep the stable task foundation and recent evidence, then force
+            # a concrete mutation. This is a compact repair checkpoint, not a
+            # second unbounded transcript.
+            messages_for_call = _intervention_messages(messages_for_call, tail=8)
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": (
+                    "## Repair checkpoint\n"
+                    f"Three repair turns produced no mutation. Latest failure:\n{last_repair_packet}\n"
+                    "Use the evidence already gathered. Make exactly one targeted patch to the implicated "
+                    "implementation now; do not reread unchanged files, start another service, or run another "
+                    "probe first. Preserve the supplied validation artifact."
+                ),
             }]
 
         response = None
@@ -970,6 +1136,17 @@ You have this focused toolbelt: {offered_tool_names}.
                     recent_errors.append(f"iter {iteration}: transport timeout: {e}")
                     recent_errors[:] = recent_errors[-5:]
                     print(f"⚠️  transport timeout; ending run cleanly: {e}")
+                    break
+                error_text = f"{type(e).__name__}: {e}".lower()
+                if "xml syntax error" in error_text and attempt >= 2:
+                    recent_errors.append(f"iter {iteration}: repeated malformed tool response: {e}")
+                    recent_errors[:] = recent_errors[-5:]
+                    print(f"⚠️  repeated malformed tool response; ending run cleanly: {e}")
+                    break
+                if _terminal_provider_error(e):
+                    recent_errors.append(f"iter {iteration}: provider unavailable: {e}")
+                    recent_errors[:] = recent_errors[-5:]
+                    print(f"⚠️  provider unavailable; ending run cleanly instead of retrying: {e}")
                     break
                 print(f"⚠️  chat() failed (attempt {attempt}/{MAX_CHAT_RETRIES}): {type(e).__name__}: {e}")
                 recent_errors.append(f"iter {iteration}: chat() {type(e).__name__}: {e}")
@@ -1059,7 +1236,8 @@ You have this focused toolbelt: {offered_tool_names}.
         allowed_names = {t.__name__ for t in tools_for_call}
         blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
         tool_messages = dispatch_tool_calls(
-            msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls
+            msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls,
+            blocked_mutation_paths=blocked_mutation_paths,
         )
         messages.extend(tool_messages)
         # This runs regardless of which optional memory mode is enabled.
@@ -1067,6 +1245,7 @@ You have this focused toolbelt: {offered_tool_names}.
         _bound_live_tool_results(messages, live_tool_char_budget)
 
         validation_phase_before_turn = validation_required
+        repair_turn_before_dispatch = repair_required or validation_failures > 0
         turn_mutated = False
         turn_validation_succeeded = False
         turn_validation_failed = False
@@ -1076,9 +1255,37 @@ You have this focused toolbelt: {offered_tool_names}.
             args = call.function.arguments or {}
             capability = action_governor.classify(tool_name, args)
             result = tmsg.get("content", "")
+            if _governed and capability == "MUTATE" and args.get("path"):
+                rejection = risk.reject_destructive_rewrite(
+                    args["path"], io_tools._resolve(args["path"]),
+                    tool_name=tool_name, repair_turn=repair_turn_before_dispatch,
+                )
+                if rejection is None:
+                    rejection = risk.reject_protected_test_mutation(
+                        args["path"], io_tools._resolve(args["path"]),
+                        repair_turn=repair_turn_before_dispatch,
+                    )
+                if rejection:
+                    result = "REJECTED: " + rejection
+                    tmsg["content"] = result
+                    if "protected test" in rejection.lower():
+                        blocked_mutation_paths.add(args["path"])
+                        protected_edit_recovery_pending = True
+                    print(f"🛡️ [risk layer] {result}")
+            if repair_required and tool_name in {
+                "read_file", "find_files", "search_file", "list_workspace", "list_dir", "list_symbols", "grep_dir"
+            }:
+                repair_inspection_used = True
+            if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
+                last_mutation_rejected = True
             success = action_governor.infer_success(capability, tool_name, result)
+            if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
+                # A governor heuristic must never turn a failed mutation into
+                # a successful repair cycle and reopen broad editing.
+                success = False
             if capability == "MUTATE" and success is True:
                 turn_mutated = True
+                last_mutation_rejected = False
                 if first_mutation_elapsed is None:
                     first_mutation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first mutation] {first_mutation_elapsed:.3f}s")
@@ -1086,7 +1293,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # validation even when the command is an app/API smoke test rather
             # than a pytest command and the general classifier calls it OBSERVE.
             phase_validation = validation_required and tool_name in {
-                "run_tests", "run_command", "run_shell", "diff_files", "git_diff"
+                "run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"
             }
             if phase_validation:
                 revalidation_attempts += 1
@@ -1094,6 +1301,10 @@ You have this focused toolbelt: {offered_tool_names}.
                     first_validation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first validation] {first_validation_elapsed:.3f}s")
             if capability == "VALIDATE" or phase_validation:
+                if protected_edit_recovery_pending and tool_name in {
+                    "run_tests", "run_command", "run_shell",
+                }:
+                    protected_edit_recovery_pending = False
                 if validation_plan.is_lifecycle_setup(tool_name, args, result):
                     # Process startup/status/cleanup is setup, not proof of
                     # application behavior. Keep the validation phase open
@@ -1110,12 +1321,19 @@ You have this focused toolbelt: {offered_tool_names}.
                 elif phase_validation:
                     turn_validation_failed = True
                     validation_suggestions.append(assessment[1])
+        if repair_turn_before_dispatch:
+            repair_turns_used += 1
+            print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")
         if turn_mutated:
+            lifecycle.transition("mutation")
             if repair_required:
                 repair_mutations += 1
                 repair_mutation_pending = True
                 repair_required = False
+                repair_inspection_used = False
                 validation_failures = 0
+                repair_turns_used = 0
+                repair_recovery_mode = False
                 print("🛠️  [repair phase] targeted mutation landed; returning to validation")
             validation_required = True
             validation_failures = 0
@@ -1126,31 +1344,67 @@ You have this focused toolbelt: {offered_tool_names}.
                     print(f"♻️ [stale service] automatic stop: {stop_process(handle)}")
                 stale_service_restart_pending = True
                 print(f"♻️ [stale service] restart required after mutation: {stale_service_handles}")
+        if not validation_required and not repair_required:
+            if turn_mutated:
+                orientation_turns_without_mutation = 0
+            else:
+                orientation_turns_without_mutation += 1
         if turn_validation_failed and validation_required:
+            lifecycle.transition("validation_failed")
             if not repair_required:
                 repair_mode_entries += 1
             validation_failures_total += 1
             validation_failures += 1
             repair_required = True
+            repair_inspection_used = False
             failed_packets = []
             for call, tmsg in zip(msg.tool_calls, tool_messages):
                 name = call.function.name
                 args = call.function.arguments or {}
-                if name in {"run_tests", "run_command", "run_shell", "diff_files", "git_diff"}:
-                    packet = validation_plan.failure_packet(name, args, tmsg.get("content", ""))
+                if name in {"run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"}:
+                    packet = validation_plan.synthesize_failure_feedback(
+                        name, args, tmsg.get("content", "")
+                    )
                     failed_packets.append(packet)
-            last_repair_packet = "\n\n".join(failed_packets)[-3000:]
+            # A repair turn may only inspect the evidence. Do not erase the
+            # previous failure packet in that case; recovery decisions still
+            # need to know whether the active problem is setup or behavior.
+            if failed_packets:
+                last_repair_packet = "\n\n".join(failed_packets)[-3000:]
             last_validation_failure = "; ".join(dict.fromkeys(s for s in validation_suggestions if s))[-1200:]
             messages.append({"role": "system", "content": (
                 last_repair_packet or ("Validation feedback: " + "; ".join(dict.fromkeys(s for s in validation_suggestions if s)))
             )})
+            if novelty_context is not None and last_repair_packet:
+                gate_judgment = novelty_context.synchronous_triage(
+                    iteration,
+                    lifecycle.state.value,
+                    last_repair_packet,
+                    legal_actions=("patch_file", "write_file", "run_tests", "run_command", "run_shell", "finish_task"),
+                    protected_paths=tuple(sorted(blocked_mutation_paths)),
+                )
+                print(
+                    f"🚦 [4B triage gate] class={gate_judgment.failure_class} "
+                    f"next={gate_judgment.next_action or gate_judgment.recommended_action} "
+                    f"confidence={gate_judgment.confidence:.2f}"
+                )
             print(f"⚠️  [validation phase] validation failed ({validation_failures}); targeted repair required before recheck")
+        if (repair_required and not turn_mutated and repair_turns_used >= REPAIR_TURN_BUDGET
+                and not repair_recovery_mode):
+            lifecycle.transition("recovery_budget_exhausted")
+            repair_recovery_mode = True
+            repair_recovery_entries += 1
+            print(
+                f"🧭 [repair recovery] budget exhausted after {repair_turns_used} turns; "
+                "compacting checkpoint and forcing a targeted mutation"
+            )
         if turn_validation_succeeded:
             if repair_mutation_pending:
                 successful_repair_cycles += 1
                 repair_mutation_pending = False
             uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
             if uncovered:
+                lifecycle.transition("validation_partial")
                 # One passing probe is useful evidence, but it is not enough
                 # when the task names several interfaces. Keep the actor in a
                 # focused validation phase until every interface is covered.
@@ -1158,9 +1412,19 @@ You have this focused toolbelt: {offered_tool_names}.
                 validation_failures = 0
                 print("✅ [validation phase] probe succeeded; still required: " + ", ".join(uncovered))
             else:
+                lifecycle.transition("validation_passed")
                 validation_required = False
                 validation_failures = 0
-                print("✅ [validation phase] independent validation succeeded; edits reopened")
+                # Independent validation is the authoritative completion
+                # signal. Waiting for one more model turn to call
+                # finish_task wastes tokens and can strand a correct artifact
+                # behind a slow actor/provider. The model's summary is useful,
+                # but it is not stronger evidence than the accepted check.
+                TASK_STATE["summary"] = (
+                    "Completed after independent validation; all required acceptance evidence passed."
+                )
+                approve_task()
+                print("✅ [orchestrator completion] independent validation succeeded; task is complete")
 
         if novelty_context is not None:
             for call, tmsg in zip(msg.tool_calls, tool_messages):
@@ -1168,7 +1432,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 tool_name = call.function.name
                 capability = action_governor.classify(tool_name, args)
                 phase_validation = validation_phase_before_turn and tool_name in {
-                    "run_tests", "run_command", "run_shell", "diff_files", "git_diff"
+                    "run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"
                 }
                 novelty_context.observe(
                     iteration, tool_name, args, tmsg["content"],

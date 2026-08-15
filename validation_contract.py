@@ -10,19 +10,80 @@ from dataclasses import dataclass
 import re
 
 
+def _failure_diagnostic(text: str) -> str:
+    """Extract compact exception and assertion-diff evidence."""
+    raw = str(text or "")
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    useful = [line for line in lines if re.search(
+        r"(?:SyntaxError|TypeError|ValueError|KeyError|ImportError|ModuleNotFoundError):", line
+    )]
+    minus = [line[1:].strip() for line in lines if line.startswith("-") and not line.startswith("---")]
+    plus = [line[1:].strip() for line in lines if line.startswith("+") and not line.startswith("+++")]
+    if minus and plus:
+        useful.append("actual vs expected (unittest '-' is actual, '+' is expected): "
+                      + " | ".join(minus[:4]) + " => " + " | ".join(plus[:4]))
+    return "\n".join(dict.fromkeys(useful))[:1200]
+
+
 _CRITERION_RE = re.compile(
     r"(?:^|\n|[.;])\s*(?:[-*]\s*)?(?:(?:the\s+)?(?:app|program|agent|implementation)\s+)?"
     r"(?:must|should|shall|needs? to|support(?:s)?|return(?:s)?|expose(?:s)?|include(?:s)?|verify(?:\s+that)?|test(?:s)?)\b"
     r"[^\n.;]{4,180}", re.IGNORECASE,
 )
 _ENDPOINT_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+(/[A-Za-z0-9_./:{}?=&%-]+)", re.IGNORECASE)
-_PATH_RE = re.compile(r"(?<!\w)(/[A-Za-z][A-Za-z0-9_./{}?=&%-]*)")
+# Do not treat the host portion of a URL (the second slash in
+# ``http://localhost``) as an application endpoint. Real path tokens must not
+# be preceded by a word character or another slash.
+_PATH_RE = re.compile(r"(?<![/\w])(/[A-Za-z][A-Za-z0-9_./{}?=&%-]*)")
 _CLAUSE_RE = re.compile(
     r"\b(?:must|should|support|expose|serve|return|validate|include|test|start)\b"
     r"[^,.;\n]{4,160}", re.IGNORECASE,
 )
 _FIELD_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:string|number|integer|boolean|bool)\b", re.I)
 _STATUS_RE = re.compile(r"\bstatus\s*[=:]\s*([A-Za-z0-9_-]+)", re.I)
+
+
+def assertion_driven_tool_contract(tool_name, arguments, result_content):
+    """Classify raw tool output before applying task-specific assertions.
+
+    A zero exit code is only execution success. It is not automatically
+    behavioral evidence. This small shared contract keeps setup, failure, and
+    evidence distinct for every task and model.
+    """
+    text = str(result_content or "")
+    if text.startswith(("ERROR:", "REJECTED:")):
+        return {"success": False, "evidence": False, "setup_only": False,
+                "reason": "tool execution failed"}
+    args = arguments or {}
+    if tool_name == "run_tests":
+        passed = text.startswith("(True,")
+        return {"success": passed, "evidence": passed, "setup_only": False,
+                "reason": "test runner result" if passed else "test runner failed"}
+    if tool_name in {"run_command", "run_shell"}:
+        if args.get("background") is True or text.startswith("Started background process."):
+            return {"success": True, "evidence": False, "setup_only": True,
+                    "reason": "background process setup is not behavioral evidence"}
+        if "Exit code: 0" not in text:
+            return {"success": False, "evidence": False, "setup_only": False,
+                    "reason": "command did not exit successfully"}
+        command = args.get("command", "")
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command)
+        evidence = bool(re.search(
+            r"\b(assert(?:ion)?|received|connected|response|message|pong|websocket|"
+            r"handshake|round[- ]?trip|passed|success(?:ful)?)\b",
+            f"{command} {text}", re.I,
+        ) or re.search(r"\b(?:curl|wget|urllib)\b\s+[^\n]*[/]", str(command), re.I))
+        return {"success": True, "evidence": evidence, "setup_only": False,
+                "reason": "behavioral evidence present" if evidence else
+                          "zero exit code without a behavioral assertion"}
+    if tool_name == "process_status":
+        running = "RUNNING" in text
+        return {"success": running, "evidence": False, "setup_only": True,
+                "reason": "process readiness is setup, not behavioral evidence" if running else
+                          "process is not running"}
+    return {"success": False, "evidence": False, "setup_only": False,
+            "reason": "tool does not provide executable behavioral evidence"}
 
 
 def _inferred_response_requirements(text):
@@ -113,8 +174,11 @@ class ValidationContract:
     def assess(self, tool_name, arguments, result_content):
         """Return (accepted, reason, suggestion, evidence_key, hits)."""
         text = str(result_content or "")
-        if text.startswith(("ERROR:", "REJECTED:")):
+        base_contract = assertion_driven_tool_contract(tool_name, arguments, text)
+        if not base_contract["success"]:
             return False, "the validation tool failed to execute", "fix the command or test invocation and rerun it", None, ()
+        if base_contract["setup_only"]:
+            return False, base_contract["reason"], "complete the setup, then run a focused behavioral check", None, ()
         command = (arguments or {}).get("command", "")
         if isinstance(command, list):
             command = " ".join(str(x) for x in command)
@@ -127,6 +191,37 @@ class ValidationContract:
             passed = False
         if not passed:
             return False, "the executable check did not pass", "read the failure output, repair the implementation, and rerun the focused check", None, ()
+        # A pytest-style module can exit zero when run as a plain script while
+        # executing zero test functions. Never treat that silent command as
+        # behavioral evidence; require a runner or an explicit test call.
+        direct_test_file = re.search(
+            r"\bpython3?\s+(?:[^\s]+/)?test[_-][^\s/]+\.py\b", str(command), re.I
+        )
+        stdout = text.split("STDOUT:", 1)[1].split("STDERR:", 1)[0].strip() if "STDOUT:" in text else text
+        stderr = text.split("STDERR:", 1)[1].strip() if "STDERR:" in text else ""
+        if direct_test_file and not stdout and not stderr and "-m" not in str(command):
+            return (
+                False,
+                "the test module ran as a script but produced no test evidence",
+                "invoke an installed test runner or explicitly call the provided test function, then rerun it",
+                None,
+                (),
+            )
+        runner_command = bool(re.search(r"\b(?:pytest|unittest)\b", str(command), re.I))
+        no_tests_reported = bool(re.search(
+            r"\b(?:ran\s+0\s+tests?|no\s+tests?(?:\s+were)?\s+(?:discovered|found|ran)|"
+            r"collected\s+0\s+items?)\b",
+            probe,
+            re.I,
+        ))
+        if runner_command and no_tests_reported:
+            return (
+                False,
+                "the test runner exited successfully but discovered zero tests",
+                "run a focused test module or a runner command that reports at least one executed test",
+                None,
+                (),
+            )
         endpoint_hits = tuple(p for p in self.endpoints if p.lower() in probe)
         operation_hits = []
         for operation in self.operations:
@@ -148,8 +243,30 @@ class ValidationContract:
             endpoint_hits and any(p.lower().endswith("/health") for p in endpoint_hits)
             and re.search(r"[\"']?status[\"']?\s*[=:]\s*[\"']?ok\b", probe, re.I)
         )
-        if tool_name != "run_tests" and not health_evidence and not re.search(r"\b(assert|check|verify|test(?:ing)?|pytest|unittest|curl|wget|http|urllib|health|status)\b", probe, re.I):
+        if tool_name != "run_tests" and not health_evidence and not re.search(
+            r"\b(assert(?:ion)?|check|verify|test(?:ing|ed)?|pytest|unittest|curl|wget|http|urllib|health|status|"
+            r"received|connected|response|message|pong|websocket|passed)\b|"
+            r"\btest[_-][A-Za-z0-9_-]+",
+            probe,
+            re.I,
+        ):
             return False, "the command passed but does not show an assertion or behavioral probe", "replace the smoke command with a focused test or request that asserts the requested behavior", None, ()
+        # A command name is not evidence.  In particular, a successful curl
+        # can still return a protocol error page (for example, a WebSocket
+        # endpoint replying ``Upgrade Required``).  For web tasks without a
+        # conventional HTTP endpoint, require the command's actual output to
+        # describe an observed interaction or assertion.  This stays
+        # provider/model agnostic while preventing premature completion on a
+        # clean process exit alone.
+        if (tool_name != "run_tests" and "web" in self.categories and not self.endpoints
+                and not re.search(
+                    r"\b(assert(?:ion)?|verif(?:y|ied)|pass(?:ed)?|success(?:ful)?|"
+                    r"received|connected|response|message|pong|websocket|"
+                    r"handshake|round[- ]?trip|sent)\b",
+                    stdout + " " + stderr,
+                    re.I,
+                )):
+            return False, "the web command exited cleanly but produced no interaction evidence", "run a real client or focused browser check and report the observed response or assertion", None, ()
         hits = tuple(c for c in self.criteria if any(word.lower() in probe for word in _meaningful_words(c)))
         if self.operations and not operation_hits and self.categories.intersection({"api", "web"}):
             return False, "the passing check did not exercise a required HTTP operation", "send a request using the required HTTP method and endpoint, then assert its response", None, ()
@@ -230,6 +347,10 @@ class ValidationContract:
             return text.startswith("Stopped process")
         return False
 
+    def synthesize_failure_feedback(self, tool_name, arguments, result_content):
+        """Return bounded next-action feedback for a failed tool result."""
+        return self.failure_packet(tool_name, arguments, result_content)[:2200]
+
     def failure_packet(self, tool_name, arguments, result_content):
         """Render compact, actionable evidence for the mandatory repair turn."""
         text = str(result_content or "")
@@ -260,7 +381,13 @@ class ValidationContract:
         if not observed:
             observed = "(no tool output)"
         lower_observed = observed.lower()
-        if "modulenotfounderror" in lower_observed or "no module named" in lower_observed:
+        diagnostic = _failure_diagnostic(observed)
+        if re.search(r"\b(?:no\s+tests?\s+ran|ran\s+0\s+tests?|collected\s+0\s+items?)\b", lower_observed):
+            next_action = (
+                "the command did not execute any assertions; inspect the supplied test file and either invoke "
+                "its test function directly or use the correct installed test runner, then rerun the focused check"
+            )
+        elif "modulenotfounderror" in lower_observed or "no module named" in lower_observed:
             next_action = (
                 "inspect project declarations and determine whether the missing dependency is required; if required, "
                 "install it through the project's normal workflow and record it in the dependency declaration, "
@@ -285,8 +412,11 @@ class ValidationContract:
             f"Failed probe: {str(command).strip() or tool_name}\n"
             "Expected:\n- " + "\n- ".join(expected) + "\n"
             "Observed failure:\n" + observed + "\n"
-            "Next repair focus:\n" + next_action + "\n"
-            "Constraint: make one concrete mutation now; do not rerun the same check unchanged."
+            + ("Structured diagnosis:\n" + diagnostic + "\n" if diagnostic else "")
+            + "Next repair focus:\n" + next_action + "\n"
+            "Constraint: make one concrete mutation now; do not rerun the same check unchanged. "
+            "If actual and expected values differ, treat that difference as a behavioral contract to explain, "
+            "not only as a type or syntax problem."
         )
 
 

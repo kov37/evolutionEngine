@@ -22,7 +22,20 @@ import shutil
 import sys
 import tempfile
 import unittest
+import importlib
+import signal
 from io import StringIO
+
+
+RUN_TESTS_TIMEOUT_SECONDS = 30
+
+
+class _TestRunTimeout(BaseException):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _TestRunTimeout
 
 
 def run_tests(path: str = ".") -> tuple[bool, str]:
@@ -44,6 +57,26 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     # normalize a file target into its parent directory plus an exact pattern
     # so the tool contract remains ergonomic and deterministic.
     absolute_path = os.path.abspath(path)
+    # This tool is called repeatedly inside one long-lived agent process.
+    # unittest imports test modules normally, so a second validation can
+    # otherwise reuse the first version of the implementation from
+    # sys.modules after the agent has edited it. Remove modules belonging to
+    # the target tree before discovery so validation observes the filesystem,
+    # not Python's previous in-process snapshot.
+    target_root = os.path.realpath(
+        absolute_path if os.path.isdir(absolute_path) else os.path.dirname(absolute_path)
+    )
+    for module_name, module in list(sys.modules.items()):
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            continue
+        try:
+            module_real = os.path.realpath(module_file)
+            if os.path.commonpath((target_root, module_real)) == target_root:
+                del sys.modules[module_name]
+        except (OSError, ValueError):
+            continue
+    importlib.invalidate_caches()
     if os.path.isfile(absolute_path):
         start_dir = os.path.dirname(absolute_path) or os.curdir
         pattern = os.path.basename(absolute_path)
@@ -68,11 +101,22 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
         verbosity=0,
         warnings=None,  # suppress warning filter in Python 3.8+
     )
-    result: unittest.TestResult = runner.run(suite)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.setitimer(signal.ITIMER_REAL, RUN_TESTS_TIMEOUT_SECONDS)
+    try:
+        result: unittest.TestResult = runner.run(suite)
+    except _TestRunTimeout:
+        return (False, f"Test run timed out after {RUN_TESTS_TIMEOUT_SECONDS}s; the implementation may be stuck")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
     tests_run: int = result.testsRun
     fail_count: int = len(result.failures)
     error_count: int = len(result.errors)
+    if any("_TestRunTimeout" in traceback_text for _, traceback_text in result.errors):
+        return (False, f"Test run timed out after {RUN_TESTS_TIMEOUT_SECONDS}s; the implementation may be stuck")
     skip_count: int = len(result.skipped) if hasattr(result, "skipped") else 0
     pass_count: int = tests_run - fail_count - error_count
 
@@ -90,9 +134,19 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     details: list[str] = []
     for label, cases in (("FAIL", result.failures), ("ERROR", result.errors)):
         for test_case, traceback_text in cases[:4]:
-            detail = traceback_text.strip().splitlines()
-            tail = " | ".join(line.strip() for line in detail[-3:] if line.strip())
-            details.append(f"{label} {test_case}: {tail}")
+            detail = [line.strip() for line in traceback_text.strip().splitlines() if line.strip()]
+            # Keep assertion direction and values, not just the traceback
+            # tail. The tail often contains only the last compared field and
+            # hides the actual/expected contract that the repair actor needs.
+            evidence = [line for line in detail if (
+                line.startswith(("-", "+"))
+                or "AssertionError" in line
+                or "TypeError" in line
+                or "SyntaxError" in line
+            )]
+            evidence.extend(detail[-3:])
+            excerpt = " | ".join(dict.fromkeys(evidence))[:1800]
+            details.append(f"{label} {test_case}: {excerpt}")
     if details:
         summary += " — " + " || ".join(details)[:1800]
 

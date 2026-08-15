@@ -2,12 +2,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import _completion_ready, _intervention_messages
-from dispatch import _format_result, dispatch_tool_calls
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _terminal_provider_error
+from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
+from kernel.io_tools import patch_file, validate_python_syntax
+from risk_layer import RiskLayer
+from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
+from validation_contract import _failure_diagnostic, assertion_driven_tool_contract, from_task
+from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
+from workspace import run_tests_tool
+from workspace.run_tests_tool import run_tests
 
 
 class _FakeMessage:
@@ -21,6 +28,305 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_lifecycle_fsm_has_deterministic_repair_path(self):
+        fsm = LifecycleFSM()
+        self.assertEqual(fsm.transition("turn"), LifecycleState.ACT)
+        self.assertEqual(fsm.transition("mutation"), LifecycleState.VALIDATE)
+        self.assertEqual(fsm.transition("validation_failed"), LifecycleState.REPAIR)
+        self.assertEqual(fsm.transition("recovery_budget_exhausted"), LifecycleState.RECOVER)
+        self.assertEqual(fsm.transition("mutation"), LifecycleState.VALIDATE)
+        self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
+        self.assertEqual(fsm.metrics()["transitions"], 6)
+
+    def test_lifecycle_fsm_rejects_impossible_transition(self):
+        fsm = LifecycleFSM()
+        with self.assertRaises(InvalidTransition):
+            fsm.transition("validation_passed")
+
+    def test_lifecycle_fsm_completes_from_setup_recovery(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        fsm.transition("mutation")
+        fsm.transition("validation_failed")
+        fsm.transition("recovery_budget_exhausted")
+        self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
+
+    def test_setup_failure_never_forces_product_rewrite(self):
+        self.assertFalse(_force_repair_recovery(True, True, True))
+        self.assertTrue(_force_repair_recovery(True, True, False))
+        self.assertFalse(_force_repair_recovery(False, True, False))
+
+    def test_recovery_guard_is_safe_before_first_validation(self):
+        self.assertFalse(_force_repair_recovery(False, False, False))
+
+    def test_setup_classification_survives_compact_failure_summary(self):
+        self.assertTrue(_is_validation_setup_failure(
+            "the test module produced no test evidence; invoke a test runner"
+        ))
+
+    def test_repair_budget_checkpoint_is_bounded(self):
+        self.assertEqual(REPAIR_TURN_BUDGET, 3)
+        checkpoint = _intervention_messages(
+            [{"role": "system", "content": "foundation"},
+             {"role": "user", "content": "task"}] +
+            [{"role": "tool", "content": f"evidence-{i}"} for i in range(12)],
+            tail=8,
+        )
+        self.assertEqual(checkpoint[0]["content"], "foundation")
+        self.assertEqual(checkpoint[1]["content"], "task")
+        self.assertEqual(
+            [m["content"] for m in checkpoint[-8:]],
+            [f"evidence-{i}" for i in range(4, 12)],
+        )
+        self.assertEqual(ORIENTATION_TURN_BUDGET, 3)
+
+    def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "service.py"
+            original = "\n".join(f"def helper_{i}(): return {i}" for i in range(12)) + "\n"
+            target.write_text(original, encoding="utf-8")
+            layer = RiskLayer()
+            layer.checkpoint("service.py", str(target), turn=1)
+            target.write_text("def helper_0(): return 999\n", encoding="utf-8")
+            reason = layer.reject_destructive_rewrite(
+                "service.py", str(target), tool_name="write_file", repair_turn=True,
+            )
+            self.assertIsNotNone(reason)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+    def test_risk_layer_allows_initial_and_surgical_rewrites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "service.py"
+            target.write_text("\n".join(f"def helper_{i}(): return {i}" for i in range(12)) + "\n", encoding="utf-8")
+            layer = RiskLayer()
+            layer.checkpoint("service.py", str(target), turn=1)
+            target.write_text("\n".join(f"def helper_{i}(): return {999 if i == 0 else i}" for i in range(12)) + "\n", encoding="utf-8")
+            self.assertIsNone(layer.reject_destructive_rewrite(
+                "service.py", str(target), tool_name="write_file", repair_turn=True,
+            ))
+            self.assertIsNone(layer.reject_destructive_rewrite(
+                "service.py", str(target), tool_name="write_file", repair_turn=False,
+            ))
+
+    def test_risk_layer_protects_existing_tests_but_allows_new_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supplied = root / "test_contract.py"
+            supplied.write_text("def test_contract(): pass\n", encoding="utf-8")
+            layer = RiskLayer()
+            layer.protect_existing_tests(tmp)
+            layer.checkpoint("test_contract.py", str(supplied), turn=1)
+            supplied.write_text("def test_contract(): assert False\n", encoding="utf-8")
+            reason = layer.reject_protected_test_mutation(
+                "test_contract.py", str(supplied), repair_turn=True,
+            )
+            self.assertIsNotNone(reason)
+            self.assertEqual(supplied.read_text(encoding="utf-8"), "def test_contract(): pass\n")
+            self.assertIsNone(layer.reject_protected_test_mutation(
+                "new_test.py", str(root / "new_test.py"), repair_turn=True,
+            ))
+    def test_run_tests_timeout_is_reported_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_hang.py").write_text(
+                "import time\nimport unittest\n"
+                "class Contract(unittest.TestCase):\n"
+                "    def test_hangs(self):\n"
+                "        time.sleep(0.05)\n",
+                encoding="utf-8",
+            )
+            previous = run_tests_tool.RUN_TESTS_TIMEOUT_SECONDS
+            run_tests_tool.RUN_TESTS_TIMEOUT_SECONDS = 0.01
+            try:
+                success, summary = run_tests(str(root))
+            finally:
+                run_tests_tool.RUN_TESTS_TIMEOUT_SECONDS = previous
+            self.assertFalse(success)
+            self.assertIn("timed out", summary)
+
+    def test_dispatch_normalizes_common_command_schema_drift(self):
+        self.assertEqual(
+            _normalize_tool_arguments(
+                "run_command",
+                {"argv": '["python3", "-m", "unittest"]', "timeout_ms": 2500},
+            ),
+            {"command": ["python3", "-m", "unittest"], "timeout": 3},
+        )
+        self.assertEqual(
+            _normalize_tool_arguments("run_command", {"command": "python3 -V"})["command"],
+            ["python3", "-V"],
+        )
+        self.assertNotIn(
+            "cwd",
+            _normalize_tool_arguments("run_command", {"command": ["python3"], "cwd": '"."'}),
+        )
+
+    def test_dispatch_blocks_a_rejected_protected_mutation_path(self):
+        class Call:
+            class Function:
+                name = "patch_file"
+                arguments = {"path": "test_contract.py", "search": "x", "replace": "y"}
+            function = Function()
+        messages = dispatch_tool_calls(
+            [Call()], {"patch_file": lambda **_: "should not run"},
+            blocked_mutation_paths={"test_contract.py"},
+        )
+        self.assertTrue(messages[0]["content"].startswith("REJECTED:"))
+        self.assertIn("blocked", messages[0]["content"])
+        self.assertEqual(
+            _normalize_tool_arguments(
+                "run_command",
+                {"command": ["python3"], "timeout": "30,\nbackground=False]"},
+            )["timeout"],
+            30,
+        )
+
+    def test_web_validation_rejects_clean_protocol_error_without_evidence(self):
+        contract = from_task(
+            "Build a WebSocket server and run a real local client smoke test."
+        )
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["curl", "http://127.0.0.1:8080"]},
+            "Exit code: 0\nSTDOUT:\nUpgrade Required\nSTDERR:\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("interaction evidence", reason)
+
+    def test_web_validation_rejects_dependency_setup_output(self):
+        contract = from_task(
+            "Build a WebSocket server and run a real local client smoke test."
+        )
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["npm", "init", "-y"]},
+            "Exit code: 0\nWrote package.json with scripts.test\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("interaction evidence", reason)
+
+    def test_assertion_contract_separates_setup_from_evidence(self):
+        setup = assertion_driven_tool_contract(
+            "run_command", {"command": ["npm", "install"]},
+            "Exit code: 0\nadded 1 package\n",
+        )
+        self.assertTrue(setup["success"])
+        self.assertFalse(setup["evidence"])
+        self.assertFalse(setup["setup_only"])
+        observed = assertion_driven_tool_contract(
+            "run_command", {"command": ["node", "probe.cjs"]},
+            "Exit code: 0\nreceived pong; assertion passed\n",
+        )
+        self.assertTrue(observed["evidence"])
+
+    def test_failure_feedback_is_bounded_and_actionable(self):
+        contract = from_task("Repair the application and run its focused test.")
+        packet = contract.synthesize_failure_feedback(
+            "run_command", {"command": ["node", "probe.cjs"]},
+            "Exit code: 1\nTypeError: bad value\n" + ("x" * 5000),
+        )
+        self.assertLessEqual(len(packet), 2200)
+        self.assertIn("Next repair focus", packet)
+        self.assertIn("one concrete mutation", packet)
+
+    def test_failure_feedback_replaces_zero_test_runner_with_explicit_assertion(self):
+        contract = from_task("Repair the function and run the supplied test.")
+        packet = contract.synthesize_failure_feedback(
+            "run_command",
+            {"command": ["python", "-m", "unittest", "test_metrics"]},
+            "Exit code: 5\nRan 0 tests in 0.000s\nNO TESTS RAN",
+        )
+        self.assertIn("did not execute any assertions", packet)
+        self.assertIn("test function directly", packet)
+
+    def test_task_contract_does_not_extract_url_host_as_endpoint(self):
+        contract = from_task(
+            "Build a WebSocket server at ws://localhost:8080 and run a local client smoke test."
+        )
+        self.assertEqual(contract.endpoints, ())
+
+    def test_web_validation_accepts_observed_client_exchange(self):
+        contract = from_task(
+            "Build a WebSocket server and run a real local client smoke test."
+        )
+        accepted, *_ = contract.assess(
+            "run_command",
+            {"command": ["node", "probe.cjs"]},
+            "Exit code: 0\nreceived pong and message; assertion passed\n",
+        )
+        self.assertTrue(accepted)
+
+    def test_failed_service_status_is_not_validation_evidence(self):
+        contract = from_task("Run a real local WebSocket server/client smoke test.")
+        accepted, *_ = contract.assess(
+            "process_status", {}, "EXITED code=1\nEADDRINUSE: address already in use"
+        )
+        self.assertFalse(accepted)
+
+    def test_optional_tool_path_defaults_to_active_sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+
+            def identify(path="."):
+                return path
+
+            wrapped = _wrap_with_confinement(identify, ["path"])
+            self.assertEqual(wrapped(), str(Path(tmp).resolve()))
+
+    def test_patch_file_restores_uniform_outer_indentation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            path = Path(tmp) / "module.py"
+            path.write_text("def run():\n    value = 1\n    return value\n", encoding="utf-8")
+            result = patch_file("module.py", "value = 1", "value = 2")
+            self.assertIn("successfully", result)
+            self.assertIn("    value = 2", path.read_text(encoding="utf-8"))
+
+    def test_python_syntax_rejection_includes_generic_generator_hint(self):
+        valid, message = validate_python_syntax(
+            "example.py", "values = sorted(x for x in items, key=str.lower)"
+        )
+        self.assertFalse(valid)
+        self.assertIn("wrap the generator expression", message)
+
+    def test_run_tests_reloads_changed_project_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "target.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "test_target.py").write_text(
+                "import unittest\nimport target\n\n"
+                "class Contract(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        self.assertEqual(target.VALUE, 1)\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(run_tests(tmp)[0])
+            (root / "target.py").write_text("VALUE = 2\n", encoding="utf-8")
+            (root / "test_target.py").write_text(
+                "import unittest\nimport target\n\n"
+                "class Contract(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        self.assertEqual(target.VALUE, 2)\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(run_tests(tmp)[0])
+
+    def test_run_tests_preserves_assertion_diff_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_diff.py").write_text(
+                "import unittest\n\n"
+                "class Contract(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        self.assertEqual({'actual': 3}, {'expected': 33})\n",
+                encoding="utf-8",
+            )
+            success, summary = run_tests(tmp)
+            self.assertFalse(success)
+            self.assertIn("AssertionError", summary)
+            self.assertIn("actual", summary)
+            self.assertIn("expected", summary)
+
     def test_intervention_context_keeps_foundation_and_recent_tail(self):
         messages = [{"role": "system", "content": "foundation"},
                     {"role": "user", "content": "task"}]
@@ -42,6 +348,59 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(result.target, "a.py")
         self.assertEqual(result.source, "4b")
         self.assertEqual(_parse_judgment("not json", fallback).source, "fallback")
+
+    def test_context_worker_parses_structured_repair_checkpoint(self):
+        result = _parse_judgment(
+            '{"phase":"repair","recommended_action":"validate",'
+            '"failure_class":"setup","next_action":"run_command",'
+            '"diagnosis":"runner unavailable","preserve_files":["app.py"],'
+            '"confidence":0.94}', WorkerJudgment()
+        )
+        self.assertEqual(result.failure_class, "setup")
+        self.assertEqual(result.next_action, "run_command")
+        self.assertEqual(result.preserve_files, ["app.py"])
+        self.assertEqual(result.source, "4b")
+
+    def test_repair_checkpoint_has_deterministic_setup_fallback(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
+        context.request_repair_checkpoint(
+            3, "repair", "NO TESTS RAN; pytest is unavailable",
+            legal_actions=("run_command", "patch_file"), protected_paths=("test_metrics.py",),
+        )
+        rendered = context.render_for_model(action_critic=True)
+        context.close()
+        self.assertIn("Failure class: setup", rendered)
+        self.assertIn("run_command", rendered)
+        self.assertIn("Preserve", rendered)
+
+    def test_synchronous_triage_gate_returns_bounded_restrictions(self):
+        def fake_chat(**kwargs):
+            return _FakeResponse(
+                '{"phase":"repair","recommended_action":"validate",'
+                '"failure_class":"setup","next_action":"run_command",'
+                '"diagnosis":"runner unavailable","confidence":0.95}'
+            )
+        context = NoveltyContext(chat_fn=fake_chat, worker_interval=100)
+        judgment = context.synchronous_triage(
+            4, "repair", "pytest unavailable; no tests discovered",
+            legal_actions=("run_command", "patch_file"),
+        )
+        self.assertEqual(judgment.failure_class, "setup")
+        self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
+        self.assertEqual(context.consume_gate_restrictions(), set())
+        context.close()
+
+    def test_structured_checkpoint_survives_newer_stale_event(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
+        context.last_judgment = WorkerJudgment(
+            event_id=1, diagnosis="runner unavailable", failure_class="setup",
+            next_action="run_command", confidence=0.9, source="4b",
+        )
+        context.observe(2, "read_file", {}, "newer ordinary event", validation=False)
+        rendered = context.render_for_model(action_critic=True)
+        context.close()
+        self.assertIn("Failure class: setup", rendered)
+        self.assertIn("run_command", rendered)
 
     def test_context_worker_is_async_and_has_local_fallback(self):
         calls = []
@@ -190,6 +549,17 @@ class KernelToolTests(unittest.TestCase):
         edited.append({"role": "tool", "tool_name": "run_command", "content": "Exit code: 0\nSTDOUT:"})
         self.assertTrue(_completion_ready(edited, "code_change")[0])
 
+    def test_verification_only_task_can_finish_without_mutation(self):
+        plan = from_task("Run the existing test suite and verify it passes.", "code_change")
+        evidence = [{"role": "tool", "tool_name": "run_command", "content": "Exit code: 0\nOK"}]
+        ready, reason = _completion_ready(
+            evidence,
+            "code_change",
+            plan,
+            validation_evidence={"run_command|test suite|OK"},
+        )
+        self.assertTrue(ready, reason)
+
     def test_find_files_is_bounded_and_skips_noise(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -206,7 +576,77 @@ class KernelToolTests(unittest.TestCase):
             result = run_command(["python3", "-c", "print('ok')"])
             self.assertIn("Exit code: 0", result)
             self.assertIn("ok", result)
-            self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
+        self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
+
+    def test_run_command_normalizes_missing_python_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            result = run_command(["python", "-c", "print('portable')"])
+            self.assertIn("Exit code: 0", result)
+            self.assertIn("portable", result)
+
+    def test_validation_rejects_silent_direct_test_module(self):
+        contract = from_task("Run test_metrics.py and verify the implementation.", "code_change")
+        accepted, reason, suggestion, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "test_metrics.py"]},
+            "Exit code: 0\nSTDOUT:\n\nSTDERR:\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("no test evidence", reason)
+        self.assertIn("test function", suggestion)
+
+    def test_silent_test_evidence_is_a_setup_failure(self):
+        self.assertTrue(_is_validation_setup_failure(
+            "ERROR: test module 'test_metrics.py' produced no test evidence"
+        ))
+        self.assertFalse(_is_validation_setup_failure("AssertionError: wrong total"))
+
+    def test_validation_rejects_zero_test_runner_success(self):
+        contract = from_task("Run the existing test suite and verify it passes.", "code_change")
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "-m", "unittest.main"]},
+            "Exit code: 0\nSTDOUT:\n\nSTDERR:\nRuntimeWarning: no tests discovered\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("zero tests", reason)
+        accepted, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "test_metrics.py"]},
+            "Exit code: 0\nSTDOUT:\n\nSTDERR:\ntest_calculation ... ok\n",
+        )
+        self.assertTrue(accepted)
+
+    def test_failure_diagnostic_extracts_assertion_diff(self):
+        diagnostic = _failure_diagnostic(
+            "AssertionError: values differ\n"
+            "- 'taxed_total': 3.0\n"
+            "+ 'taxed_total': 33.0\n"
+        )
+        self.assertIn("taxed_total", diagnostic)
+        self.assertIn("3.0", diagnostic)
+        self.assertIn("33.0", diagnostic)
+
+    def test_failure_packet_calls_out_behavioral_mismatch(self):
+        packet = from_task("repair the implementation").failure_packet(
+            "run_command",
+            {"command": "python -m unittest"},
+            "AssertionError: actual {'total': 3.0} != expected {'total': 33.0}",
+        )
+        self.assertIn("behavioral contract", packet)
+
+    def test_provider_refusal_is_terminal(self):
+        self.assertTrue(_terminal_provider_error(ConnectionRefusedError(61, "Connection refused")))
+        self.assertFalse(_terminal_provider_error(RuntimeError("temporary malformed response")))
+
+    def test_run_command_rejects_silent_test_module_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            Path(tmp, "test_empty.py").write_text("def test_example():\n    assert True\n")
+            result = run_command(["python3", "test_empty.py"])
+            self.assertTrue(result.startswith("ERROR:"))
+            self.assertIn("no test evidence", result)
 
 
 if __name__ == "__main__":

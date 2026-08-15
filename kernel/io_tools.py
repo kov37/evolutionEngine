@@ -43,7 +43,10 @@ def validate_python_syntax(file_path, content):
         ast.parse(content)
         return True, None
     except SyntaxError as e:
-        return False, f"SyntaxError: {e.msg} (line {e.lineno}, offset {e.offset})"
+        hint = ""
+        if "generator expression must be parenthesized" in e.msg.lower():
+            hint = " Hint: wrap the generator expression in parentheses before passing another keyword argument."
+        return False, f"SyntaxError: {e.msg} (line {e.lineno}, offset {e.offset}).{hint}"
 
 
 def _strip_code_fences(text: str) -> str:
@@ -241,6 +244,31 @@ def _find_whitespace_tolerant_match(content: str, search: str):
     return None
 
 
+def _find_outer_indent_match(content: str, search: str):
+    """Match a uniquely identified block when the caller omitted one common
+    outer indentation level, returning its span and the indentation to add to
+    a replacement. Internal indentation remains significant."""
+    search_lines = search.splitlines()
+    if not search_lines or any(line and line[0].isspace() for line in search_lines):
+        return None
+    content_lines = content.splitlines(keepends=True)
+    candidates = []
+    for start in range(0, len(content_lines) - len(search_lines) + 1):
+        actual = [line.rstrip("\r\n").rstrip() for line in content_lines[start:start + len(search_lines)]]
+        if len(actual) != len(search_lines):
+            continue
+        if all(a.lstrip() == s.rstrip() for a, s in zip(actual, search_lines)):
+            candidates.append(start)
+    if len(candidates) != 1:
+        return None
+    start = candidates[0]
+    first = content_lines[start].rstrip("\r\n")
+    indent = first[:len(first) - len(first.lstrip())]
+    char_start = sum(len(line) for line in content_lines[:start])
+    char_end = char_start + sum(len(line) for line in content_lines[start:start + len(search_lines)])
+    return char_start, char_end, indent
+
+
 def patch_file(path: str, search: str, replace: str) -> str:
     """Surgically replace one exact substring inside a file that already
     exists in the workspace. Use this for small, targeted edits instead of
@@ -269,6 +297,17 @@ def patch_file(path: str, search: str, replace: str) -> str:
         new_content = content.replace(search, replace, 1)
     else:
         match = _find_whitespace_tolerant_match(content, search)
+        if match is None:
+            outer_match = _find_outer_indent_match(content, search)
+            if outer_match is not None:
+                start, end, indent = outer_match
+                replacement_lines = replace.splitlines(keepends=True)
+                if replacement_lines and not replacement_lines[0].lstrip().startswith(('#', '```')):
+                    replace = "".join(
+                        (indent + line if line.strip() else line)
+                        for line in replacement_lines
+                    )
+                match = (start, end)
         if match is None:
             hint = _find_closest_match_hint(content, search)
             return (

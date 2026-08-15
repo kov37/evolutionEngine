@@ -40,6 +40,7 @@ class Task:
     setup: dict[str, str]
     grade: str
     budget: int = 20
+    max_success_iterations: int | None = None
 
 
 def _write_setup(root: Path, setup: dict[str, str]) -> None:
@@ -391,6 +392,163 @@ TASKS = {
         ),
         budget=24,
     ),
+    "cascading_loop": Task(
+        name="cascading_loop",
+        prompt=(
+            "Repair the isolated Python project. Run the provided test_metrics.py and use each "
+            "new failure to guide the smallest correct repair. There are multiple sequential "
+            "failures, so rerun the test after every change, preserve working code, and call "
+            "finish_task only after the test exits successfully. Do not replace the test or "
+            "weaken its assertions."
+        ),
+        setup={
+            "target_code.py": (
+                "# target_code.py\n"
+                "def calculate_metrics(data_list):\n"
+                "    # BUG 1: Syntax Error (Missing closing parenthesis)\n"
+                "    total = sum(data_list\n"
+                "\n"
+                "    # BUG 2: Logical/Type Error (Dividing by a string instead of an int)\n"
+                "    average = total / \"2\" \n"
+                "    return average\n"
+            ),
+            "test_metrics.py": (
+                "# test_metrics.py\n"
+                "from target_code import calculate_metrics\n"
+                "def test_calculation():\n"
+                "    assert calculate_metrics([10, 20]) == 15\n"
+            ),
+        },
+        grade=(
+            "import subprocess, sys\n"
+            "pytest_probe = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'test_metrics.py'],\n"
+            "                              text=True, capture_output=True, timeout=30)\n"
+            "if pytest_probe.returncode == 0:\n"
+            "    raise SystemExit(0)\n"
+            "if 'No module named pytest' not in (pytest_probe.stdout + pytest_probe.stderr):\n"
+            "    raise AssertionError((pytest_probe.stdout + pytest_probe.stderr)[-4000:])\n"
+            "direct = subprocess.run([sys.executable, '-c',\n"
+            "    'from test_metrics import test_calculation; test_calculation()'],\n"
+            "    text=True, capture_output=True, timeout=30)\n"
+            "assert direct.returncode == 0, (direct.stdout + direct.stderr)[-4000:]\n"
+        ),
+        budget=8,
+        max_success_iterations=3,
+    ),
+    "websocket_chat": Task(
+        name="websocket_chat",
+        prompt=(
+            "Repair the isolated full-stack WebSocket chat application. Inspect the supplied "
+            "server.js and index.html together, identify the connection, Buffer/string, payload "
+            "schema, and disconnect-safe broadcast failures, then make the smallest production-"
+            "quality repair. The browser and server must share one JSON contract: message payloads "
+            "use {type: 'message', text: string}, and ping uses {type: 'ping'} with a {type: 'pong'} "
+            "response. Handle Node ws message data as text safely, only send to OPEN clients, and "
+            "keep the server stable when a peer disconnects during broadcast. Use ws:// (or wss://) "
+            "in the browser, avoid unsafe HTML interpolation, and provide a package.json declaring "
+            "the ws dependency if needed. Listen on process.env.PORT || 8080 so local validation can "
+            "use an isolated port. You may install dependencies in the isolated workspace. "
+            "Run a real local server/client smoke test, then call finish_task only after it passes."
+        ),
+        setup={
+            "server.js": (
+                "const WebSocket = require('ws');\n\n"
+                "// Intentional configuration issue\n"
+                "const wss = new WebSocket.Server({ port: \"8080\" });\n\n"
+                "console.log(\"Chat server running on port 8080\");\n\n"
+                "wss.on('connection', (ws) => {\n"
+                "    console.log(\"New client connected\");\n\n"
+                "    ws.on('message', (message) => {\n"
+                "        // Warning: 'message' data type handling might be unstable depending on the environment\n"
+                "        if (message.includes(\"ping\")) {\n"
+                "            ws.send(JSON.stringify({ type: \"pong\" }));\n"
+                "            return;\n"
+                "        }\n\n"
+                "        try {\n"
+                "            // Unsafe broadcast loop\n"
+                "            wss.clients.forEach((client) => {\n"
+                "                client.send(message);\n"
+                "            });\n"
+                "        } catch (err) {\n"
+                "            console.error(\"Broadcast failed:\", err);\n"
+                "        }\n"
+                "    });\n"
+                "});\n"
+            ),
+            "index.html": (
+                "<!DOCTYPE html>\n<html>\n<head>\n    <title>Broken Chat</title>\n"
+                "    <script src=\"https://jsdelivr.net\"></script>\n</head>\n"
+                "<body class=\"bg-gray-900 text-white p-8\">\n"
+                "    <div class=\"max-w-md mx-auto bg-gray-800 p-6 rounded-lg shadow-xl\">\n"
+                "        <h1 class=\"text-xl font-bold mb-4\">Secure Chat Portal</h1>\n"
+                "        <div id=\"chatBox\" class=\"h-64 bg-gray-950 p-4 rounded mb-4 overflow-y-auto font-mono text-green-400\"></div>\n"
+                "        <div class=\"flex gap-2\">\n"
+                "            <input id=\"msgInput\" type=\"text\" class=\"flex-1 bg-gray-700 p-2 rounded text-white\" placeholder=\"Type a message...\">\n"
+                "            <button id=\"sendBtn\" class=\"bg-blue-600 px-4 py-2 rounded font-bold hover:bg-blue-500\">Send</button>\n"
+                "        </div>\n    </div>\n\n    <script>\n"
+                "        const socket = new WebSocket(\"http://localhost:8080\");\n\n"
+                "        socket.onmessage = (event) => {\n"
+                "            const data = JSON.parse(event.data);\n"
+                "            const chatBox = document.getElementById(\"chatBox\");\n"
+                "            chatBox.innerHTML += `<div>> ${data.text}</div>`;\n"
+                "        };\n\n"
+                "        document.getElementById(\"sendBtn\").onclick = () => {\n"
+                "            const input = document.getElementById(\"msgInput\");\n"
+                "            socket.send(input.value);\n"
+                "            input.value = \"\";\n"
+                "        };\n    </script>\n</body>\n</html>\n"
+            ),
+        },
+        grade=(
+            "from pathlib import Path\n"
+            "import json, os, signal, subprocess, sys, tempfile, time\n"
+            "server = Path('server.js').read_text(encoding='utf-8')\n"
+            "html = Path('index.html').read_text(encoding='utf-8')\n"
+            "assert 'new WebSocket(\"http://' not in html and \"new WebSocket('http://\" not in html\n"
+            "assert 'JSON.stringify' in html and 'JSON.parse' in html\n"
+            "assert 'textContent' in html and 'innerHTML +=' not in html\n"
+            "assert 'readyState' in server and 'OPEN' in server\n"
+            "assert 'Buffer' in server or 'toString' in server\n"
+            "package = Path('package.json')\n"
+            "assert package.exists(), 'package.json must declare the runtime dependency'\n"
+            "manifest = json.loads(package.read_text(encoding='utf-8'))\n"
+            "deps = {**manifest.get('dependencies', {}), **manifest.get('devDependencies', {})}\n"
+            "assert 'ws' in deps, 'package.json must declare ws'\n"
+            "install = subprocess.run(['npm', 'install', '--no-audit', '--no-fund'], text=True, capture_output=True, timeout=60)\n"
+            "assert install.returncode == 0, (install.stdout + install.stderr)[-3000:]\n"
+            "probe = Path('.websocket_probe.cjs')\n"
+            "probe.write_text('''const WebSocket = require('ws');\n"
+            "const port = 18767;\n"
+            "const a = new WebSocket(`ws://127.0.0.1:${port}`);\n"
+            "const b = new WebSocket(`ws://127.0.0.1:${port}`);\n"
+            "let messages = [];\n"
+            "let pong = false;\n"
+            "function fail(message) { console.error(message); process.exit(1); }\n"
+            "function done() { if (messages.some(x => x.type === 'message' && x.text === 'hello') && pong) process.exit(0); }\n"
+            "b.on('message', raw => { try { const value = JSON.parse(raw.toString()); messages.push(value); done(); } catch (e) { fail(e.message); } });\n"
+            "a.on('open', () => { a.send(JSON.stringify({type:'ping'})); setTimeout(() => a.send(JSON.stringify({type:'message', text:'hello'})), 100); });\n"
+            "a.on('message', raw => { try { if (JSON.parse(raw.toString()).type === 'pong') pong = true; done(); } catch (e) { fail(e.message); } });\n"
+            "a.on('error', e => fail(e.message)); b.on('error', e => fail(e.message));\n"
+            "setTimeout(() => { b.close(); setTimeout(() => a.send(JSON.stringify({type:'message', text:'after-close'})), 100); }, 500);\n"
+            "setTimeout(() => fail('timed out waiting for chat exchange'), 2500);\n''', encoding='utf-8')\n"
+            "env = os.environ.copy(); env['PORT'] = str(port)\n"
+            "proc = subprocess.Popen(['node', 'server.js'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+            "try:\n"
+            "    for _ in range(30):\n"
+            "        if proc.poll() is not None: break\n"
+            "        time.sleep(0.1)\n"
+            "    assert proc.poll() is None, (proc.stdout.read().decode() + proc.stderr.read().decode())[-3000:]\n"
+            "    run = subprocess.run(['node', str(probe)], text=True, capture_output=True, timeout=8)\n"
+            "    assert run.returncode == 0, (run.stdout + run.stderr)[-3000:]\n"
+            "    assert proc.poll() is None, 'server crashed during disconnect-safe broadcast'\n"
+            "finally:\n"
+            "    proc.terminate()\n"
+            "    try: proc.wait(timeout=3)\n"
+            "    except subprocess.TimeoutExpired: proc.kill()\n"
+            "    probe.unlink(missing_ok=True)\n"
+        ),
+        budget=18,
+    ),
     "bug_repair": Task(
         name="bug_repair",
         prompt=(
@@ -528,13 +686,31 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     if timed_out:
         stdout += f"\nBENCHMARK WATCHDOG: exceeded {run_timeout:.1f}s and was terminated.\n"
     elapsed = time.monotonic() - started
-    passed, detail = _grade(task, work)
+    artifact_passed, detail = _grade(task, work)
+    metrics = _metrics(stdout or "")
+    scorecard = {
+        "artifact_passed": artifact_passed,
+        "finish_called": metrics["done_signal"],
+    }
+    passed = artifact_passed
+    if task.max_success_iterations is not None:
+        scorecard["iteration_target"] = task.max_success_iterations
+        scorecard["iteration_target_met"] = (
+            metrics["iterations"] <= task.max_success_iterations
+        )
+        passed = passed and metrics["done_signal"] and scorecard["iteration_target_met"]
+        if not passed and artifact_passed:
+            detail = (
+                "Artifact passed, but the agent did not meet the workflow scorecard: "
+                + json.dumps(scorecard, sort_keys=True)
+            )
     record = {
         "task": task.name, "condition": condition, "passed": passed,
         "model": model,
         "backend": backend,
         "detail": detail, "timed_out": timed_out, "returncode": returncode,
-        "elapsed_seconds": round(elapsed, 1), "metrics": _metrics(stdout or ""),
+        "elapsed_seconds": round(elapsed, 1), "metrics": metrics,
+        "scorecard": scorecard,
         "monitor_log": str(monitor_path),
     }
     RUNS.mkdir(parents=True, exist_ok=True)

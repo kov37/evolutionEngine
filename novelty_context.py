@@ -25,6 +25,8 @@ DEFAULT_WORKER_INTERVAL = 8
 MAX_EVENT_CHARS = 6000
 MAX_STATE_CHARS = 5000
 MAX_WORKER_OUTPUT_CHARS = 1200
+MAX_REPAIR_PACKET_CHARS = 2200
+DEFAULT_TRIAGE_TIMEOUT = 5.0
 
 
 @dataclass
@@ -70,6 +72,10 @@ class WorkerJudgment:
     confidence: float = 0.0
     source: str = "fallback"
     latency_ms: float = 0.0
+    diagnosis: str = ""
+    failure_class: str = "unknown"
+    next_action: str = ""
+    preserve_files: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         payload = {
@@ -84,6 +90,10 @@ class WorkerJudgment:
             "target": self.target[:240],
             "confidence": round(self.confidence, 2),
             "source": self.source,
+            "diagnosis": self.diagnosis[:360],
+            "failure_class": self.failure_class,
+            "next_action": self.next_action[:240],
+            "preserve_files": self.preserve_files[-5:],
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -135,8 +145,10 @@ def _prompt(state: str, event: ContextEvent) -> str:
     return f"""You are a compact coding-agent context worker. Return ONLY one JSON object.
 Allowed phase values: orient, localize, hypothesize, mutate, verify, repair.
 Allowed recommended_action values: inspect, patch_file, validate, finish_or_repair.
+Allowed failure_class values: setup, behavior, progress, completion, unknown.
+Allowed next_action values: inspect, patch_file, validate, run_command, finish_or_repair.
 Use only facts present below. Keep every list to at most 3 short strings.
-Schema: {{"phase":str,"new_facts":[str],"relevant_facts":[str],"duplicate_action":bool,"stagnating":bool,"recommended_action":str,"blocker":str,"target":str,"confidence":number}}
+Schema: {{"phase":str,"new_facts":[str],"relevant_facts":[str],"duplicate_action":bool,"stagnating":bool,"recommended_action":str,"blocker":str,"target":str,"confidence":number,"diagnosis":str,"failure_class":str,"next_action":str,"preserve_files":[str]}}
 
 Current state:
 {state[:MAX_STATE_CHARS]}
@@ -170,9 +182,15 @@ def _parse_judgment(raw: str, fallback: WorkerJudgment) -> WorkerJudgment:
         data = json.loads(match.group(0))
         allowed_phase = {"orient", "localize", "hypothesize", "mutate", "verify", "repair"}
         allowed_action = {"inspect", "patch_file", "validate", "finish_or_repair"}
+        allowed_failure_class = {"setup", "behavior", "progress", "completion", "unknown"}
+        allowed_next_action = {"inspect", "patch_file", "validate", "run_command", "finish_or_repair"}
         phase = data.get("phase") if data.get("phase") in allowed_phase else fallback.phase
         action = data.get("recommended_action")
         action = action if action in allowed_action else fallback.recommended_action
+        failure_class = data.get("failure_class")
+        failure_class = failure_class if failure_class in allowed_failure_class else fallback.failure_class
+        next_action = data.get("next_action")
+        next_action = next_action if next_action in allowed_next_action else fallback.next_action
         return WorkerJudgment(
             phase=phase,
             new_facts=[str(x)[:300] for x in data.get("new_facts", [])[:3]],
@@ -184,6 +202,10 @@ def _parse_judgment(raw: str, fallback: WorkerJudgment) -> WorkerJudgment:
             target=str(data.get("target", fallback.target))[:240],
             confidence=max(0.0, min(1.0, float(data.get("confidence", fallback.confidence)))),
             source="4b",
+            diagnosis=str(data.get("diagnosis", fallback.diagnosis))[:360],
+            failure_class=failure_class,
+            next_action=next_action,
+            preserve_files=[str(x)[:240] for x in data.get("preserve_files", fallback.preserve_files)[:5]],
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         return fallback
@@ -232,6 +254,7 @@ class NoveltyContext:
         self.stale_judgments = 0
         self.started_at = monotonic()
         self.no_action_turns = 0
+        self._gate_judgment: WorkerJudgment | None = None
 
     def state_text(self) -> str:
         with self._lock:
@@ -244,6 +267,115 @@ class NoveltyContext:
                 ],
                 "last_judgment": json.loads(self.last_judgment.render()),
             }, separators=(",", ":"))
+
+    @staticmethod
+    def _checkpoint_fallback(event: ContextEvent, packet: str) -> WorkerJudgment:
+        """Classify a repair packet without a model when timing is critical."""
+        lower = packet.lower()
+        setup = any(marker in lower for marker in (
+            "no tests", "no test evidence", "pytest", "module not found",
+            "dependency", "could not start", "permission denied",
+        ))
+        failure_class = "setup" if setup else "behavior"
+        action = "run_command" if setup else "patch_file"
+        return WorkerJudgment(
+            event_id=event.event_id,
+            phase="repair",
+            recommended_action="validate" if setup else "patch_file",
+            next_action=action,
+            failure_class=failure_class,
+            diagnosis=("Validation setup is invalid; preserve the implementation."
+                       if setup else "The latest executable evidence indicates a product behavior failure."),
+            blocker=packet[:240],
+            source="fallback",
+            confidence=0.9,
+            preserve_files=[str(path)[:240] for path in event.arguments.get("protected_paths", [])[:5]],
+        )
+
+    def request_repair_checkpoint(
+        self, iteration: int, lifecycle_state: str, failure_packet: str,
+        legal_actions: list[str] | tuple[str, ...] = (), protected_paths: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        """Ask the worker to classify one compact failure at a transition point.
+
+        This is deliberately separate from ordinary event sampling.  The
+        checkpoint carries the lifecycle state and legal/protected actions so
+        the 4B does not have to reconstruct them from a transcript.
+        """
+        packet = (
+            f"lifecycle_state={lifecycle_state}\n"
+            f"legal_actions={list(legal_actions)[:10]}\n"
+            f"protected_paths={list(protected_paths)[:10]}\n"
+            f"failure_packet={str(failure_packet)[:MAX_REPAIR_PACKET_CHARS]}"
+        )
+        with self._lock:
+            self._next_event_id += 1
+            event = ContextEvent(
+                event_id=self._next_event_id, iteration=iteration,
+                tool="repair_checkpoint", arguments={
+                    "lifecycle_state": lifecycle_state,
+                    "legal_actions": list(legal_actions)[:10],
+                    "protected_paths": list(protected_paths)[:10],
+                }, result=packet,
+                result_fingerprint=_fingerprint("repair_checkpoint", {}, packet),
+            )
+            self.events.append(event)
+            self.events = self.events[-100:]
+            fallback = self._checkpoint_fallback(event, packet)
+            self.last_judgment = fallback
+            self.judgments.append(fallback)
+            busy = ((self._future is not None and not self._future.done()) or
+                    (self._process is not None and self._process.is_alive()))
+            if busy:
+                self._pending_event = event
+                self._pending_fallback = fallback
+                self.coalesced_events += 1
+            else:
+                self._start_worker_locked(event, fallback)
+
+    def synchronous_triage(
+        self, iteration: int, lifecycle_state: str, failure_packet: str,
+        legal_actions: list[str] | tuple[str, ...] = (),
+        protected_paths: list[str] | tuple[str, ...] = (),
+        timeout: float = DEFAULT_TRIAGE_TIMEOUT,
+    ) -> WorkerJudgment:
+        """Run a bounded triage gate before the next actor prompt.
+
+        If another worker call is already running, return the deterministic
+        checkpoint immediately. The 4B can never delay the actor indefinitely.
+        """
+        with self._lock:
+            before = self._next_event_id
+        self.request_repair_checkpoint(
+            iteration, lifecycle_state, failure_packet, legal_actions, protected_paths
+        )
+        with self._lock:
+            started = self._active_event is not None and self._active_event.event_id > before
+            fallback = self.last_judgment
+        if started:
+            judgment = self.collect(wait=True, timeout=max(0.1, timeout))
+        else:
+            judgment = fallback
+        with self._lock:
+            self._gate_judgment = judgment
+        return judgment
+
+    def consume_gate_restrictions(self) -> set[str]:
+        """Return one-shot tool restrictions from the synchronous gate.
+
+        The gate may only remove tools. Core risk and protected-path policies
+        remain enforced independently by the orchestrator.
+        """
+        with self._lock:
+            judgment = self._gate_judgment
+            self._gate_judgment = None
+        if judgment is None or judgment.confidence < 0.75:
+            return set()
+        if judgment.failure_class == "setup":
+            return {"write_file", "patch_file"}
+        if judgment.failure_class == "behavior":
+            return {"finish_task"}
+        return set()
 
     def observe(self, iteration: int, tool: str, arguments: dict[str, Any], result: str,
                 mutation: bool = False, validation: bool = False) -> None:
@@ -380,10 +512,10 @@ class NoveltyContext:
             fallback.latency_ms = (monotonic() - started) * 1000
             return fallback
 
-    def collect(self, wait: bool = False) -> WorkerJudgment:
+    def collect(self, wait: bool = False, timeout: float | None = None) -> WorkerJudgment:
         if self._process_mode and self._process is not None:
             if wait:
-                self._process.join()
+                self._process.join(timeout=timeout)
             if self._process.is_alive() or self._process_conn is None or not self._process_conn.poll():
                 return self.last_judgment
             try:
@@ -416,7 +548,7 @@ class NoveltyContext:
         if not wait and not future.done():
             return self.last_judgment
         try:
-            judgment = future.result()
+            judgment = future.result(timeout=timeout) if wait and timeout is not None else future.result()
         except Exception:
             self.worker_failures += 1
             if self._future is future:
@@ -469,13 +601,24 @@ class NoveltyContext:
             )
             critic_judgment = judgment
             if judgment_is_stale:
-                critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
+                # A structured triage checkpoint is more informative than a
+                # generic local judgment for a newer event. Preserve its
+                # failure-plane diagnosis while still using local fallback for
+                # ordinary stale event advice.
+                if judgment.diagnosis or judgment.failure_class != "unknown":
+                    critic_judgment = judgment
+                else:
+                    critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
             # Do not wait for an asynchronous 4B result to become actionable.
             # The local policy supplies a conservative recommendation; a later
             # 4B judgment can refine it on the next turn.
             if action_critic and deterministic_trigger and judgment.recommended_action == "inspect":
                 critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
-            rendered = "## Context manager state\n" + judgment.render()
+            # Use the deterministic replacement when the asynchronous worker
+            # is behind. The previous code computed critic_judgment but still
+            # rendered the stale worker object, so the actor saw obsolete
+            # advice while the engine claimed to fall back locally.
+            rendered = "## Context manager state\n" + critic_judgment.render()
             if judgment_is_stale:
                 rendered += (
                     f"\nWorker judgment is for event {judgment.event_id}, while the latest event is "
@@ -508,6 +651,15 @@ class NoveltyContext:
                     f"Blocker: {critic_judgment.blocker or 'use the latest evidence to choose the exact target'}. "
                     "Use this recommendation if it matches the repository evidence; do not perform broad "
                     "exploration before addressing it."
+                )
+            if critic_judgment.diagnosis or critic_judgment.next_action:
+                rendered += (
+                    "\n## Structured repair checkpoint\n"
+                    f"Failure class: {critic_judgment.failure_class}. "
+                    f"Diagnosis: {critic_judgment.diagnosis or 'use the latest evidence'}. "
+                    f"Next action: {critic_judgment.next_action or critic_judgment.recommended_action}. "
+                    + ("Preserve: " + ", ".join(critic_judgment.preserve_files) + "."
+                       if critic_judgment.preserve_files else "")
                 )
             if action_critic and self.no_action_turns:
                 rendered += (

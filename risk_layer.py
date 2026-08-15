@@ -12,6 +12,7 @@ needs to survive one run in memory; nothing here is meant to persist past
 process exit.
 """
 
+import difflib
 import os
 
 
@@ -21,6 +22,35 @@ class RiskLayer:
 
     def __init__(self):
         self.snapshots = {}  # path -> list of (turn, content_or_None) snapshots, most recent last
+        self.protected_test_paths = set()
+
+    def protect_existing_tests(self, root: str) -> None:
+        """Mark supplied test files as evidence for the duration of a run.
+
+        Existing tests define the task's observable contract.  New test files
+        remain writable, which supports feature tasks that ask the actor to
+        add coverage.  Repair turns cannot alter a test that was already in
+        the workspace; this is a workspace fact, not a benchmark name or
+        model-specific rule.
+        """
+        for directory, _, filenames in os.walk(root):
+            if any(part in {".git", ".venv", "__pycache__"} for part in directory.split(os.sep)):
+                continue
+            for filename in filenames:
+                if filename.startswith("test_") or filename.endswith("_test.py"):
+                    self.protected_test_paths.add(os.path.relpath(os.path.join(directory, filename), root))
+
+    def reject_protected_test_mutation(self, path: str, full_path: str, *, repair_turn: bool) -> str | None:
+        """Rollback an attempted repair edit to an existing test file."""
+        if not repair_turn or path not in self.protected_test_paths:
+            return None
+        if not self.has_checkpoint(path):
+            return None
+        self.rollback(path, full_path)
+        return (
+            f"repair mutation rolled back for protected test '{path}'. Tests are evidence, not the artifact; "
+            "repair the implementation named by the failure instead."
+        )
 
     def checkpoint(self, path: str, full_path: str, turn: int) -> None:
         """Record the CURRENT on-disk content of `path` before it's about
@@ -53,6 +83,49 @@ class RiskLayer:
 
     def has_checkpoint(self, path: str) -> bool:
         return bool(self.snapshots.get(path))
+
+    def reject_destructive_rewrite(self, path: str, full_path: str, *, tool_name: str,
+                                   repair_turn: bool) -> str | None:
+        """Restore an unsafe repair rewrite and return an actionable reason.
+
+        A model may use ``write_file`` after a failing check and accidentally
+        replace a useful implementation with a shortened fragment.  That is
+        especially damaging for small models: the next repair turn no longer
+        has the code that was working.  This guard is deliberately narrow:
+        it runs only for ``write_file`` on an existing file during repair, so
+        first-time creation and surgical ``patch_file`` edits remain free.
+
+        The decision is based on the actual edit shape, not a model, task, or
+        filename.  If more than 65% of the previous non-blank lines disappear
+        and the replacement is not a similarly sized rewrite, restore the
+        exact checkpoint.  The caller turns the returned reason into a
+        rejected mutation, so validation cannot mistake the rolled-back file
+        for a successful edit.
+        """
+        if not repair_turn or tool_name != "write_file" or not os.path.exists(full_path):
+            return None
+        history = self.snapshots.get(path)
+        if not history or history[-1][1] is None:
+            return None
+        before = history[-1][1]
+        with open(full_path, "r", encoding="utf-8") as f:
+            after = f.read()
+        before_lines = [line for line in before.splitlines() if line.strip()]
+        after_lines = [line for line in after.splitlines() if line.strip()]
+        if len(before_lines) < 8:
+            return None
+        matcher = difflib.SequenceMatcher(None, before_lines, after_lines, autojunk=False)
+        deleted = sum(i2 - i1 for tag, i1, i2, _, _ in matcher.get_opcodes()
+                      if tag in {"delete", "replace"})
+        deletion_ratio = deleted / len(before_lines)
+        if deletion_ratio <= 0.65 or len(after_lines) >= max(8, len(before_lines) * 0.35):
+            return None
+        self.rollback(path, full_path)
+        return (
+            f"destructive repair rewrite rolled back for '{path}': it removed "
+            f"{deletion_ratio:.0%} of the existing non-blank lines. Use patch_file "
+            "for one localized replacement and preserve the surrounding implementation."
+        )
 
 
 def _self_test() -> bool:

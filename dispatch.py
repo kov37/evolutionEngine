@@ -19,6 +19,55 @@ capped.
 MAX_MESSAGE_CONTENT_CHARS = 4000
 
 
+def _normalize_tool_arguments(tool_name, arguments):
+    """Repair common JSON-schema shape drift before dispatching a tool.
+
+    Small local models sometimes emit an argv list as a JSON-encoded string,
+    call it ``argv``, or express milliseconds as ``timeout_ms`` even though
+    the trusted tool schema uses ``command`` and seconds. Normalize only these
+    unambiguous aliases; never reinterpret a command's content.
+    """
+    import json
+    import re
+    import shlex
+
+    normalized = dict(arguments or {})
+    if tool_name in {"run_command", "run_shell"}:
+        if "command" not in normalized and "argv" in normalized:
+            normalized["command"] = normalized.pop("argv")
+        command = normalized.get("command")
+        if isinstance(command, str):
+            try:
+                decoded = json.loads(command)
+            except (TypeError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, list):
+                normalized["command"] = decoded
+            elif tool_name == "run_command":
+                normalized["command"] = shlex.split(command)
+        if "timeout" not in normalized and "timeout_ms" in normalized:
+            try:
+                normalized["timeout"] = max(1, (int(normalized.pop("timeout_ms")) + 999) // 1000)
+            except (TypeError, ValueError):
+                normalized.pop("timeout_ms", None)
+        elif "timeout" in normalized and isinstance(normalized["timeout"], str):
+            # Salvage a numeric prefix when a small model leaks punctuation or
+            # a fragment of the surrounding call into a scalar argument.
+            match = re.match(r"\s*(\d+(?:\.\d+)?)", normalized["timeout"])
+            if match:
+                normalized["timeout"] = max(1, int(float(match.group(1))))
+        cwd = normalized.get("cwd")
+        if isinstance(cwd, str):
+            stripped = cwd.strip()
+            if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+                stripped = stripped[1:-1]
+            if stripped in {"", "."}:
+                normalized.pop("cwd", None)
+            else:
+                normalized["cwd"] = stripped
+    return normalized
+
+
 def _call_key(tool_name, arguments):
     import json
     return tool_name, json.dumps(arguments or {}, sort_keys=True, default=str, separators=(",", ":"))
@@ -39,7 +88,8 @@ def _format_result(result) -> str:
     return str(result)
 
 
-def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=None):
+def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=None,
+                        blocked_mutation_paths=None):
     """Execute every tool call in one model turn. Returns a list of
     {"role": "tool", ...} messages ready to append to the conversation.
     Never raises — tool errors become an ERROR/REJECTED string in content.
@@ -57,6 +107,17 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
     disallowing them without this check."""
     messages = []
     for call in tool_calls:
+        call_arguments = call.function.arguments or {}
+        if (blocked_mutation_paths
+                and call.function.name in {"write_file", "patch_file"}
+                and call_arguments.get("path") in blocked_mutation_paths):
+            result = (
+                f"REJECTED: mutation path '{call_arguments.get('path')}' is blocked after a protected-test "
+                "edit was rejected. Repair the implementation, then run the validation command."
+            )
+            print(f"🚫 blocked mutation path {call.function.name}({call_arguments})")
+            messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
+            continue
         if blocked_calls and _call_key(call.function.name, call.function.arguments) in blocked_calls:
             result = (
                 f"REJECTED: repeated failing call {call.function.name} with the same arguments. "
@@ -81,7 +142,8 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
         else:
             print(f"🔧 {call.function.name}({call.function.arguments})")
             try:
-                result = fn(**call.function.arguments)
+                normalized_arguments = _normalize_tool_arguments(call.function.name, call.function.arguments)
+                result = fn(**normalized_arguments)
             except TypeError as e:
                 result = f"ERROR: bad arguments for {call.function.name}: {e}"
             except ValueError as e:

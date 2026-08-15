@@ -52,7 +52,8 @@ CAPABILITY_CLASS = {
 
 _SHELL_VALIDATE_RE = re.compile(r"\b(pytest|py\.test|python3?\s+-m\s+pytest|unittest)\b")
 _ASSERTIVE_CHECK_RE = re.compile(
-    r"\b(assert|check|verify|test|pytest|unittest|curl|wget|http|urllib|health|status|exit\s+code)\b",
+    r"\b(assert|check|verify|test|pytest|unittest|curl|wget|http|urllib|health|status|exit\s+code)\b|"
+    r"(?:^|[\s/])test[_-][^\s/]+",
     re.IGNORECASE,
 )
 # (?!&) excludes fd-to-fd redirects (2>&1, 1>&2) — extremely common in any

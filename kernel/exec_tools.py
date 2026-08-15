@@ -11,8 +11,10 @@ project — that's the explicit tradeoff of pointing it there.
 """
 
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -167,6 +169,15 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
     if not os.path.isdir(workdir):
         return f"ERROR: cwd is not a directory: {cwd}"
 
+    # Python installations commonly expose `python3` but not the `python`
+    # alias. Normalize that portable spelling at the execution boundary so a
+    # model's otherwise-valid test command is not mistaken for an application
+    # failure. This is intentionally limited to the interpreter executable;
+    # project commands and arguments remain untouched.
+    command = list(command)
+    if command[0] == "python" and shutil.which("python") is None:
+        command[0] = "python3" if shutil.which("python3") else sys.executable
+
     if background:
         try:
             return _start_background(command, workdir, shell=False)
@@ -187,6 +198,19 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
     except OSError as exc:
         return f"ERROR: could not start command: {exc}"
 
+    if (
+        proc.returncode == 0
+        and len(command) >= 2
+        and command[0] in {"python", "python3", sys.executable}
+        and os.path.basename(command[1]).startswith(("test_", "test-"))
+        and command[1].endswith(".py")
+        and not stdout.strip()
+        and not stderr.strip()
+    ):
+        return (
+            f"ERROR: test module '{command[1]}' produced no test evidence; "
+            "invoke a test runner or explicitly call its test function."
+        )
     return (
         f"Exit code: {proc.returncode}\n"
         f"STDOUT:\n{_truncate(stdout)}\n"

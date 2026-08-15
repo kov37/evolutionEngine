@@ -71,7 +71,12 @@ def _wrap_with_confinement(fn, path_params):
     @functools.wraps(fn)
     def wrapped(**kwargs):
         for param in path_params:
-            if param in kwargs and isinstance(kwargs[param], str):
+            # Optional path arguments must still resolve inside the active
+            # project. Otherwise a call such as run_tests() uses the agent's
+            # process cwd and can validate unrelated files.
+            if param not in kwargs or kwargs[param] in (None, ""):
+                kwargs[param] = "."
+            if isinstance(kwargs[param], str):
                 kwargs[param] = confine(kwargs[param])
         return fn(**kwargs)
 
