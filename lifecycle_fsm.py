@@ -48,6 +48,10 @@ _TRANSITIONS = {
     (LifecycleState.VALIDATE, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.REPAIR, "validation_failed"): LifecycleState.REPAIR,
+    # A repair-phase probe may be valid for one interface while the contract
+    # still requires more interfaces. Continue in VALIDATE rather than
+    # crashing when partial evidence arrives after a failed turn.
+    (LifecycleState.REPAIR, "validation_partial"): LifecycleState.VALIDATE,
     (LifecycleState.RECOVER, "validation_failed"): LifecycleState.RECOVER,
     (LifecycleState.REPAIR, "recovery_budget_exhausted"): LifecycleState.RECOVER,
     (LifecycleState.VALIDATE, "validation_partial"): LifecycleState.VALIDATE,

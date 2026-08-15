@@ -1178,6 +1178,11 @@ You have this focused toolbelt: {offered_tool_names}.
                 validation_tools -= gate_banned
                 print(f"🚦 [4B triage gate] tools removed: {sorted(gate_banned)}")
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
+            if validation_required and not repair_required and not setup_failure:
+                # The validation FSM owns this capability plane. Escalation
+                # may narrow exploratory tools, but it cannot remove the
+                # executable check needed to satisfy the active contract.
+                tools_for_call = [t for t in tools if t.__name__ in validation_tools]
             validation_prompt = (validation_policy.prompt if validation_policy else "")
             if repair_required:
                 validation_prompt += (

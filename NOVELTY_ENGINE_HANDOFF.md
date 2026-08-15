@@ -2305,3 +2305,16 @@ product repair, and process-status/cleanup tools are removed from ordinary
 validation turns once execution is underway. Real assertion failures still use
 the product-repair path. This prevents correct artifacts from being rewritten
 because the test itself was too weak.
+
+### 2026-08-15 — keep partial evidence valid after a repair turn
+
+The last live confirmation exposed a strict-FSM crash: one executable probe
+produced partial evidence while the lifecycle was still `REPAIR`, and the loop
+attempted `REPAIR -> validation_partial`, a transition the FSM did not define.
+The run terminated with `InvalidTransition` even though the app was healthy.
+
+The FSM now routes partial evidence from `REPAIR` back to `VALIDATE`. In the
+same state, deterministic validation policy also restores an executable
+validation tool if escalation had removed it; governor restrictions may reduce
+exploration, but cannot remove the active verification plane. A regression test
+covers the transition.

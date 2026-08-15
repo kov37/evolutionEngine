@@ -120,6 +120,13 @@ class KernelToolTests(unittest.TestCase):
         fsm.transition("validation_failed")
         self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
 
+    def test_lifecycle_fsm_routes_partial_repair_evidence_back_to_validation(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        fsm.transition("mutation")
+        fsm.transition("validation_failed")
+        self.assertEqual(fsm.transition("validation_partial"), LifecycleState.VALIDATE)
+
     def test_setup_failure_never_forces_product_rewrite(self):
         self.assertFalse(_force_repair_recovery(True, True, True))
         self.assertTrue(_force_repair_recovery(True, True, False))
