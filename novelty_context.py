@@ -446,13 +446,26 @@ class NoveltyContext:
                 return
             self._start_worker_locked(event, fallback)
 
-    def observe_no_action(self, iteration: int, content: str = "") -> None:
+    def observe_no_action(self, iteration: int, content: str = "", legal_actions=None) -> None:
         """Record an actor turn that produced prose but no executable action.
 
         A stalled first turn is itself useful context.  It must not wait for
         the normal eight-event sampling interval, otherwise the small worker
         arrives only after the useful recovery window has already passed.
         """
+        legal = set(legal_actions or ())
+        if "run_command" in legal:
+            fallback_action = "run_command"
+        elif "run_tests" in legal:
+            fallback_action = "run_tests"
+        elif "patch_file" in legal:
+            fallback_action = "patch_file"
+        elif "write_file" in legal:
+            fallback_action = "write_file"
+        elif "finish_task" in legal:
+            fallback_action = "finish_task"
+        else:
+            fallback_action = "patch_file"
         with self._lock:
             self._next_event_id += 1
             event_id = self._next_event_id
@@ -473,13 +486,13 @@ class NoveltyContext:
                 if busy:
                     self._pending_event = event
                     self._pending_fallback = WorkerJudgment(
-                        event_id=event.event_id, phase="mutate", recommended_action="patch_file",
+                        event_id=event.event_id, phase="mutate", recommended_action=fallback_action,
                         blocker="The actor returned no executable tool call.", confidence=0.9,
                     )
                     self.coalesced_events += 1
                     return
                 fallback = WorkerJudgment(
-                    phase="mutate", recommended_action="patch_file",
+                    phase="mutate", recommended_action=fallback_action,
                     blocker="The actor returned no executable tool call.",
                     confidence=0.9,
                 )
@@ -488,7 +501,7 @@ class NoveltyContext:
             elif self._future is None or self._future.done():
                 fallback = WorkerJudgment(
                     event_id=event.event_id,
-                    phase="mutate", recommended_action="patch_file",
+                    phase="mutate", recommended_action=fallback_action,
                     blocker="The actor returned no executable tool call.",
                     confidence=0.9,
                 )
@@ -687,8 +700,9 @@ class NoveltyContext:
                 rendered += (
                     "\n## Immediate recovery directive\n"
                     "The actor recently returned without an executable tool call. Stop explaining and "
-                    "take one concrete action now: use write_file or patch_file to create or change the "
-                    "smallest useful artifact, then validate it with run_tests or run_command."
+                    "take one concrete action now using a tool that is legal in the current lifecycle "
+                    "phase; use a validation command when the phase is validation, or the offered "
+                    "mutation tool when the phase is repair, then continue with the required evidence."
                 )
             return rendered + f"\nEvents recorded: {len(self.events)}; worker calls: {self.worker_calls}; " \
                    f"coalesced: {self.coalesced_events}; stale judgments: {self.stale_judgments}."

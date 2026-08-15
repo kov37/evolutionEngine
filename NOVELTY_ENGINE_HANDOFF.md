@@ -1969,3 +1969,16 @@ Dependency installation is now an explicit setup event. Successful npm/pnpm/
 yarn/pip installation is never accepted as behavioral evidence, but it also
 does not enter product repair; the next turn remains focused on the required
 smoke test. Deterministic coverage passes 93 tests.
+
+The final WebSocket handoff run confirmed all three artifacts and a passing
+independent grader, but the actor returned prose for five consecutive turns
+while saying it would write a smoke test. The validation tool surface contained
+only executable checks, while the novelty worker continued recommending
+`patch_file`; this mismatch prevented the model from selecting `run_command`
+and calling `finish_task`.
+
+No-action recovery is now lifecycle-aware. It receives the legal tool names for
+the current turn, recommends validation commands during validation, and
+recommends mutation only during repair. Its generic directive no longer names
+an unavailable tool. The deterministic suite passes 95 tests, including the
+novelty-context tests.

@@ -1285,15 +1285,26 @@ You have this focused toolbelt: {offered_tool_names}.
 
         if not msg.tool_calls:
             print("⚠️  Model returned no tool call — nudging it to act.")
+            legal_names = {t.__name__ for t in tools_for_call}
             if novelty_context is not None:
-                novelty_context.observe_no_action(iteration, msg.content or "")
+                novelty_context.observe_no_action(
+                    iteration,
+                    msg.content or "",
+                    legal_actions=tuple(legal_names),
+                )
                 print(f"🧬 [novelty recovery] {novelty_context.render_for_model(action_critic=True)}")
+            if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & {"patch_file", "write_file"}:
+                next_action = "run_command, run_shell, or run_tests to produce the required behavioral evidence"
+            elif legal_names & {"patch_file", "write_file"}:
+                next_action = "patch_file or write_file to make the targeted repair"
+            else:
+                next_action = "the next executable tool offered for this lifecycle phase"
             messages.append({
                 "role": "user",
                 "content": (
-                    "Do not return another explanation. Take one executable action now. Use write_file "
-                    "or patch_file to create the smallest useful artifact, then validate it; call "
-                    "finish_task only after verification."
+                    "Do not return another explanation. Take one executable action now: use "
+                    + next_action
+                    + "; call finish_task only after verification."
                 ),
             })
             continue
