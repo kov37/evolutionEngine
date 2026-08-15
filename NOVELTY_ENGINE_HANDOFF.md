@@ -2094,3 +2094,11 @@ regrades the artifact. It does not interpret the task, synthesize a
 task-specific patch, or modify the grader, and it never retries the verifier
 indefinitely. This is the generic handoff contract needed for any independent
 test harness. Deterministic coverage is now 100 tests and preflight passes.
+
+The first verifier-repair run fixed the stale client artifact and passed the
+grader, but the repair actor did not issue a second `finish_task`; the harness
+had incorrectly inherited the first run's finish signal. The scorecard now
+requires the repair pass itself to finish whenever verifier feedback starts a
+repair. Its prompt also tells the actor not to invoke the generated grader
+directly—the harness runs it after handoff—keeping the repair budget focused on
+the reported evidence.

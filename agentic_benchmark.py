@@ -130,8 +130,9 @@ def _verifier_repair_prompt(task: Task, detail: str) -> str:
         + "The previous handoff was rejected by the independent verifier. Treat the exact feedback "
           "below as authoritative failure evidence. Inspect the current workspace, repair the "
           "implementation or missing artifact that caused it, run a focused check that covers the "
-          "failure, and call finish_task only after the verifier condition is satisfied. Do not "
-          "rewrite the verifier or supplied task files.\n"
+          "failure, and call finish_task promptly after the repair. The harness will rerun the "
+          "independent verifier after handoff; do not invoke or rewrite its generated grader, and "
+          "do not rewrite supplied task files.\n"
         + detail[-3000:]
     )
 
@@ -745,6 +746,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     elapsed = time.monotonic() - started
     artifact_passed, detail = _grade(task, work)
     metrics = _metrics(stdout or "")
+    initial_metrics = metrics
     verifier_repair = None
     # A clean actor handoff is not enough when the independent verifier rejects
     # the artifact. Give the same workspace one bounded repair pass with the
@@ -786,11 +788,15 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             "returncode": repair_returncode,
             "elapsed_seconds": round(time.monotonic() - repair_started, 1),
             "artifact_passed": artifact_passed,
+            "done_signal": _metrics(repair_stdout or "")["done_signal"],
         }
         metrics = _metrics(stdout or "")
     scorecard = {
         "artifact_passed": artifact_passed,
-        "finish_called": metrics["done_signal"],
+        "finish_called": (
+            verifier_repair["done_signal"] if verifier_repair is not None
+            else initial_metrics["done_signal"]
+        ),
         "run_completed": _run_completed(timed_out, returncode),
     }
     # A correct partial artifact is useful evidence, but it is not a complete
@@ -826,6 +832,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     }
     if verifier_repair is not None:
         record["verifier_repair"] = verifier_repair
+    record["elapsed_seconds"] = round(time.monotonic() - started, 1)
     RUNS.mkdir(parents=True, exist_ok=True)
     with (RUNS / "results.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")

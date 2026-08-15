@@ -23,7 +23,9 @@ class AdversarialPreflightTests(unittest.TestCase):
         prompt = _verifier_repair_prompt(task, "AssertionError: required artifact is stale")
         self.assertIn("Independent verifier feedback", prompt)
         self.assertIn("required artifact is stale", prompt)
-        self.assertIn("Do not rewrite the verifier", prompt)
+        self.assertIn("do not invoke or rewrite its generated grader", prompt)
+        self.assertIn("call finish_task promptly", prompt)
+        self.assertIn("do not invoke", prompt)
 
     def test_readback_wrappers_are_inspection(self):
         commands = [
