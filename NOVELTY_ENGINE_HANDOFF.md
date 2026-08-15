@@ -1780,3 +1780,14 @@ Regression coverage now passes 85 deterministic tests. This is model-agnostic
 runner behavior, not a special case for the cascading benchmark. The next
 real-model run should expose the TypeError after the syntax repair and allow a
 second product mutation instead of misclassifying the workspace as empty.
+
+The repeated Qwen3.8-27B run confirmed that behavior: the first validation
+reported the original SyntaxError, the first mutation repaired it, and the
+dependency-free fallback then reported the real `int / str` TypeError. The
+actor made the second repair and independent validation passed. The run used 7
+model turns, with first mutation at 35.1s, first validation at 45.7s, 2
+mutations, 3 validations, and an explicit finish. The artifact and workflow
+were correct, but the benchmark scorecard remained false because its separate
+iteration target is 3. This is now a turn-efficiency problem, not a context or
+test-discovery failure; do not loosen the scorecard or alter the frozen task
+to make it pass.
