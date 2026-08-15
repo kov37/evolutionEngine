@@ -255,6 +255,7 @@ class NoveltyContext:
         self.started_at = monotonic()
         self.no_action_turns = 0
         self._gate_judgment: WorkerJudgment | None = None
+        self._last_stale_pair: tuple[int, int] | None = None
 
     def state_text(self) -> str:
         with self._lock:
@@ -617,8 +618,10 @@ class NoveltyContext:
             recent = self.events[-self.action_after_events:]
             latest_event_id = recent[-1].event_id if recent else 0
             judgment_is_stale = bool(judgment.event_id and judgment.event_id < latest_event_id)
-            if judgment_is_stale:
+            stale_pair = (judgment.event_id, latest_event_id) if judgment_is_stale else None
+            if judgment_is_stale and stale_pair != self._last_stale_pair:
                 self.stale_judgments += 1
+                self._last_stale_pair = stale_pair
             adjacent_failure = len(self.events) >= 2 and all(
                 e.result.startswith(("ERROR", "REJECTED")) for e in self.events[-2:]
             ) and _call_key(self.events[-2].tool, self.events[-2].arguments) == _call_key(
@@ -636,14 +639,15 @@ class NoveltyContext:
             )
             critic_judgment = judgment
             if judgment_is_stale:
-                # A structured triage checkpoint is more informative than a
-                # generic local judgment for a newer event. Preserve its
-                # failure-plane diagnosis while still using local fallback for
-                # ordinary stale event advice.
-                if judgment.diagnosis or judgment.failure_class != "unknown":
-                    critic_judgment = judgment
-                else:
-                    critic_judgment = _local_judgment(self.events, self.events[-1], self.action_after_events)
+                # Never inject stale model advice into the actor prompt. A
+                # delayed 4B diagnosis can describe an earlier failure plane
+                # and make the actor repair a healthy file or repeat an old
+                # setup action. Explicit synchronous triage remains the
+                # authority at failure boundaries; ordinary async advice must
+                # match the event currently being acted on.
+                critic_judgment = _local_judgment(
+                    self.events, self.events[-1], self.action_after_events
+                )
             # Do not wait for an asynchronous 4B result to become actionable.
             # The local policy supplies a conservative recommendation; a later
             # 4B judgment can refine it on the next turn.

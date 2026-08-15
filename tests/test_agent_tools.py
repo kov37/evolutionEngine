@@ -886,17 +886,21 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
         context.close()
 
-    def test_structured_checkpoint_survives_newer_stale_event(self):
+    def test_stale_structured_checkpoint_is_not_injected_into_newer_prompt(self):
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
         context.last_judgment = WorkerJudgment(
             event_id=1, diagnosis="runner unavailable", failure_class="setup",
             next_action="run_command", confidence=0.9, source="4b",
         )
+        context.observe(1, "read_file", {}, "older event", validation=False)
         context.observe(2, "read_file", {}, "newer ordinary event", validation=False)
         rendered = context.render_for_model(action_critic=True)
+        first_stale_count = context.metrics()["stale_judgments"]
+        context.render_for_model(action_critic=True)
         context.close()
-        self.assertIn("Failure class: setup", rendered)
-        self.assertIn("run_command", rendered)
+        self.assertNotIn("Failure class: setup", rendered)
+        self.assertIn("use the deterministic local recommendation", rendered)
+        self.assertEqual(first_stale_count, 1)
 
     def test_context_worker_is_async_and_has_local_fallback(self):
         calls = []

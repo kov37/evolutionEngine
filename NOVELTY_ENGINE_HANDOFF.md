@@ -2588,3 +2588,23 @@ seconds wall time. This is a functional pass, but not yet an efficiency pass:
 the stale 4B advisory stream and repeated model turns remain the next generic
 optimization target. The worker did not control the final decision; the
 deterministic validation ledger did.
+
+### 2026-08-15 — make asynchronous 4B advice freshness-safe
+
+The WebSocket trace showed why the asynchronous worker was not helping: a
+delayed 4B diagnosis for an earlier event was rendered into later actor
+prompts. In that run the stale diagnosis said the server was still broken or
+that validation tools were unavailable even after newer deterministic events
+showed progress. The actor spent turns responding to the old diagnosis.
+
+The context manager now treats freshness as a hard boundary. If a worker
+judgment's event id is older than the latest event, the prompt receives only a
+deterministic local judgment for the latest event. The stale result is still
+counted for observability, but it cannot inject a failure class, target, or
+action. Synchronous triage checkpoints remain available when the orchestrator
+explicitly asks the 4B to classify a current failure. The stale metric now
+counts distinct stale event pairs rather than every repeated render.
+
+The focused deterministic suite remains at 125 passing tests and preflight is
+green. This change deliberately reduces the 4B's prompt authority to increase
+correctness; it does not remove the worker or its current-event advisory role.
