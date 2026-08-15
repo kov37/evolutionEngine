@@ -2843,3 +2843,19 @@ an explicit instruction to change the patch. This keeps the checkpoint bounded
 while preserving the newest evidence needed to correct a malformed edit. The
 focused suite remains 108/108 and compilation is clean. Rerun the unchanged
 Todo task to verify malformed repair attempts converge instead of repeating.
+
+### 2026-08-15 — clean Todo benchmark passes end to end
+
+After freeing the verifier's reserved port, the unchanged Todo benchmark passed
+with Qwen3.8-27B through the MLX/llama.cpp-compatible endpoint. The actor made
+one initial product mutation, ran the managed service, executed the required
+HTTP checks, improved the probe after the deterministic response-shape guard,
+and reached independent completion.
+
+Measured result: 5 model iterations, 5 tool calls, 1 mutation, 4 accepted
+validations, 308.9 seconds, artifact grader pass, `finish_task` pass, and clean
+run completion. The asynchronous 4B made zero calls because this trajectory did
+not produce a repeated-action signal; it did not add latency or authority.
+The earlier failed verifier result was environmental contamination from the
+scene preview occupying port 18765, not a product or engine failure. The next
+benchmark should use a fresh isolated port policy before testing another task.
