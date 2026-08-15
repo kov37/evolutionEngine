@@ -196,8 +196,19 @@ def _fit_llama_prompt(base_url, messages, max_tokens, timeout_seconds, extra_pay
     context_tokens = _context_window_tokens("llama-cpp", base_url)
     response_reserve = max(256, int(max_tokens or 0))
     prompt_budget = max(1_024, context_tokens - response_reserve - 256)
+    tokenize_root = _llama_root(base_url)
+    if tokenize_root in _TOKENIZE_UNAVAILABLE_BASE_URLS:
+        return messages, None, prompt_budget
     try:
         prompt_tokens = _llama_token_count(base_url, messages, timeout_seconds, extra_payload)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            _TOKENIZE_UNAVAILABLE_BASE_URLS.add(tokenize_root)
+            print("⚠️ [prompt measurement unavailable] provider has no /tokenize endpoint; "
+                  "using bounded context fallback")
+        else:
+            print(f"⚠️ [prompt measurement unavailable] HTTP {exc.code}: {exc}")
+        return messages, None, prompt_budget
     except Exception as exc:
         # The percentage/raw-output bound remains the safe fallback when a
         # provider does not expose exact tokenization.
@@ -387,6 +398,11 @@ RAW_TOOL_CONTEXT_FRACTION = 0.18
 CHARS_PER_TOKEN_ESTIMATE = 4
 FALLBACK_CONTEXT_WINDOW_TOKENS = 16_384
 
+# Some OpenAI-compatible local servers expose chat completions but not the
+# optional exact-token endpoint. Cache that capability result per server so a
+# missing endpoint cannot add one failed HTTP request to every actor turn.
+_TOKENIZE_UNAVAILABLE_BASE_URLS = set()
+
 
 def _context_window_tokens(backend, base_url):
     """Discover the provider window when possible; use a safe fallback."""
@@ -486,6 +502,10 @@ def _terminal_provider_error(error) -> bool:
     return any(marker in text for marker in (
         "connection refused",
         "connection reset by peer",
+        "remote end closed connection without response",
+        "remotedisconnected",
+        "broken pipe",
+        "connection aborted",
         "name or service not known",
         "nodename nor servname",
     ))

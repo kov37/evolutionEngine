@@ -1498,3 +1498,36 @@ Plain `--novelty-context` records asynchronous events without waiting for or
 injecting a worker judgment. This removes the worker from the default latency
 path while preserving an experimental path for future ablations. Deterministic
 tests and compilation remain green (68 tests).
+
+### 2026-08-15 — bounded provider failure handling and token-endpoint capability cache
+
+The live WebSocket benchmark exposed an engine-level latency failure rather
+than a WebSocket-specific defect. After its first validation failure, the MLX
+actor provider returned `RemoteDisconnected: Remote end closed connection
+without response`. The retry loop treated that request-specific server close as
+retryable and spent the remaining run budget repeating the same request five
+times. The run ended at its 600-second watchdog with no additional mutation.
+
+`agent.py` now classifies remote closed-response, broken-pipe, and aborted
+connection errors as terminal for the current actor turn. The run exits with a
+recorded model error instead of burning the whole budget on an unchanged
+request. This is a transport policy, not a model or benchmark exception.
+
+The same run showed that this MLX OpenAI-compatible server does not expose
+`/tokenize`; the context manager previously retried that optional probe on every
+turn. The provider capability is now cached by server root after a 404, so the
+existing bounded fallback context policy is used without repeated failed HTTP
+requests. Exact token measurement remains enabled for providers that expose the
+endpoint.
+
+Evidence:
+
+```text
+python3 -m unittest -v tests.test_agent_tools
+Ran 67 tests in 0.147s — OK (1 skipped: pytest unavailable)
+```
+
+The next real-model check should verify that the same provider failure ends in
+one bounded turn and that a healthy small request still works. Do not weaken
+the independent WebSocket grader or alter the fixture to compensate for a
+provider transport failure.

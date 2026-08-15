@@ -1,8 +1,10 @@
 import tempfile
+import urllib.error
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error, _worker_triage_enabled
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -803,7 +805,28 @@ class KernelToolTests(unittest.TestCase):
 
     def test_provider_refusal_is_terminal(self):
         self.assertTrue(_terminal_provider_error(ConnectionRefusedError(61, "Connection refused")))
+        self.assertTrue(_terminal_provider_error(
+            RuntimeError("RemoteDisconnected: Remote end closed connection without response")
+        ))
         self.assertFalse(_terminal_provider_error(RuntimeError("temporary malformed response")))
+
+    def test_missing_tokenize_endpoint_is_cached_per_provider(self):
+        base_url = "http://token-test:8080/v1"
+        root = "http://token-test:8080"
+        _TOKENIZE_UNAVAILABLE_BASE_URLS.discard(root)
+        error = urllib.error.HTTPError(
+            root + "/tokenize", 404, "not found", {}, None
+        )
+        try:
+            with patch("agent._context_window_tokens", return_value=16_384), \
+                 patch("agent._llama_token_count", side_effect=error) as measure:
+                _fit_llama_prompt(base_url, [], 256, 1)
+                self.assertEqual(measure.call_count, 1)
+            with patch("agent._llama_token_count") as measure:
+                _fit_llama_prompt(base_url, [], 256, 1)
+                measure.assert_not_called()
+        finally:
+            _TOKENIZE_UNAVAILABLE_BASE_URLS.discard(root)
 
     def test_run_command_rejects_silent_test_module_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
