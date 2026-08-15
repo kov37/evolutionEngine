@@ -32,7 +32,8 @@ then name the exact deterministic and real-model tests that would verify it.
   "head": "65bc175",
   "head_message": "Validate completed multi-file transactions immediately",
   "remote_branch": "origin/noveltyEngine",
-  "remote_in_sync_at_last_push": false,
+  "remote_in_sync_at_last_push": true,
+  "last_pushed_head": "6543683",
   "worktree": {
   "tracked_modified": [
     "agent.py",
