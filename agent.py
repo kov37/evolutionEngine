@@ -388,6 +388,73 @@ def _intervention_messages(messages, tail=INTERVENTION_TAIL_MESSAGES):
         )},
     ] + recent
 
+
+_REPAIR_INSPECTION_TOOLS = frozenset({
+    "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
+    "list_workspace", "list_dir", "diff_files", "git_diff", "recall",
+})
+
+
+def _is_blocked_repair_action(tool_name, result_content):
+    """Return true when a repair inspection was rejected by the engine.
+
+    A normal missing-file error can be useful feedback and deserves one
+    corrected attempt.  These markers mean something different: the actor is
+    replaying an action that the current lifecycle deliberately removed.  The
+    right response is a fresh repair checkpoint, not another model turn with
+    the same stale assistant message in view.
+    """
+    if tool_name not in _REPAIR_INSPECTION_TOOLS:
+        return False
+    lower = str(result_content or "").lower()
+    return any(marker in lower for marker in (
+        "is unavailable this turn",
+        "not in allowed set",
+        "repeated failing call",
+        "rejected: repeated",
+        "invalid tool call",
+    ))
+
+
+def _repair_checkpoint_messages(
+    messages, *, last_repair_packet, mutation_checkpoint=None, state_text=""
+):
+    """Build a fresh, bounded action context for a stuck product repair.
+
+    Keeping the foundation and the last accepted mutation preserves the code
+    the actor may need to patch.  Dropping the old action-selection tail is
+    intentional: a stale assistant message such as "I will read the server
+    log" can otherwise survive a tool-plane restriction and be emitted again
+    even when that tool is no longer offered.
+    """
+    foundation = list(messages[:2])
+    checkpoint = foundation + [{
+        "role": "system",
+        "content": (
+            "[fresh repair checkpoint] The previous repair action was rejected by the engine. "
+            "The old action transcript is intentionally omitted. Use only the current failure evidence "
+            "and the accepted mutation below; make one concrete product patch now. Do not repeat a "
+            "rejected inspection, start a service, run another probe, or return a plan."
+        ),
+    }]
+    if mutation_checkpoint:
+        checkpoint.extend(mutation_checkpoint)
+    if state_text:
+        checkpoint.append({"role": "system", "content": state_text})
+    checkpoint.append({
+        "role": "system",
+        "content": "Latest executable failure evidence:\n" + str(last_repair_packet or "(not available)"),
+    })
+    checkpoint.append({
+        "role": "system",
+        "content": (
+            "Repair contract: call patch_file or write_file now on the implicated product artifact. "
+            "The validation artifact and test files are evidence and must remain unchanged."
+        ),
+    })
+    return checkpoint
+
+
 # How many prunable entries must accumulate before a prune batch actually
 # runs. Found live: with this at "prune immediately, one at a time" (the
 # original design), pruning fired on nearly every single iteration once
@@ -817,6 +884,11 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     process_status_used = False
     tool_plane_recovery_attempts = 0
     repair_recovery_entries = 0
+    # The last accepted mutation is the minimum durable source context needed
+    # for a fresh repair checkpoint.  It prevents a stale action transcript
+    # from surviving a blocked inspection without throwing away the code the
+    # actor just created.
+    last_mutation_checkpoint = None
     # Permit a small bounded set of related product mutations after the first
     # successful write so multi-file changes can reach a coherent validation
     # point. The allowance is consumed immediately and never opens an
@@ -1239,17 +1311,18 @@ You have this focused toolbelt: {offered_tool_names}.
             # Keep the stable task foundation and recent evidence, then force
             # a concrete mutation. This is a compact repair checkpoint, not a
             # second unbounded transcript.
-            messages_for_call = _intervention_messages(messages_for_call, tail=8)
-            messages_for_call = messages_for_call + [{
-                "role": "system",
-                "content": (
-                    "## Repair checkpoint\n"
-                    f"Three repair turns produced no mutation. Latest failure:\n{last_repair_packet}\n"
-                    "Use the evidence already gathered. Make exactly one targeted patch to the implicated "
-                    "implementation now; do not reread unchanged files, start another service, or run another "
-                    "probe first. Preserve the supplied validation artifact."
-                ),
-            }]
+            if structured_summary_enabled and state is not None:
+                checkpoint_state = state.render()
+            elif working_state_enabled and ws is not None and ws.revision > 0:
+                checkpoint_state = working_state.render(ws)
+            else:
+                checkpoint_state = ""
+            messages_for_call = _repair_checkpoint_messages(
+                messages,
+                last_repair_packet=last_repair_packet,
+                mutation_checkpoint=last_mutation_checkpoint,
+                state_text=checkpoint_state,
+            )
 
         response = None
         last_error = None
@@ -1538,6 +1611,7 @@ You have this focused toolbelt: {offered_tool_names}.
         turn_validation_failed = False
         turn_tool_plane_failure = False
         turn_probe_quality_failure = False
+        blocked_repair_action = False
         validation_suggestions = []
         for call, tmsg in zip(turn_calls, tool_messages):
             tool_name = call.function.name
@@ -1546,6 +1620,12 @@ You have this focused toolbelt: {offered_tool_names}.
                 process_status_used = True
             capability = action_governor.classify(tool_name, args)
             result = tmsg.get("content", "")
+            if repair_required and _is_blocked_repair_action(tool_name, result):
+                blocked_repair_action = True
+                print(
+                    f"⚠️ [repair checkpoint] blocked inspection {tool_name}; "
+                    "discarding the stale action transcript before the next repair turn"
+                )
             if _governed and capability == "MUTATE" and args.get("path"):
                 rejection = risk.reject_destructive_rewrite(
                     args["path"], io_tools._resolve(args["path"]),
@@ -1717,6 +1797,15 @@ You have this focused toolbelt: {offered_tool_names}.
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")
         if turn_mutated:
+            successful_mutation_messages = []
+            if tool_start_idx > 0:
+                successful_mutation_messages.append(messages[tool_start_idx - 1])
+            for call, tmsg in zip(turn_calls, tool_messages):
+                capability = action_governor.classify(call.function.name, call.function.arguments or {})
+                result = tmsg.get("content", "")
+                if capability == "MUTATE" and not result.startswith(("ERROR:", "REJECTED:")):
+                    successful_mutation_messages.append(tmsg)
+            last_mutation_checkpoint = successful_mutation_messages or last_mutation_checkpoint
             mutation_was_in_validation_batch = validation_phase_before_turn and not repair_turn_before_dispatch
             lifecycle.transition("mutation")
             if repair_required:
@@ -1803,6 +1892,20 @@ You have this focused toolbelt: {offered_tool_names}.
                     f"confidence={gate_judgment.confidence:.2f}"
                 )
             print(f"⚠️  [validation phase] validation failed ({validation_failures}); targeted repair required before recheck")
+        if (blocked_repair_action and repair_required and not turn_mutated
+                and not setup_failure and not repair_recovery_mode):
+            # A rejected inspection is a control-plane convergence failure,
+            # not a reason to spend the whole ordinary repair budget replaying
+            # the same action.  Move directly to the bounded mutation
+            # checkpoint on the next turn.
+            lifecycle.transition("recovery_budget_exhausted")
+            repair_recovery_mode = True
+            repair_recovery_entries += 1
+            repair_turns_used = max(repair_turns_used, REPAIR_TURN_BUDGET)
+            print(
+                "🧭 [repair recovery] blocked inspection detected; "
+                "fresh targeted-mutation checkpoint required next turn"
+            )
         if (repair_required and not turn_mutated and repair_turns_used >= REPAIR_TURN_BUDGET
                 and not repair_recovery_mode):
             lifecycle.transition("recovery_budget_exhausted")

@@ -2729,3 +2729,27 @@ targeted mutation. Successful mutation resets the grace counter. This is a
 model-agnostic convergence bound, not a task-specific rule. The deterministic
 suite remains at 127 passing tests; rerun the real Todo task from this commit
 to verify the deadlock repair can no longer be hidden by repeated probes.
+
+### 2026-08-15 — reset stale repair actions after blocked inspections
+
+The next Todo run exposed a more precise failure. After the POST timeout, the
+actor successfully read the empty process log once, then kept requesting the
+same `read_file` call after the repair policy had removed that tool. The engine
+rejected every replay, but the old assistant/tool tail remained in the actor
+context, so a forced tool call did not produce a mutation.
+
+The repair controller now detects engine-level rejection markers on inspection
+calls and enters the bounded recovery checkpoint immediately. That checkpoint
+keeps the original task, the last accepted mutation, the structured state, and
+the latest executable failure packet, while dropping stale action-selection
+messages. It offers only the legal targeted mutation surface and explicitly
+preserves supplied tests and validation artifacts. This is a generic context
+boundary, not a Todo-specific repair.
+
+Two regression tests cover the rejection classifier and stale-tail removal.
+The focused `tests/test_agent_tools.py` suite passes 106 tests. A repository-wide
+pytest collection is not currently a valid signal because the frozen SymPy
+13878 fixture is Python-legacy code (`collections.Mapping`) and fails during
+collection on Python 3.14; the engine suite remains green when selected
+explicitly. The next step is a fresh real Todo run to measure whether the
+checkpoint produces a patch instead of another rejected read.

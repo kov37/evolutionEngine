@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 from kernel.discovery import find_files
@@ -49,6 +49,38 @@ class KernelToolTests(unittest.TestCase):
 
     def test_repair_recovery_has_a_direct_tool_call_path(self):
         self.assertTrue(_force_tool_call_after_no_action(2, "llama-cpp"))
+
+    def test_blocked_repair_inspection_triggers_checkpoint_only_for_engine_rejections(self):
+        self.assertTrue(_is_blocked_repair_action(
+            "read_file", "ERROR: 'read_file' is unavailable this turn — only ['patch_file'] are allowed"
+        ))
+        self.assertTrue(_is_blocked_repair_action(
+            "search_file", "REJECTED: repeated failing call search_file with the same arguments"
+        ))
+        self.assertFalse(_is_blocked_repair_action("read_file", "ERROR: file not found"))
+        self.assertFalse(_is_blocked_repair_action("run_command", "ERROR: tool unavailable"))
+
+    def test_repair_checkpoint_drops_stale_action_tail_and_keeps_last_mutation(self):
+        mutation = {"role": "assistant", "content": "write implementation"}
+        mutation_result = {"role": "tool", "name": "write_file", "content": "Wrote server.py"}
+        messages = [
+            {"role": "system", "content": "foundation"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "I will read the log again"},
+            {"role": "tool", "name": "read_file", "content": "REJECTED: repeated failing call"},
+        ]
+        checkpoint = _repair_checkpoint_messages(
+            messages,
+            last_repair_packet="POST /api/tasks timed out",
+            mutation_checkpoint=[mutation, mutation_result],
+            state_text="active file: server.py",
+        )
+        rendered = "\n".join(str(message) for message in checkpoint)
+        self.assertEqual(checkpoint[:2], messages[:2])
+        self.assertIn("write implementation", rendered)
+        self.assertIn("POST /api/tasks timed out", rendered)
+        self.assertNotIn("I will read the log again", rendered)
+        self.assertNotIn("REJECTED: repeated failing call", rendered)
 
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}
