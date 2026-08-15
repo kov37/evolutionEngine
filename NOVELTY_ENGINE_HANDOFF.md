@@ -2383,3 +2383,19 @@ When the FSM enters repair recovery under llama.cpp, the transport now requires
 an executable tool call immediately and gives it the same 4096-token reserve as
 the initial-action path. This is provider-boundary control, independent of task
 or model name; ordinary repair turns remain unchanged.
+
+### 2026-08-15 — frozen real_app passes end to end
+
+After the validation-plane and repair-authority fixes, the Qwen3.8-27B live
+run completed the frozen `real_app` task in four iterations and 254 seconds.
+The actor wrote one `server.py`, started it, and ran three executable checks.
+The checks covered health, HTML, POST creation, empty-title rejection, a second
+POST, and GET collection behavior. Independent grading passed, the lifecycle
+ended in `COMPLETE`, `finish_task` was called, and the scorecard was fully green:
+artifact passed, run completed, and handoff completed.
+
+This is the first clean end-to-end result for the harder multi-endpoint app
+workflow. The next task should be a different artifact shape rather than
+another Todo variation; `wifi_simulator` is next because it stresses a larger
+single-file UI, interactive controls, safety constraints, and static/runtime
+validation without external dependencies.
