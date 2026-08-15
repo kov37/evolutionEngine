@@ -2458,3 +2458,20 @@ the actor to use a valid one-line command or a temporary multiline helper under
 `.agentic/`. Syntax errors naming an actual product file remain product
 failures. This keeps the distinction evidence-based rather than tied to the
 3D task or a particular application artifact.
+
+### 2026-08-15 — proactively execute validation helpers
+
+The longer `3d_scene` run produced a passing artifact and then wrote
+`.agentic/verify_scene.py`, but its 900-second budget expired before the actor
+could spend another model turn calling that helper. This was orchestration
+latency, not a reasoning requirement: the helper path and interpreter were
+already explicit.
+
+The engine now executes a newly written `.agentic/` helper immediately when it
+has a recognized safe extension (`.py` via `python3`, `.js`/`.cjs` via `node`,
+or `.sh` via `bash`). The generated command is fixed by the orchestrator and
+uses argv semantics; unknown extensions remain model-controlled. The helper's
+result flows through the normal validation contract, FSM, evidence ledger, and
+completion check, so this shortcut cannot declare success without accepted
+behavioral evidence. This removes one actor turn while preserving the generic
+validation boundary.

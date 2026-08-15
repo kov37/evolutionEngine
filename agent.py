@@ -566,6 +566,27 @@ def _is_validation_setup_failure(text: str) -> bool:
     ))
 
 
+def _auto_validation_command(path: str):
+    """Return a safe argv command for a newly written validation helper.
+
+    Helpers are explicitly confined below ``.agentic/`` by the validation
+    policy. Running one immediately is a deterministic orchestration hook: it
+    removes a model turn whose only purpose would be to call the helper the
+    actor just created. Unknown extensions are left to the actor because the
+    engine cannot infer their interpreter safely.
+    """
+    if not lifecycle_policy.is_validation_helper_path(path):
+        return None
+    normalized = str(path).replace("\\", "/").lower()
+    if normalized.endswith(".py"):
+        return ["python3", path]
+    if normalized.endswith((".js", ".cjs")):
+        return ["node", path]
+    if normalized.endswith(".sh"):
+        return ["bash", path]
+    return None
+
+
 def _has_orientation_evidence(messages) -> bool:
     """Return whether a targeted inspection produced usable evidence."""
     evidence_tools = {"read_file", "find_files", "search_file", "list_symbols"}
@@ -1386,13 +1407,14 @@ You have this focused toolbelt: {offered_tool_names}.
         no_action_turns = 0
 
         tool_start_idx = len(messages)
+        turn_calls = list(msg.tool_calls)
         # risk_layer.py: checkpoint every file about to be MUTATEd, BEFORE
         # dispatch actually runs the call — so a bad patch_file/write_file
         # can be rolled back afterward if needed. Uses the same
         # classification action_governor.py's ledger will independently
         # apply to the same call right after dispatch.
         if _governed:
-            for call in msg.tool_calls:
+            for call in turn_calls:
                 if action_governor.classify(call.function.name, call.function.arguments) == "MUTATE":
                     rel_path = (call.function.arguments or {}).get("path")
                     if rel_path:
@@ -1410,7 +1432,7 @@ You have this focused toolbelt: {offered_tool_names}.
         blocked_command_calls = set()
         blocked_command_reasons = {}
         if orientation_recovery_active and orientation_evidence_available:
-            for call in msg.tool_calls:
+            for call in turn_calls:
                 if call.function.name in {"run_command", "run_shell"}:
                     args = call.function.arguments or {}
                     if lifecycle_policy.is_inspection_command(
@@ -1431,7 +1453,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # artifact or supplied evidence.
             command_mutation_blocked = not repair_required or setup_failure
             if setup_failure:
-                for call in msg.tool_calls:
+                for call in turn_calls:
                     if call.function.name not in {"patch_file", "write_file"}:
                         continue
                     args = call.function.arguments or {}
@@ -1445,7 +1467,7 @@ You have this focused toolbelt: {offered_tool_names}.
                             "manifest or a helper below .agentic/; product and test paths remain frozen."
                         )
             if command_mutation_blocked:
-                for call in msg.tool_calls:
+                for call in turn_calls:
                     if call.function.name not in {"run_command", "run_shell"}:
                         continue
                     args = call.function.arguments or {}
@@ -1458,11 +1480,43 @@ You have this focused toolbelt: {offered_tool_names}.
                             "only when the FSM enters product repair."
                         )
         tool_messages = dispatch_tool_calls(
-            msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls,
+            turn_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls,
             blocked_mutation_paths=blocked_mutation_paths,
             blocked_command_calls=blocked_command_calls,
             blocked_command_reasons=blocked_command_reasons,
         )
+
+        # Proactive validation hook: when the actor writes a clearly named
+        # helper below .agentic/, execute it immediately instead of spending a
+        # second model turn to request the obvious next command. This remains
+        # bounded and model-agnostic: only the helper path and interpreter are
+        # selected deterministically; unknown extensions stay model-controlled.
+        auto_calls = []
+        auto_messages = []
+        if validation_required and "run_command" in allowed_names:
+            for call, tmsg in zip(turn_calls, tool_messages):
+                if call.function.name not in {"write_file", "patch_file"}:
+                    continue
+                path = (call.function.arguments or {}).get("path", "")
+                command = _auto_validation_command(path)
+                if not command or tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
+                    continue
+                auto_call = SimpleNamespace(function=SimpleNamespace(
+                    name="run_command",
+                    arguments={"command": command, "timeout": 120, "cwd": ".", "background": False},
+                ))
+                auto_calls.append(auto_call)
+                auto_messages.extend(dispatch_tool_calls(
+                    [auto_call], tool_map, allowed_names=allowed_names,
+                    blocked_calls=blocked_calls,
+                    blocked_mutation_paths=blocked_mutation_paths,
+                    blocked_command_calls=blocked_command_calls,
+                    blocked_command_reasons=blocked_command_reasons,
+                ))
+        if auto_calls:
+            turn_calls.extend(auto_calls)
+            tool_messages.extend(auto_messages)
+            print(f"⚡ [proactive helper validation] executed {len(auto_calls)} helper(s) immediately")
         messages.extend(tool_messages)
         # This runs regardless of which optional memory mode is enabled.
         # Novelty context must not leave raw tool output unbounded.
@@ -1476,7 +1530,7 @@ You have this focused toolbelt: {offered_tool_names}.
         turn_tool_plane_failure = False
         turn_probe_quality_failure = False
         validation_suggestions = []
-        for call, tmsg in zip(msg.tool_calls, tool_messages):
+        for call, tmsg in zip(turn_calls, tool_messages):
             tool_name = call.function.name
             args = call.function.arguments or {}
             capability = action_governor.classify(tool_name, args)
@@ -1672,7 +1726,7 @@ You have this focused toolbelt: {offered_tool_names}.
             repair_required = True
             repair_inspection_used = False
             failed_packets = []
-            for call, tmsg in zip(msg.tool_calls, tool_messages):
+            for call, tmsg in zip(turn_calls, tool_messages):
                 name = call.function.name
                 args = call.function.arguments or {}
                 if name in {"run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"}:
@@ -1744,7 +1798,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 print("✅ [orchestrator completion] independent validation succeeded; task is complete")
 
         if novelty_context is not None:
-            for call, tmsg in zip(msg.tool_calls, tool_messages):
+            for call, tmsg in zip(turn_calls, tool_messages):
                 args = call.function.arguments or {}
                 tool_name = call.function.name
                 capability = action_governor.classify(tool_name, args)
@@ -1764,14 +1818,14 @@ You have this focused toolbelt: {offered_tool_names}.
             # facts_accumulated via fact_extraction) BEFORE this point, so
             # pruning the raw text afterward loses nothing state.render()
             # depends on — only recall(N) needs it, for exact original text.
-            for i, (call, tmsg) in enumerate(zip(msg.tool_calls, tool_messages)):
+            for i, (call, tmsg) in enumerate(zip(turn_calls, tool_messages)):
                 state.update(call.function.name, call.function.arguments, tmsg["content"])
                 entry_number = len(entry_positions) + 1
                 memory.record(entry_number, tmsg["content"])
                 entry_positions[entry_number] = tool_start_idx + i
                 ledger.record(iteration, call.function.name, call.function.arguments, tmsg["content"])
             print(f"🧱 [state updated] {state.render()}")
-            recent = ledger.history[-len(msg.tool_calls):]
+            recent = ledger.history[-len(turn_calls):]
             gov_desc = ", ".join(
                 f"{e['tool_name']}[{e['capability']}]{'(dup)' if e['is_duplicate'] else ''}" for e in recent
             )
@@ -1839,7 +1893,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # crosses one of should_checkpoint's real triggers.
             turn_mutated = False
             turn_validated = False
-            for i, (call, tmsg) in enumerate(zip(msg.tool_calls, tool_messages)):
+            for i, (call, tmsg) in enumerate(zip(turn_calls, tool_messages)):
                 entry_number = len(entry_positions) + 1
                 memory.record(entry_number, tmsg["content"])
                 entry_positions[entry_number] = tool_start_idx + i
@@ -1852,7 +1906,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 turn_mutated = turn_mutated or capability == "MUTATE"
                 turn_validated = turn_validated or capability == "VALIDATE"
 
-            recent = ledger.history[-len(msg.tool_calls):]
+            recent = ledger.history[-len(turn_calls):]
             gov_desc = ", ".join(
                 f"{e['tool_name']}[{e['capability']}]{'(dup)' if e['is_duplicate'] else ''}" for e in recent
             )
@@ -1914,7 +1968,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # Injected as a trailing message for the NEXT call (top of the
             # loop), not written into `messages` itself — see the comment
             # there for why.
-            for i, (call, tmsg) in enumerate(zip(msg.tool_calls, tool_messages)):
+            for i, (call, tmsg) in enumerate(zip(turn_calls, tool_messages)):
                 context_summary = worker.summarize_context(
                     context_summary, call.function.name, call.function.arguments, tmsg["content"]
                 )
@@ -1950,7 +2004,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 pruned_desc = ", ".join(f"#{n} ({c} chars)" for n, c in newly_pruned)
                 print(f"🗑️  [pruned] {pruned_desc} — still recallable via recall(N)")
         elif sidecar_enabled:
-            for call, tmsg in zip(msg.tool_calls, tool_messages):
+            for call, tmsg in zip(turn_calls, tool_messages):
                 if worker_enabled:
                     # Orchestrator-worker pattern: qwen3.5:9b compresses the
                     # raw result into a real semantic summary instead of

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 from kernel.discovery import find_files
@@ -331,6 +331,13 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_is_validation_setup_failure(
             "the command passed but does not show an assertion or behavioral probe"
         ))
+
+    def test_validation_helpers_get_bounded_interpreters(self):
+        self.assertEqual(_auto_validation_command(".agentic/check.py"), ["python3", ".agentic/check.py"])
+        self.assertEqual(_auto_validation_command(".agentic/check.cjs"), ["node", ".agentic/check.cjs"])
+        self.assertEqual(_auto_validation_command(".agentic/check.sh"), ["bash", ".agentic/check.sh"])
+        self.assertIsNone(_auto_validation_command("src/check.py"))
+        self.assertIsNone(_auto_validation_command(".agentic/check.txt"))
 
     def test_tool_plane_failure_does_not_implicate_product_code(self):
         self.assertTrue(is_tool_plane_failure(
