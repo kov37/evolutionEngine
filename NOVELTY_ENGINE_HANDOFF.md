@@ -2443,3 +2443,18 @@ validation target before changing product code. This preserves the artifact
 and keeps the rule generic: an unreachable validation target is an
 execution/setup failure, while a reachable target returning a bad result is a
 product failure.
+
+### 2026-08-15 — separate malformed inline probes from product syntax errors
+
+The final `3d_scene` trace exposed another generic boundary: the actor emitted
+a Python inline validation command containing `try:` after semicolons. Python
+reported `SyntaxError` against `File "<string>"`, so no application request
+was made. The old loop treated that as a product validation failure and could
+send the actor into unnecessary artifact repair.
+
+Tool-plane classification now recognizes syntax errors whose traceback target
+is `<string>` as malformed probe construction. It reopens validation and tells
+the actor to use a valid one-line command or a temporary multiline helper under
+`.agentic/`. Syntax errors naming an actual product file remain product
+failures. This keeps the distinction evidence-based rather than tied to the
+3D task or a particular application artifact.

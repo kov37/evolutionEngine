@@ -343,6 +343,12 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(is_tool_plane_failure(
             "run_command", "ERROR: command arguments must be single-line strings"
         ))
+        self.assertTrue(is_tool_plane_failure(
+            "run_command", "File \"<string>\", line 1\nSyntaxError: invalid syntax"
+        ))
+        self.assertFalse(is_tool_plane_failure(
+            "run_command", "File \"target.py\", line 1\nSyntaxError: invalid syntax"
+        ))
         self.assertTrue(is_probe_quality_failure(
             "the passing API check does not assert response shape: object"
         ))

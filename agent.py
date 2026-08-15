@@ -1546,10 +1546,17 @@ You have this focused toolbelt: {offered_tool_names}.
                 elif success is False or result.startswith(("ERROR:", "REJECTED:")):
                     if validation_contract.is_tool_plane_failure(tool_name, result):
                         turn_tool_plane_failure = True
-                        validation_suggestions.append(
-                            "tool-plane failure: use the correctly shaped executable validation tool; "
-                            "do not modify the product for this error"
-                        )
+                        if "syntaxerror" in result.lower() and "<string>" in result.lower():
+                            validation_suggestions.append(
+                                "the inline interpreter probe is syntactically invalid; use a valid one-line "
+                                "probe or write a temporary helper below .agentic/ with proper multiline syntax; "
+                                "do not modify the product for this error"
+                            )
+                        else:
+                            validation_suggestions.append(
+                                "tool-plane failure: use the correctly shaped executable validation tool; "
+                                "do not modify the product for this error"
+                            )
                         print(
                             f"⚠️ [tool-plane recovery] {tool_name} failed before product validation; "
                             "reopening validation tools"

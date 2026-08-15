@@ -121,7 +121,13 @@ def is_tool_plane_failure(tool_name, result_content):
         "invalid command options",
         "unknown tool",
         "invalid tool call",
-    ))
+    )) or (
+        # ``python -c`` reports syntax errors against ``<string>``. That is
+        # a malformed validation probe, not evidence that the product file is
+        # broken. A traceback naming the product file remains a real product
+        # failure and intentionally does not match this rule.
+        "syntaxerror" in lower and "<string>" in lower
+    )
 
 
 def is_probe_quality_failure(reason):
