@@ -13,6 +13,13 @@ READ_TOOLS = frozenset({
     "read_file", "find_files", "search_file", "list_workspace", "list_dir",
     "list_symbols", "grep_dir",
 })
+# Inventory is useful for orientation but is not evidence about the failing
+# implementation. Only these focused readers should consume the one
+# repair-inspection allowance; otherwise a harmless list_workspace call can
+# block the read_file needed to understand the reported failure.
+REPAIR_INSPECTION_TOOLS = frozenset({
+    "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
+})
 MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
 VALIDATION_TOOLS = frozenset({
     "run_tests", "run_command", "run_shell", "process_status", "stop_process",
@@ -26,6 +33,11 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     "patch_file", "write_file", "run_tests", "run_command", "run_shell",
     "finish_task", "recall", "diff_files", "git_diff",
 })
+
+
+def counts_as_repair_inspection(tool_name: str) -> bool:
+    """Return whether a tool produced focused evidence for a repair turn."""
+    return tool_name in REPAIR_INSPECTION_TOOLS
 
 
 def orientation_action_tools(*, evidence_available: bool = False) -> frozenset[str]:

@@ -1377,9 +1377,7 @@ You have this focused toolbelt: {offered_tool_names}.
                         blocked_mutation_paths.add(args["path"])
                         protected_edit_recovery_pending = True
                     print(f"🛡️ [risk layer] {result}")
-            if repair_required and tool_name in {
-                "read_file", "find_files", "search_file", "list_workspace", "list_dir", "list_symbols", "grep_dir"
-            }:
+            if repair_required and lifecycle_policy.counts_as_repair_inspection(tool_name):
                 repair_inspection_used = True
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 last_mutation_rejected = True

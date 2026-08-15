@@ -1825,3 +1825,16 @@ failure-driven transition, not a benchmark-specific hint.
 The deterministic suite passes 87 tests, including the new FSM transition
 assertion. The next live cascade will measure whether this removes the wasted
 orientation turns without weakening evidence or mutation safety.
+
+The live measurement exposed a second interaction bug: during initial repair,
+`list_workspace` was marked as the one permitted inspection. The following
+targeted `read_file` was then rejected, and the actor exhausted its repair
+budget without seeing the source. The policy now distinguishes inventory from
+evidence: `list_workspace` and `list_dir` do not consume the repair-inspection
+allowance; focused readers such as `read_file`, `find_files`, and
+`search_file` do. This keeps exploration available without allowing inventory
+to starve failure diagnosis.
+
+The deterministic suite passes 88 tests, including the new classification
+contract. The next live run should compare first-mutation time and repair-turn
+count against the prior 101.3-second / 6-repair-turn trace.
