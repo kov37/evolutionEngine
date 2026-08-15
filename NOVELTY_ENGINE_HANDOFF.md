@@ -1,6 +1,6 @@
 # Novelty Engine Handoff
 
-Updated: 2026-08-14
+Updated: 2026-08-15
 
 ## Latest test-cycle note
 
@@ -1268,3 +1268,17 @@ runner as a progress problem. The gate now gives deterministic setup evidence
 precedence. The 4B may refine the command or target, but it cannot convert a
 known setup/runner mismatch into a product defect. Added a regression test with
 a deliberately hallucinating worker; the suite passes 57 tests.
+
+### 2026-08-15 — dependency setup is not product evidence
+
+The WebSocket benchmark exposed another generic validation-plane error. A
+successful `npm install` produced no behavioral assertion, but the repair
+packet was classified as a product behavior failure because the fallback did
+not recognize package-manager setup output. The deterministic checkpoint now
+classifies common dependency-install commands and success summaries (`npm
+install`, `npm ci`, `pip install`, `added ...`, `audited ...`, and equivalent
+setup-only markers) as setup. The 4B cannot override that classification, so
+the actor is directed toward the next real probe instead of editing product
+files. The deterministic suite passes 58 tests. The WebSocket benchmark remains
+open: its actor made a valid server mutation but timed out before completing
+the independent frontend and runtime checks.

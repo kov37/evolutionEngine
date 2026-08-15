@@ -406,6 +406,28 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
         context.close()
 
+    def test_dependency_install_without_behavioral_evidence_is_setup(self):
+        context = NoveltyContext(
+            chat_fn=lambda **kwargs: _FakeResponse(
+                '{"phase":"repair","recommended_action":"patch_file",'
+                '"failure_class":"behavior","next_action":"patch_file",'
+                '"confidence":0.99}'
+            ),
+            worker_interval=100,
+        )
+        judgment = context.synchronous_triage(
+            5,
+            "repair",
+            "Failed probe: npm install\nExit code: 0\n"
+            "added 1 package, and audited 2 packages\n"
+            "No behavioral assertion was executed.",
+            legal_actions=("patch_file", "run_command"),
+        )
+        self.assertEqual(judgment.failure_class, "setup")
+        self.assertEqual(judgment.next_action, "run_command")
+        self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
+        context.close()
+
     def test_structured_checkpoint_survives_newer_stale_event(self):
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
         context.last_judgment = WorkerJudgment(
