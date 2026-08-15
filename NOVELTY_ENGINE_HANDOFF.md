@@ -3219,3 +3219,14 @@ little effective repair time to reach product code. The next generic change
 should make source-backed repair packets smaller and prioritize the exact
 failing source expression, while preserving the independent grader and frozen
 fixture. Do not add SymPy formulas or special-case `S.pi`.
+
+The next generic repair change is now implemented. When a trustworthy
+traceback already supplies a safe source excerpt, `agent.py` replaces the full
+historical action transcript with a compact source-backed repair checkpoint.
+It keeps the stable task foundation, bounded failure packet, and mutation
+contract, while dropping stale validation plans and old tool results that can
+consume the actor's context and attention. The normal fallback checkpoint is
+unchanged for failures without safe localization. A regression test covers the
+new prompt boundary; deterministic coverage is now 143 tests and 35 subtests.
+Run the frozen benchmark from the resulting commit before changing the policy
+again.

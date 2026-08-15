@@ -474,6 +474,37 @@ def _repair_checkpoint_messages(
     return checkpoint
 
 
+def _source_backed_repair_messages(messages, *, last_repair_packet, state_text=""):
+    """Build a compact repair prompt when the traceback already localized code.
+
+    A source excerpt is sufficient localization evidence. Keeping the entire
+    historical tool transcript in front of the actor only increases prompt
+    work and lets old validation plans compete with the current failure. This
+    checkpoint keeps the stable task foundation, the bounded failure packet,
+    and the explicit mutation contract.
+    """
+    checkpoint = list(messages[:2]) + [{
+        "role": "system",
+        "content": (
+            "[source-backed repair checkpoint] The latest executable failure already identifies the "
+            "relevant source location. Use the failure packet below, make one minimal product mutation "
+            "with patch_file or write_file, and do not rerun the probe or return a plan first. The "
+            "validation artifact and supplied tests are evidence; leave them unchanged."
+        ),
+    }]
+    if state_text:
+        checkpoint.append({"role": "system", "content": state_text})
+    checkpoint.append({
+        "role": "system",
+        "content": "Latest executable failure evidence:\n" + str(last_repair_packet or "(not available)")[:2600],
+    })
+    checkpoint.append({
+        "role": "system",
+        "content": "Repair contract: call patch_file or write_file now on the implicated product artifact.",
+    })
+    return checkpoint
+
+
 # How many prunable entries must accumulate before a prune batch actually
 # runs. Found live: with this at "prune immediately, one at a time" (the
 # original design), pruning fired on nearly every single iteration once
@@ -1376,6 +1407,21 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 messages,
                 last_repair_packet=last_repair_packet,
                 mutation_checkpoint=last_mutation_checkpoint,
+                state_text=checkpoint_state,
+            )
+        elif repair_required and repair_inspection_used and not setup_failure:
+            # A trusted traceback excerpt already localizes the repair. Keep
+            # the next actor prompt small instead of carrying the full stale
+            # validation transcript into a mutation-only call.
+            if structured_summary_enabled and state is not None:
+                checkpoint_state = state.render()
+            elif working_state_enabled and ws is not None and ws.revision > 0:
+                checkpoint_state = working_state.render(ws)
+            else:
+                checkpoint_state = ""
+            messages_for_call = _source_backed_repair_messages(
+                messages,
+                last_repair_packet=last_repair_packet,
                 state_text=checkpoint_state,
             )
 

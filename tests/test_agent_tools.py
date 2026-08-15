@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -120,6 +120,23 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("POST /api/tasks timed out", rendered)
         self.assertNotIn("I will read the log again", rendered)
         self.assertNotIn("REJECTED: repeated failing call", rendered)
+
+    def test_source_backed_repair_checkpoint_keeps_only_current_failure(self):
+        messages = [
+            {"role": "system", "content": "foundation"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "old validation plan"},
+            {"role": "tool", "content": "old output"},
+        ]
+        checkpoint = _source_backed_repair_messages(
+            messages,
+            last_repair_packet="Source context from the failure location:\napp.py (failure line 4)",
+        )
+        rendered = "\n".join(str(message) for message in checkpoint)
+        self.assertEqual(checkpoint[:2], messages[:2])
+        self.assertIn("Source context from the failure location", rendered)
+        self.assertIn("patch_file or write_file", rendered)
+        self.assertNotIn("old validation plan", rendered)
 
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}
