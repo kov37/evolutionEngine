@@ -490,6 +490,12 @@ class ValidationContract:
                 "otherwise replace an ad hoc probe dependency with a standard-library or existing-project equivalent, "
                 "then rerun the check"
             )
+        elif ("timeout" in lower_observed or "timed out" in lower_observed) and endpoint and write_probe:
+            next_action = (
+                f"the service is reachable but {endpoint} blocked during a state-changing request; inspect "
+                "that handler for a deadlock, blocking lock, or I/O wait. Do not change a passing health "
+                "handler; make one targeted repair, then rerun the request with a short timeout"
+            )
         elif "timeout" in lower_observed or "timed out" in lower_observed:
             next_action = (
                 "do not use a foreground long-running process as the check; launch the service with a bounded "

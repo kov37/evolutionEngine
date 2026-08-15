@@ -1101,6 +1101,17 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertIn("behavioral contract", packet)
 
+    def test_timeout_packet_localizes_blocked_state_change(self):
+        packet = from_task(
+            "Build an HTTP app that supports POST /api/tasks with JSON and GET /api/tasks."
+        ).failure_packet(
+            "run_command",
+            {"command": ["python3", "-c", "POST /api/tasks", "timeout"]},
+            "TimeoutError: timed out after 5s while POST /api/tasks was in flight; health was 200",
+        )
+        self.assertIn("deadlock", packet)
+        self.assertIn("passing health", packet)
+
     def test_provider_refusal_is_terminal(self):
         self.assertTrue(_terminal_provider_error(ConnectionRefusedError(61, "Connection refused")))
         self.assertTrue(_terminal_provider_error(

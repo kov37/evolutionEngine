@@ -2332,3 +2332,16 @@ tool used in the wrong lifecycle phase. The latter preserves product-repair
 state and explicitly directs the actor to inspect and patch; the bounded repair
 budget can then force a mutation. This prevents a failed tool call from
 silently changing the FSM phase.
+
+### 2026-08-15 — localize blocked state-changing requests
+
+The live app run confirmed a useful product-level failure: health returned 200,
+but a POST request timed out. The small model repeatedly treated the healthy
+health response as proof that the failure was false and edited `/health`, even
+though the likely defect was in the state-changing handler or its lock/I/O path.
+
+Timeout repair feedback now distinguishes a reachable service whose
+state-changing request blocks. It tells the actor to inspect that handler for a
+deadlock, blocking lock, or I/O wait, preserve the passing health behavior, and
+make one targeted repair. This is a generic request-lifecycle heuristic, not a
+hardcoded Todo fix.
