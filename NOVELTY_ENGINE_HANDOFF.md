@@ -2164,3 +2164,13 @@ Endpoint extraction now excludes conventional temporary/home/workspace paths
 and `.agentic` artifacts, including method-prefixed forms. A regression test
 replays verifier traceback text and confirms that it creates no endpoint. The
 deterministic suite and preflight pass 107 tests.
+
+### 2026-08-15 — distinguish JavaScript arrows from shell redirects
+
+The handoff-recovery probe found one more command-plane representation bug:
+the shell mutation regex saw the `>` in JavaScript arrow functions (`=>`) as
+a file redirect. That blocked a legitimate inline Node behavioral probe even
+though it never wrote a file. The redirect pattern now ignores `=>` and other
+operator contexts while retaining real `> file` and `>> file` writes. A
+regression case covers an inline `setTimeout(() => ...)` command. The
+deterministic suite and preflight pass 108 tests.

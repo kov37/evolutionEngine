@@ -109,6 +109,13 @@ class AdversarialPreflightTests(unittest.TestCase):
             "MUTATE",
         )
 
+    def test_javascript_arrow_functions_are_not_shell_redirects(self):
+        command = ["node", "-e", "setTimeout(() => console.log('passed'), 10)"]
+        self.assertNotEqual(
+            action_governor.classify("run_command", {"command": command}),
+            "MUTATE",
+        )
+
     def test_output_only_claims_cannot_be_validation_evidence(self):
         contract = from_task("Build a service and run a real behavioral check.")
         for command in (["echo", "assert passed"], ["printf", "connected\\n"]):
