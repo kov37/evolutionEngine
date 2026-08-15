@@ -2608,3 +2608,19 @@ counts distinct stale event pairs rather than every repeated render.
 The focused deterministic suite remains at 125 passing tests and preflight is
 green. This change deliberately reduces the 4B's prompt authority to increase
 correctness; it does not remove the worker or its current-event advisory role.
+
+### 2026-08-15 — confirm freshness change on the real WebSocket benchmark
+
+The same WebSocket task was rerun from `3f98a88` with the same Qwen3.8-27B
+actor and MLX server. It passed with the unchanged independent grader. The
+actor wrote the three product/dependency files, generated a helper, recovered
+from the missing server and a blocked `process_status` call, then ran a real
+client exchange that passed connect, ping/pong, sender/peer broadcast,
+disconnect safety, malformed-payload stability, and final completion.
+
+The run completed in 11 iterations and 399 seconds, compared with 16
+iterations and 764 seconds for the immediately preceding run. It made 4
+mutations, 6 validations, and 1 validation failure; the 4B made 3 worker calls
+and produced 6 stale-result observations, but stale diagnoses were not placed
+in the actor prompt. This is a measured improvement in both reliability and
+latency, while preserving the worker as an advisory current-event component.
