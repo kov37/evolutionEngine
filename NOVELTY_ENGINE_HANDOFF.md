@@ -2879,3 +2879,20 @@ This is a capability pass, not a speed improvement over the earlier 11-turn /
 399-second run; the extra time came from the actor's setup-before-server-smoke
 mistake. The important evidence is that the generic checkpoint recovered it
 without altering the fixture or grader.
+
+### 2026-08-15 — cascading repair rerun confirms artifact capability
+
+The frozen cascading dependency test was rerun after the checkpoint changes.
+The actor repaired the missing parenthesis, reran the supplied test, repaired
+the string divisor, reran it again, and reached `1 passed, 0 failed, 0 errors`.
+The independent artifact check and `finish_task` both passed. The run used 6
+model iterations, 7 tool calls, 2 product mutations, 3 accepted validations,
+and 123.9 seconds; no asynchronous 4B call was needed because the trajectory
+did not repeat an action.
+
+The benchmark remains `passed: false` only because its deliberate strict
+workflow score requires no more than 3 raw model iterations. This is an
+efficiency miss, not an implementation or completion failure. The fixture was
+left unchanged. Reducing the two-repair sequence below that threshold is the
+next optimization problem, but any change must remain generic and preserve
+fresh failure evidence between sequential defects.
