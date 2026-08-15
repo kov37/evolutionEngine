@@ -20,6 +20,12 @@ READ_TOOLS = frozenset({
 REPAIR_INSPECTION_TOOLS = frozenset({
     "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
 })
+# Once a behavioral failure is available, broad inventory is a poor next
+# action: the failure packet already gives the actor a target. Keep focused
+# readers/searches, but remove the two tools most likely to restart orientation
+# instead of repairing. Setup recovery deliberately uses the full READ_TOOLS
+# set because its missing target may be the environment itself.
+BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS - frozenset({"list_workspace", "list_dir"})
 MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
 VALIDATION_TOOLS = frozenset({
     "run_tests", "run_command", "run_shell", "process_status", "stop_process",
@@ -176,6 +182,7 @@ def build_validation_policy(
             "Do not mutate the product, rewrite the supplied test, or merely print a value."
         )
     else:
+        tools -= READ_TOOLS - BEHAVIOR_REPAIR_READ_TOOLS
         if repair_inspection_used:
             tools -= READ_TOOLS
         prompt = (

@@ -1838,3 +1838,22 @@ to starve failure diagnosis.
 The deterministic suite passes 88 tests, including the new classification
 contract. The next live run should compare first-mutation time and repair-turn
 count against the prior 101.3-second / 6-repair-turn trace.
+
+The comparison run confirmed the first fix: the actor read the implicated
+files, repaired both defects, and independently passed the task. First
+mutation improved to 64.1 seconds, with 2 mutations, 3 validations, and an
+explicit finish. It still spent one turn on `list_workspace`, so the frozen
+scorecard remained false at 7 turns, but the artifact was correct.
+
+### 2026-08-15 — behavior repair removes broad inventory
+
+Behavioral repair now removes `list_workspace` and `list_dir` from the offered
+tool surface while preserving `read_file`, focused search, mutation, and
+validation. This is not a hard-coded file or benchmark rule: once an
+assertion-bearing failure identifies the product plane, broad inventory is
+lower-value than targeted evidence. Setup-plane recovery retains the broader
+inspection tools because the missing fact may be environmental.
+
+The deterministic suite passes 89 tests. The next live run should show a
+targeted read on the first repair turn and reduce the turn count without
+weakening setup recovery.
