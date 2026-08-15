@@ -2528,3 +2528,18 @@ for failure markers. A non-empty list still enters product repair. Checker
 summaries also count as interaction evidence for web artifacts when they report
 an HTTP status/content type. Regression tests cover both cases, the focused
 suite passes 124 tests, and the offline adversarial preflight remains green.
+
+### 2026-08-15 — verify the fix with a fresh Qwen3.8 real-model run
+
+The post-fix `3d_scene` benchmark passed with Qwen3.8-27B-4bit through the
+local MLX OpenAI-compatible server. The actor wrote the complete `scene.html`
+artifact in one mutation, started the local server, produced an initial HTTP
+200 readback, and was correctly required to run a stronger behavioral checker.
+The checker reported `ALL PASS` and the orchestrator completed the task without
+any repair mutation.
+
+Run metrics: 4 iterations, 4 tool calls, 1 mutation, 3 validations, 0
+validation failures, 0 repair entries, first mutation at 177.9 seconds, and
+297.6 seconds total. This verifies the engine's generic plane separation and
+completion behavior on a real model; it is not evidence that the 4B worker is
+contributing useful guidance here because the run recorded zero worker calls.
