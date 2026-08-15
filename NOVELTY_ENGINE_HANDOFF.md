@@ -3183,3 +3183,22 @@ invariant, independent of model, provider, or task. A regression test covers
 the mutation-only surface, and deterministic coverage is now 141 tests and 35
 subtests. The next real SymPy run must verify that the actor can no longer
 escape the gate by selecting another validation command.
+
+The following 16-turn run demonstrated that enforcement change: after the
+stale validation window, validation stopped and the actor made a second
+mutation. However, the mutation was a self-authored `.agentic/validate_cdf.py`
+helper rather than a product method. Its first execution failed with
+`ModuleNotFoundError: sympy` because Python sets a nested script's import path
+to `.agentic/`, not the workspace root. The run ended cleanly after 641.8
+seconds with two mutations, eight validations, zero requested `_cdf` methods,
+and an independent 19/20 grade. This is a useful partial result: the final
+gate now forces action, but the execution environment prevented the helper from
+producing useful failure evidence soon enough.
+
+`kernel/exec_tools.py` now gives agent-launched direct commands, shell commands,
+and managed background restarts a project-local `PYTHONPATH` containing both
+the workspace root and requested working directory. A regression test executes
+a helper below `.agentic/` that imports a package from the workspace. This is
+language/tooling infrastructure, not a SymPy exception. Deterministic coverage
+is now 142 tests and 35 subtests. Rerun the unchanged frozen benchmark before
+making another policy change.

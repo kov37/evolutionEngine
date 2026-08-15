@@ -92,9 +92,11 @@ class KernelToolTests(unittest.TestCase):
                  return_value="Started background process.\nHandle: proc-stable\nPID: 7",
              ) as start:
             result = exec_tools.restart_background("proc-stable")
-        start.assert_called_once_with(
-            ["python3", "server.py"], "/tmp/workspace", False, handle="proc-stable"
-        )
+        start.assert_called_once()
+        call = start.call_args
+        self.assertEqual(call.args[:3], (["python3", "server.py"], "/tmp/workspace", False))
+        self.assertEqual(call.kwargs["handle"], "proc-stable")
+        self.assertIn("/tmp/workspace", call.kwargs["env"]["PYTHONPATH"])
         self.assertIn("Handle: proc-stable", result)
 
     def test_repair_checkpoint_drops_stale_action_tail_and_keeps_last_mutation(self):
@@ -1271,6 +1273,19 @@ class KernelToolTests(unittest.TestCase):
             result = run_command(["python", "-c", "print('portable')"])
             self.assertIn("Exit code: 0", result)
             self.assertIn("portable", result)
+
+    def test_nested_python_helper_can_import_workspace_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            Path(tmp, "pkg").mkdir()
+            Path(tmp, "pkg", "__init__.py").write_text("VALUE = 'workspace'\n")
+            Path(tmp, ".agentic").mkdir()
+            Path(tmp, ".agentic", "check.py").write_text(
+                "from pkg import VALUE\nprint(VALUE)\n"
+            )
+            result = run_command(["python3", ".agentic/check.py"])
+            self.assertIn("Exit code: 0", result)
+            self.assertIn("workspace", result)
 
     def test_validation_rejects_silent_direct_test_module(self):
         contract = from_task("Run test_metrics.py and verify the implementation.", "code_change")

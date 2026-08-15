@@ -35,7 +35,30 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]"
 
 
-def _start_background(command, cwd, shell, handle=None):
+def _execution_env(cwd: str) -> dict[str, str]:
+    """Build a project-local environment for every agent-launched command.
+
+    A Python helper below ``.agentic/`` is executed with that helper directory
+    as ``sys.path[0]``. Without the workspace root on ``PYTHONPATH``, the
+    helper cannot import the source tree it is supposed to validate. Adding
+    both the project root and requested working directory is the normal local
+    project execution contract; non-Python commands simply ignore the
+    variable.
+    """
+    env = os.environ.copy()
+    roots = [get_root(), os.path.abspath(cwd)]
+    existing = env.get("PYTHONPATH")
+    if existing:
+        roots.append(existing)
+    unique = []
+    for root in roots:
+        if root and root not in unique:
+            unique.append(root)
+    env["PYTHONPATH"] = os.pathsep.join(unique)
+    return env
+
+
+def _start_background(command, cwd, shell, handle=None, env=None):
     log = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix=".agent-process-", suffix=".log",
         dir=get_root(), delete=False,
@@ -43,7 +66,7 @@ def _start_background(command, cwd, shell, handle=None):
     log_path = log.name
     proc = subprocess.Popen(
         command, shell=shell, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
-        start_new_session=True,
+        start_new_session=True, env=env,
     )
     log.close()
     handle = handle or ("proc-" + uuid.uuid4().hex[:12])
@@ -140,7 +163,8 @@ def restart_background(handle: str) -> str:
         # have the original handle in its context; changing it creates a
         # false validation failure when the next status call inspects the
         # intentionally stopped predecessor.
-        started = _start_background(command, cwd, shell, handle=handle)
+        started = _start_background(command, cwd, shell, handle=handle,
+                                    env=_execution_env(cwd))
     except OSError as exc:
         return f"ERROR: could not restart process {handle}: {exc}"
     return f"{stopped}\n{started}"
@@ -160,14 +184,16 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bo
     """
     if background:
         try:
-            return _start_background(command, get_root(), shell=True)
+            return _start_background(command, get_root(), shell=True,
+                                      env=_execution_env(get_root()))
         except OSError as exc:
             return f"ERROR: could not start background command: {exc}"
     timeout = max(1, min(timeout, MAX_SHELL_TIMEOUT_SECONDS))
     proc = subprocess.Popen(
         command, shell=True, cwd=get_root(),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        start_new_session=True,  # own process group, so a timeout can kill the whole tree
+        start_new_session=True, env=_execution_env(get_root()),
+        # own process group, so a timeout can kill the whole tree
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -219,14 +245,15 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
 
     if background:
         try:
-            return _start_background(command, workdir, shell=False)
+            return _start_background(command, workdir, shell=False,
+                                     env=_execution_env(workdir))
         except OSError as exc:
             return f"ERROR: could not start background command: {exc}"
 
     try:
         proc = subprocess.Popen(
             command, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+            text=True, start_new_session=True, env=_execution_env(workdir),
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
