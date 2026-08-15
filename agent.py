@@ -757,6 +757,10 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     repair_turns_used = 0
     repair_recovery_mode = False
     repair_recovery_entries = 0
+    # Permit one related product mutation after the first successful write so
+    # multi-file changes can reach a coherent validation point. The allowance
+    # is consumed immediately and never opens an unbounded edit loop.
+    validation_batch_remaining = 0
     orientation_turns_without_mutation = 0
     lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
@@ -909,6 +913,11 @@ You have this focused toolbelt: {offered_tool_names}.
         )
         if validation_required:
             uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
+            batch_instruction = (
+                " If a distinct requested product artifact still needs implementation, you may make "
+                "one related product mutation before validating; do not edit the already changed artifact."
+                if validation_batch_remaining > 0 and not repair_required else ""
+            )
             messages_for_call = messages_for_call + [{
                 "role": "system",
                 "content": (
@@ -919,7 +928,8 @@ You have this focused toolbelt: {offered_tool_names}.
                     "The check must exercise the changed behavior or artifact, not merely list or "
                     "diff the file. For APIs, send representative requests and assert status codes "
                     "and response structure; for CLIs, check exit status and output; for libraries, "
-                    "run the focused regression test. Record failures and repair from their evidence. "
+                    "run the focused regression test. Record failures and repair from their evidence."
+                    + batch_instruction + " "
                     + validation_plan.render() + "\n"
                     + ("Required interfaces still without accepted evidence: " + ", ".join(uncovered) + "\n"
                        if uncovered else "")
@@ -1113,6 +1123,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 validation_failures=validation_failures,
                 protected_edit_recovery_pending=protected_edit_recovery_pending,
                 repair_recovery_mode=repair_recovery_mode,
+                mutation_batch_remaining=validation_batch_remaining,
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
@@ -1428,6 +1439,7 @@ You have this focused toolbelt: {offered_tool_names}.
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")
         if turn_mutated:
+            mutation_was_in_validation_batch = validation_phase_before_turn and not repair_turn_before_dispatch
             lifecycle.transition("mutation")
             if repair_required:
                 repair_mutations += 1
@@ -1440,6 +1452,10 @@ You have this focused toolbelt: {offered_tool_names}.
                 print("🛠️  [repair phase] targeted mutation landed; returning to validation")
             validation_required = True
             validation_failures = 0
+            if mutation_was_in_validation_batch:
+                validation_batch_remaining = max(0, validation_batch_remaining - 1)
+            else:
+                validation_batch_remaining = 1
             print("🔒 [validation phase] mutation succeeded; validation required before another edit")
             stale_service_handles = active_background_handles()
             if stale_service_handles:
@@ -1461,6 +1477,7 @@ You have this focused toolbelt: {offered_tool_names}.
             # through the deterministic setup-plane policy below.
             if not validation_required:
                 validation_required = True
+            validation_batch_remaining = 0
             lifecycle.transition("validation_failed")
             if not repair_required:
                 repair_mode_entries += 1
@@ -1522,11 +1539,13 @@ You have this focused toolbelt: {offered_tool_names}.
                 # focused validation phase until every interface is covered.
                 validation_required = True
                 validation_failures = 0
+                validation_batch_remaining = 0
                 print("✅ [validation phase] probe succeeded; still required: " + ", ".join(uncovered))
             else:
                 lifecycle.transition("validation_passed")
                 validation_required = False
                 validation_failures = 0
+                validation_batch_remaining = 0
                 # Independent validation is the authoritative completion
                 # signal. Waiting for one more model turn to call
                 # finish_task wastes tokens and can strand a correct artifact

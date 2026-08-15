@@ -172,6 +172,18 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("read_file", policy.tools)
         self.assertIn("search_file", policy.tools)
 
+    def test_validation_policy_allows_one_bounded_related_mutation(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=False, setup_failure=False,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=0, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, mutation_batch_remaining=1,
+        )
+        self.assertIn("patch_file", policy.tools)
+        self.assertIn("write_file", policy.tools)
+        self.assertIn("run_tests", policy.tools)
+        self.assertIn("distinct unfinished artifact", policy.prompt)
+
     def test_repair_recovery_preserves_rejected_write_method_ban(self):
         policy = build_validation_policy(
             validation_required=True, repair_required=True, setup_failure=False,

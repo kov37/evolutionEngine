@@ -1921,3 +1921,23 @@ rejected `write_file` call the recovery policy re-added `write_file`; the model
 retried the same rejected call until the bounded run ended. Recovery now keeps
 the rejected mutation method removed and explicitly directs the actor to the
 remaining `patch_file` path. Deterministic coverage passes 90 tests.
+
+The next WebSocket run confirmed that recovery could now reach `patch_file`:
+the actor repaired `index.html`, but the run ended before a behavioral check
+and the independent grader still found stale protocol code. The trace shows
+the deeper workflow issue: the first `server.js` mutation was forced through
+validation before the related `index.html` mutation could land. The actor then
+had too little budget to recover from a partial first patch.
+
+### 2026-08-15 — bounded multi-file change batch
+
+The validation policy now permits one additional related product mutation
+after a successful write, while keeping executable validation mandatory before
+any further edits. The allowance is consumed once, is not available after a
+failed validation, and remains separate from shell mutation guards and test
+path protection. This gives multi-file tasks a coherent change point without
+opening an unrestricted edit loop. Setup recovery and behavior repair rules
+remain unchanged.
+
+The deterministic suite passes 91 tests. The next WebSocket run is the live
+verification of this batch contract.

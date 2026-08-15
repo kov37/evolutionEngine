@@ -146,6 +146,7 @@ def build_validation_policy(
     validation_failures: int,
     protected_edit_recovery_pending: bool,
     repair_recovery_mode: bool,
+    mutation_batch_remaining: int = 0,
 ) -> ValidationActionPolicy | None:
     """Return one immutable policy, or ``None`` outside validation.
 
@@ -158,13 +159,21 @@ def build_validation_policy(
         return None
 
     if not repair_required:
+        validation_tools = set(VALIDATION_TOOLS)
+        batch_note = ""
+        if mutation_batch_remaining > 0:
+            validation_tools |= MUTATION_TOOLS
+            batch_note = (
+                " One related product artifact may still be added to the current change batch before "
+                "validation; use a mutation only for a distinct unfinished artifact, then validate."
+            )
         return ValidationActionPolicy(
-            tools=VALIDATION_TOOLS,
+            tools=frozenset(validation_tools),
             setup_recovery=False,
             requires_mutation=False,
             prompt=(
                 "Validation phase tool restriction: only validation tools are available this turn. "
-                "Run a focused test or executable check and inspect its result."
+                "Run a focused test or executable check and inspect its result." + batch_note
             ),
         )
 
