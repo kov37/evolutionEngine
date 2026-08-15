@@ -976,7 +976,10 @@ You have this focused toolbelt: {offered_tool_names}.
 
         if (not validation_required and not repair_required
                 and orientation_turns_without_mutation >= ORIENTATION_TURN_BUDGET):
-            orientation_tools = {"patch_file", "write_file", "finish_task", "recall"}
+            # Pressure the actor toward progress without forcing a blind edit:
+            # one targeted read/search remains legal, while broad listing and
+            # unrestricted exploration stay unavailable.
+            orientation_tools = lifecycle_policy.orientation_action_tools()
             tools_for_call = [t for t in tools_for_call if t.__name__ in orientation_tools]
             messages_for_call = messages_for_call + [{
                 "role": "system",

@@ -1452,3 +1452,11 @@ policy now removes `patch_file` and `write_file` for every setup failure, not
 only after inspection. This preserves the core invariant that runner,
 dependency, and test-discovery problems cannot trigger speculative product
 edits.
+
+The next live trace found an orientation-policy conflict: after two idle
+turns, the old allow-list removed `read_file`, causing the actor's targeted
+inspection to be blocked and encouraging blind edits. Orientation recovery now
+uses the centralized policy surface: targeted read/search plus mutation and
+finish remain available, while broad listing/exploration stays unavailable.
+Setup recovery separately removes mutation tools, so these two policies do
+not conflict. Added deterministic coverage; the suite now passes 66 tests.

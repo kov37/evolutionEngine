@@ -17,6 +17,15 @@ VALIDATION_TOOLS = frozenset({
     "run_tests", "run_command", "run_shell", "process_status", "stop_process",
     "diff_files", "git_diff",
 })
+ORIENTATION_TOOLS = frozenset({
+    "read_file", "find_files", "search_file", "patch_file", "write_file",
+    "finish_task", "recall",
+})
+
+
+def orientation_action_tools() -> frozenset[str]:
+    """Return the narrow action surface after the orientation budget."""
+    return ORIENTATION_TOOLS
 
 
 @dataclass(frozen=True)

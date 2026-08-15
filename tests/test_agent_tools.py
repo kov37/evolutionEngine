@@ -13,7 +13,7 @@ from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import _failure_diagnostic, assertion_driven_tool_contract, from_task
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
-from lifecycle_policy import build_validation_policy
+from lifecycle_policy import build_validation_policy, orientation_action_tools
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
 from agentic_benchmark import TASKS
@@ -96,6 +96,12 @@ class KernelToolTests(unittest.TestCase):
         self.assertNotIn("read_file", policy.tools)
         self.assertIn("patch_file", policy.tools)
         self.assertTrue(policy.requires_mutation)
+
+    def test_orientation_recovery_keeps_targeted_read_available(self):
+        tools = orientation_action_tools()
+        self.assertIn("read_file", tools)
+        self.assertIn("patch_file", tools)
+        self.assertNotIn("list_workspace", tools)
 
     def test_recovery_guard_is_safe_before_first_validation(self):
         self.assertFalse(_force_repair_recovery(False, False, False))
