@@ -1958,3 +1958,14 @@ that the WebSocket task also explicitly requires a third artifact,
 after the first successful write, enough for an implementation, client, and
 dependency manifest while still forcing validation immediately afterward. The
 deterministic suite remains green at 92 tests.
+
+The next live run successfully produced all three required artifacts and the
+independent grader passed them. It stopped before `finish_task` because the
+successful `npm install` command was incorrectly treated as a failed
+behavioral check, consuming a repair turn and leaving the final smoke call to
+time out.
+
+Dependency installation is now an explicit setup event. Successful npm/pnpm/
+yarn/pip installation is never accepted as behavioral evidence, but it also
+does not enter product repair; the next turn remains focused on the required
+smoke test. Deterministic coverage passes 93 tests.

@@ -15,7 +15,10 @@ from risk_layer import RiskLayer
 from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
-from validation_contract import _failure_diagnostic, assertion_driven_tool_contract, from_task
+from validation_contract import (
+    _failure_diagnostic, assertion_driven_tool_contract, from_task,
+    is_dependency_setup_command,
+)
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
     build_validation_policy, counts_as_repair_inspection, is_inspection_command,
@@ -190,6 +193,18 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("write_file", policy.tools)
         self.assertIn("run_tests", policy.tools)
         self.assertIn("2 related product artifact", policy.prompt)
+
+    def test_dependency_install_is_setup_not_behavioral_evidence(self):
+        self.assertTrue(is_dependency_setup_command(["npm", "install", "--no-audit"]))
+        self.assertTrue(is_dependency_setup_command("python3 -m pip install ws"))
+        self.assertFalse(is_dependency_setup_command(["node", "smoke.cjs"]))
+        contract = from_task("Build a WebSocket app and run a smoke test.")
+        accepted, reason, *_ = contract.assess(
+            "run_command", {"command": ["npm", "install"]},
+            "Exit code: 0\nSTDOUT:\nadded 1 package\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("dependency setup", reason)
 
     def test_repair_recovery_preserves_rejected_write_method_ban(self):
         policy = build_validation_policy(

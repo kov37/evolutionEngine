@@ -8,6 +8,7 @@ It must remain useful when the actor, provider, model, and tool names change.
 
 from dataclasses import dataclass
 import re
+import shlex
 
 from lifecycle_policy import is_inspection_command
 
@@ -90,6 +91,30 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
     return {"success": False, "evidence": False, "setup_only": False,
             "plane": "non_evidence",
             "reason": "tool does not provide executable behavioral evidence"}
+
+
+def is_dependency_setup_command(command) -> bool:
+    """Identify normal dependency installation, not a behavioral check."""
+    if isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    elif isinstance(command, str):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+    else:
+        return False
+    if not argv:
+        return False
+    head = argv[0].rsplit("/", 1)[-1].lower()
+    tokens = [token.lower() for token in argv[1:]]
+    if head in {"npm", "pnpm", "yarn"}:
+        return bool(tokens and tokens[0] in {"install", "ci", "add"})
+    if head in {"pip", "pip3"}:
+        return bool(tokens and tokens[0] == "install")
+    if head in {"python", "python3"}:
+        return len(tokens) >= 2 and tokens[:2] == ["-m", "pip"] and "install" in tokens[2:]
+    return False
 
 
 def _inferred_response_requirements(text):
@@ -186,6 +211,16 @@ class ValidationContract:
         if base_contract["setup_only"]:
             return False, base_contract["reason"], "complete the setup, then run a focused behavioral check", None, ()
         raw_command = (arguments or {}).get("command", "")
+        if (tool_name in {"run_command", "run_shell"}
+                and is_dependency_setup_command(raw_command)
+                and "Exit code: 0" in text):
+            return (
+                False,
+                "dependency setup completed; this is not behavioral evidence",
+                "run the focused behavioral smoke test now",
+                None,
+                (),
+            )
         if tool_name in {"run_command", "run_shell"} and is_inspection_command(raw_command):
             return (
                 False,
@@ -356,6 +391,9 @@ class ValidationContract:
         text = str(result_content or "")
         if tool_name in {"run_command", "run_shell"} and (arguments or {}).get("background") is True:
             return text.startswith("Started background process.")
+        if (tool_name in {"run_command", "run_shell"}
+                and is_dependency_setup_command((arguments or {}).get("command", ""))):
+            return "Exit code: 0" in text
         if tool_name == "process_status":
             return "RUNNING" in text
         if tool_name == "stop_process":
