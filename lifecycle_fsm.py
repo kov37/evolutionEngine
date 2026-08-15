@@ -60,6 +60,11 @@ _TRANSITIONS = {
     (LifecycleState.REPAIR, "validation_partial"): LifecycleState.VALIDATE,
     (LifecycleState.RECOVER, "validation_failed"): LifecycleState.RECOVER,
     (LifecycleState.REPAIR, "recovery_budget_exhausted"): LifecycleState.RECOVER,
+    # A repair-phase tool-plane recovery may temporarily reopen VALIDATE
+    # before the controller recognizes that the actor replayed a blocked
+    # action. Preserve the repair intent and enter the same bounded recovery
+    # surface instead of raising an impossible-transition error.
+    (LifecycleState.VALIDATE, "recovery_budget_exhausted"): LifecycleState.RECOVER,
     (LifecycleState.VALIDATE, "validation_partial"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_passed"): LifecycleState.COMPLETE,
     # Setup recovery can legitimately succeed without a product mutation:

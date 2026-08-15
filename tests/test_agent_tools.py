@@ -169,6 +169,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(fsm.transition("tool_plane_recovery"), LifecycleState.VALIDATE)
         self.assertEqual(fsm.transition("tool_plane_recovery"), LifecycleState.VALIDATE)
 
+    def test_lifecycle_fsm_can_recover_after_repair_intent_survives_validation_reopen(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        fsm.transition("mutation")
+        fsm.transition("validation_failed")
+        fsm.transition("tool_plane_recovery")
+        self.assertEqual(
+            fsm.transition("recovery_budget_exhausted"), LifecycleState.RECOVER
+        )
+
     def test_lifecycle_fsm_keeps_bounded_batch_in_validation(self):
         fsm = LifecycleFSM()
         fsm.transition("turn")

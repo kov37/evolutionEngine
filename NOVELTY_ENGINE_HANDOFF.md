@@ -2800,3 +2800,17 @@ repair intent across FSM bookkeeping and keeps the checkpoint authoritative.
 The focused suite remains 107/107 and both modified modules compile. Run the
 unchanged Todo benchmark again; the expected trace is a checkpoint immediately
 after the first rejected status/command replay.
+
+### 2026-08-15 — allow recovery after a reopened validation state
+
+The next live run reached the new checkpoint detector, but the strict FSM
+raised an invalid transition: the earlier one-time tool-plane recovery had
+already moved the lifecycle from `REPAIR` to `VALIDATE`, while the preserved
+repair snapshot correctly requested bounded recovery.
+
+The FSM now explicitly permits `VALIDATE -> RECOVER` for this event. This does
+not open a new general transition; it preserves a repair intent that survived
+a temporary validation-plane reopen and routes it to the existing targeted
+mutation surface. The focused suite passes 108/108 and the modified modules
+compile cleanly. Rerun the unchanged Todo benchmark; the prior run stopped at
+the FSM guard before the actor could receive the checkpoint.
