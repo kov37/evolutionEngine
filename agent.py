@@ -1621,7 +1621,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 process_status_used = True
             capability = action_governor.classify(tool_name, args)
             result = tmsg.get("content", "")
-            if repair_required and _is_blocked_repair_action(tool_name, result):
+            if repair_turn_before_dispatch and _is_blocked_repair_action(tool_name, result):
                 blocked_repair_action = True
                 print(
                     f"⚠️ [repair checkpoint] blocked inspection {tool_name}; "
@@ -1893,7 +1893,7 @@ You have this focused toolbelt: {offered_tool_names}.
                     f"confidence={gate_judgment.confidence:.2f}"
                 )
             print(f"⚠️  [validation phase] validation failed ({validation_failures}); targeted repair required before recheck")
-        if (blocked_repair_action and repair_required and not turn_mutated
+        if (blocked_repair_action and repair_turn_before_dispatch and not turn_mutated
                 and not setup_failure and not repair_recovery_mode):
             # A rejected inspection is a control-plane convergence failure,
             # not a reason to spend the whole ordinary repair budget replaying

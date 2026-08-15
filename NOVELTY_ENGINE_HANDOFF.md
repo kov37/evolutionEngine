@@ -2785,3 +2785,18 @@ repair path; only explicit lifecycle/tool-plane rejection triggers the fresh
 checkpoint. The focused suite remains at 107 passing tests. Rerun the
 unchanged Todo task to verify that the actor reaches the patch surface after a
 rejected validation replay.
+
+### 2026-08-15 — preserve repair intent across tool-plane recovery
+
+The generalized detector initially observed the rejected `process_status`,
+but the older tool-plane recovery branch cleared `repair_required` before the
+new checkpoint condition ran. The event was therefore logged correctly but
+still reopened ordinary validation instead of building the fresh mutation
+context.
+
+The detector now uses the immutable pre-dispatch repair snapshot when deciding
+whether a rejected non-mutation action occurred during repair. This preserves
+repair intent across FSM bookkeeping and keeps the checkpoint authoritative.
+The focused suite remains 107/107 and both modified modules compile. Run the
+unchanged Todo benchmark again; the expected trace is a checkpoint immediately
+after the first rejected status/command replay.
