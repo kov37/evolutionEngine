@@ -482,6 +482,14 @@ def _meaningful_words(text):
     }][:10]
 
 
+def _is_probable_filesystem_path(path: str) -> bool:
+    """Reject traceback/workspace paths when extracting app interfaces."""
+    normalized = str(path or "").replace("\\", "/").lower()
+    return normalized.startswith((
+        "/private/", "/var/", "/tmp/", "/users/", "/home/", "/workspace/",
+    )) or "/.agentic" in normalized
+
+
 def from_task(task, task_type="code_change"):
     text = str(task or "")
     criteria = []
@@ -491,7 +499,7 @@ def from_task(task, task_type="code_change"):
             criteria.append(item)
     endpoints = []
     for match in _ENDPOINT_RE.findall(text) + _PATH_RE.findall(text):
-        if match not in endpoints:
+        if not _is_probable_filesystem_path(match) and match not in endpoints:
             endpoints.append(match)
     lower = text.lower()
     categories = set()
@@ -514,7 +522,10 @@ def from_task(task, task_type="code_change"):
     creation_endpoints = []
     collection_endpoints = []
     operations = []
-    endpoint_matches = list(_ENDPOINT_RE.finditer(text))
+    endpoint_matches = [
+        match for match in _ENDPOINT_RE.finditer(text)
+        if not _is_probable_filesystem_path(match.group(1))
+    ]
     for index, match in enumerate(endpoint_matches):
         method, path = match.group(0).split(None, 1)
         method = method.upper()

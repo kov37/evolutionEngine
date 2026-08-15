@@ -535,6 +535,14 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertEqual(contract.endpoints, ())
 
+    def test_verifier_traceback_paths_do_not_become_app_endpoints(self):
+        contract = from_task(
+            "Repair the app. Independent verifier feedback: "
+            "Traceback (most recent call last): File "
+            "\"/private/var/folders/abc/.agentic_grader.py\", line 5, in <module>"
+        )
+        self.assertEqual(contract.endpoints, ())
+
     def test_web_validation_accepts_observed_client_exchange(self):
         contract = from_task(
             "Build a WebSocket server and run a real local client smoke test."

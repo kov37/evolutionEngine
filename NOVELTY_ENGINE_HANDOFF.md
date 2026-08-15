@@ -2150,3 +2150,17 @@ commands remain setup commands. A regression matrix covers both forms. The
 deterministic suite and preflight now pass 106 tests. The interrupted live run
 was discarded because its failure was fully explained by this deterministic
 classifier bug.
+
+### 2026-08-15 — ignore verifier traceback paths during contract extraction
+
+The next confirmation found a separate parser edge. Independent verifier
+feedback included an absolute temporary path such as
+`/private/var/.../.agentic_grader.py`. The task-derived validation contract
+mistook that filesystem path for a required application endpoint, so a passing
+WebSocket smoke test was rejected while the actor chased a nonexistent HTTP
+interface.
+
+Endpoint extraction now excludes conventional temporary/home/workspace paths
+and `.agentic` artifacts, including method-prefixed forms. A regression test
+replays verifier traceback text and confirms that it creates no endpoint. The
+deterministic suite and preflight pass 107 tests.
