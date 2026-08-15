@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -14,6 +14,7 @@ from kernel.discovery import find_files
 from kernel.exec_tools import run_command
 from kernel.io_tools import patch_file, validate_python_syntax
 from risk_layer import RiskLayer
+from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
@@ -151,6 +152,28 @@ class KernelToolTests(unittest.TestCase):
         rendered = "\n".join(str(message) for message in checkpoint)
         self.assertIn("return value.is_real", rendered)
         self.assertIn("do not reread these files", rendered)
+
+    def test_transaction_deferral_does_not_disable_single_file_fast_validation(self):
+        transaction = TransactionBuffer("/tmp/novelty-test", followup_turns=1)
+        self.assertFalse(_transaction_window_open(
+            transaction,
+            validation_required=True,
+            repair_required=True,
+            mutation_batch_remaining=0,
+        ))
+        transaction.record_mutation("core.py")
+        self.assertTrue(_transaction_window_open(
+            transaction,
+            validation_required=True,
+            repair_required=True,
+            mutation_batch_remaining=0,
+        ))
+        self.assertTrue(_transaction_window_open(
+            None,
+            validation_required=True,
+            repair_required=False,
+            mutation_batch_remaining=2,
+        ))
 
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}

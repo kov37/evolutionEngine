@@ -3333,3 +3333,21 @@ The implementation checkpoint is commit `2266a44` (`Add bounded multi-file
 transaction recovery`), and the pushed branch head is `10d6596` after the
 telemetry reconciliation. The benchmark result JSONL and historical monitor
 logs remain local evidence rather than source changes.
+
+### 2026-08-15 — narrow proactive-validation deferral
+
+The transaction hook initially used `validation_required and repair_required`
+as its deferral condition. That was too broad: it suppressed the fast
+validate-after-mutation hook for ordinary single-file repairs as well as
+multi-file transactions. `_transaction_window_open()` now defers only when a
+host transaction is already active or an explicit related-mutation batch has
+more than one remaining mutation. A normal first repair mutation retains
+proactive validation.
+
+The regression test covers both sides of this boundary. The full deterministic
+suite is now `157 passed, 35 subtests passed`. Two post-change cascading runs
+completed the artifact correctly through bounded verifier repair but missed
+the strict three-iteration workflow target; this is an honest timing/model
+trajectory miss, not evidence that the product repair failed. The next clean
+multi-file run should verify that the narrower hook still preserves File A
+through its intermediate failure and allows File B to complete the repair.

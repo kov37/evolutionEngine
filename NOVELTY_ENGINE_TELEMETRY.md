@@ -111,8 +111,8 @@ then name the exact deterministic and real-model tests that would verify it.
 ```json
 {
   "command": ".venv-swebench/bin/python -m pytest -q tests",
-  "result": "156 passed, 35 subtests passed",
-  "elapsed_seconds": 1.09,
+  "result": "157 passed, 35 subtests passed",
+  "elapsed_seconds": 1.13,
   "coverage_added_in_current_dirty_delta": [
     "one bounded orientation recovery read",
     "multi-file transaction resilience",
@@ -248,6 +248,7 @@ then name the exact deterministic and real-model tests that would verify it.
   "agent.py": [
     "allows one bounded focused read during orientation recovery",
     "defers proactive validation while a finite multi-file repair batch is open",
+    "keeps proactive validation enabled for ordinary single-file repair",
     "preserves focused repair inspection evidence",
     "integrates host-controlled transaction lifecycle and metrics"
   ],
@@ -263,7 +264,7 @@ then name the exact deterministic and real-model tests that would verify it.
   ],
   "tests/test_agent_tools.py": [
     "updates orientation recovery expectations for one bounded read",
-    "covers test-only source locations, repair evidence preservation, and file-listing rejection"
+    "covers test-only source locations, repair evidence preservation, file-listing rejection, and transaction deferral"
   ],
   "transaction_buffer.py": [
     "host-only bounded product-file set, status block, expiry, and cleanup"

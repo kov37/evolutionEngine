@@ -723,6 +723,26 @@ def _auto_validation_command(path: str):
     return None
 
 
+def _transaction_window_open(transaction, *, validation_required: bool,
+                              repair_required: bool, mutation_batch_remaining: int) -> bool:
+    """Return whether proactive validation may be deferred for related edits.
+
+    A normal single-file repair must retain the fast validate-after-mutation
+    hook. Deferral is justified only when the host has already opened a
+    transaction, or when an explicit related-mutation batch is still active.
+    The predicate is intentionally independent of task names and models.
+    """
+    return bool(
+        (
+            transaction is not None
+            and transaction.active
+            and validation_required
+            and repair_required
+        )
+        or mutation_batch_remaining > 1
+    )
+
+
 def _has_test_artifacts(workspace_listing: str) -> bool:
     """Detect conventional test artifacts without inspecting task semantics."""
     for raw_line in str(workspace_listing or "").splitlines():
@@ -1899,9 +1919,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         # Keep the first repair edit and defer the automatic replay while the
         # bounded mutation batch is open; otherwise the proactive hook makes
         # the batch allowance unreachable by validating after every file.
-        transaction_window_open = (
-            (validation_required and repair_required)
-            or validation_batch_remaining > 1
+        transaction_window_open = _transaction_window_open(
+            transaction,
+            validation_required=validation_required,
+            repair_required=repair_required,
+            mutation_batch_remaining=validation_batch_remaining,
         )
         if (
             product_mutation_landed
