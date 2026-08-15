@@ -2769,3 +2769,19 @@ and a status call after restart observes the refreshed process rather than a
 stale predecessor. This is a generic process-lifecycle invariant. The focused
 suite passes 107 tests and the modified modules compile cleanly; rerun the
 unchanged Todo task to verify the full repair-to-validation path.
+
+### 2026-08-15 — broaden stale-action checkpoint to rejected commands
+
+The handle-preserving rerun removed the false process-handle diagnosis, but
+the actor then replayed the original POST validation command while the FSM was
+in product repair. Because `run_command` was intentionally unavailable in that
+state, the engine rejected it and the actor spent another repair turn on the
+same stale action.
+
+The checkpoint detector now covers all engine-rejected non-mutation actions,
+including commands, shell probes, process checks, and file inspections. A
+normal product failure or missing-file error still follows the ordinary
+repair path; only explicit lifecycle/tool-plane rejection triggers the fresh
+checkpoint. The focused suite remains at 107 passing tests. Rerun the
+unchanged Todo task to verify that the actor reaches the patch surface after a
+rejected validation replay.

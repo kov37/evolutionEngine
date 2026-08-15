@@ -389,14 +389,15 @@ def _intervention_messages(messages, tail=INTERVENTION_TAIL_MESSAGES):
     ] + recent
 
 
-_REPAIR_INSPECTION_TOOLS = frozenset({
+_REPAIR_RECOVERY_TOOLS = frozenset({
     "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
     "list_workspace", "list_dir", "diff_files", "git_diff", "recall",
+    "run_tests", "run_command", "run_shell", "process_status", "stop_process",
 })
 
 
 def _is_blocked_repair_action(tool_name, result_content):
-    """Return true when a repair inspection was rejected by the engine.
+    """Return true when a non-mutation repair action was rejected by the engine.
 
     A normal missing-file error can be useful feedback and deserves one
     corrected attempt.  These markers mean something different: the actor is
@@ -404,7 +405,7 @@ def _is_blocked_repair_action(tool_name, result_content):
     right response is a fresh repair checkpoint, not another model turn with
     the same stale assistant message in view.
     """
-    if tool_name not in _REPAIR_INSPECTION_TOOLS:
+    if tool_name not in _REPAIR_RECOVERY_TOOLS:
         return False
     lower = str(result_content or "").lower()
     return any(marker in lower for marker in (
@@ -434,7 +435,7 @@ def _repair_checkpoint_messages(
             "[fresh repair checkpoint] The previous repair action was rejected by the engine. "
             "The old action transcript is intentionally omitted. Use only the current failure evidence "
             "and the accepted mutation below; make one concrete product patch now. Do not repeat a "
-            "rejected inspection, start a service, run another probe, or return a plan."
+            "rejected non-mutation action, start a service, run another probe, or return a plan."
         ),
     }]
     if mutation_checkpoint:

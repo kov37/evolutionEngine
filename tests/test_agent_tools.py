@@ -58,6 +58,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_is_blocked_repair_action(
             "search_file", "REJECTED: repeated failing call search_file with the same arguments"
         ))
+        self.assertTrue(_is_blocked_repair_action(
+            "run_command", "ERROR: 'run_command' is unavailable this turn — only ['patch_file'] are allowed"
+        ))
         self.assertFalse(_is_blocked_repair_action("read_file", "ERROR: file not found"))
         self.assertFalse(_is_blocked_repair_action("run_command", "ERROR: tool unavailable"))
 
