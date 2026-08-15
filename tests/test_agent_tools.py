@@ -225,7 +225,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_is_validation_setup_failure(
             "the test module produced no test evidence; invoke a test runner"
         ))
-        self.assertTrue(_is_validation_setup_failure(
+        self.assertFalse(_is_validation_setup_failure(
             "the command passed but does not show an assertion or behavioral probe"
         ))
 
@@ -928,7 +928,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_is_validation_setup_failure(
             "ERROR: test module 'test_metrics.py' produced no test evidence"
         ))
-        self.assertTrue(_is_validation_setup_failure(
+        self.assertFalse(_is_validation_setup_failure(
             "the command passed but does not show an assertion or behavioral probe"
         ))
         self.assertFalse(_is_validation_setup_failure("AssertionError: wrong total"))

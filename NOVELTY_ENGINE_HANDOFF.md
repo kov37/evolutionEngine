@@ -1897,3 +1897,20 @@ frozen 3-turn scorecard remains unmet because the current outer loop permits
 one model response/action phase per iteration. The remaining optimization is
 therefore multi-action turn handling, not more orientation suppression or
 weaker validation.
+
+### 2026-08-15 — separate failed validation from setup failure
+
+The first harder WebSocket run exposed a multi-file workflow problem. After
+repairing `server.js`, the actor tried `ls` and `node --version`; those commands
+correctly produced no behavioral evidence, but `_is_validation_setup_failure`
+classified that absence as setup failure. Product mutation then stayed locked,
+so the actor could not repair `index.html` and spent the remaining turns
+working around its own tool restrictions.
+
+Setup classification is now limited to actual execution-plane failures:
+missing runners/dependencies, import or permission failures, test discovery
+failures, and unavailable processes. A command that runs successfully but
+proves nothing remains a validation failure in the product plane; the actor
+can choose a real probe or continue a related product repair. Function-style
+test modules that silently run as scripts remain setup failures. The
+deterministic suite passes 89 tests.

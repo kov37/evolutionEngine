@@ -529,12 +529,12 @@ def _is_validation_setup_failure(text: str) -> bool:
     supplied test function without editing the evidence.
     """
     lower = str(text or "").lower()
+    if "test module" in lower and "no test evidence" in lower:
+        return True
     return any(marker in lower for marker in (
         "could not start", "no such file or directory", "importerror",
-        "no tests discovered", "no test evidence", "dependency",
-        "permission denied", "does not show an assertion",
-        "does not show behavioral evidence", "no behavioral assertion",
-        "no interaction evidence", "zero exit code without a behavioral",
+        "no tests discovered", "dependency", "permission denied",
+        "test module ran as a script", "test runner exited successfully but discovered zero tests",
     ))
 
 
