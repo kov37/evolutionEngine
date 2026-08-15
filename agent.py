@@ -774,7 +774,7 @@ def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
     return bool(novelty_action_critic or novelty_action_gate)
 
 
-def _novelty_progress_tool_names(novelty_context):
+def _novelty_progress_tool_names(novelty_context, *, helper_mutation_blocked=False):
     """Return the final tool surface when the context ledger requires progress.
 
     This policy is intentionally computed again at the end of turn assembly.
@@ -791,6 +791,12 @@ def _novelty_progress_tool_names(novelty_context):
     repeated_action = novelty_context.repeated_validation_loop()
     if novelty_context.recovery_reads_allowed() and not repeated_action:
         names.update({"read_file", "find_files", "search_file"})
+    if helper_mutation_blocked:
+        # A stale model commonly replays write_file after its temporary helper
+        # was rejected. Leave patch_file available for the product artifact,
+        # but remove the exact capability it has just demonstrated it will
+        # misuse.
+        names.discard("write_file")
     return names
 
 
@@ -966,6 +972,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     repair_inspection_used = False
     last_mutation_rejected = False
     blocked_mutation_paths = set()
+    blocked_progress_helper_paths = set()
     protected_edit_recovery_pending = False
     repair_turns_used = 0
     repair_recovery_mode = False
@@ -1429,7 +1436,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         # policy layer may narrow this surface, never re-expand it after the
         # ledger has declared that state-changing progress is required.
         novelty_progress_tools = (
-            _novelty_progress_tool_names(novelty_context)
+            _novelty_progress_tool_names(
+                novelty_context,
+                helper_mutation_blocked=bool(blocked_progress_helper_paths),
+            )
             if novelty_action_gate else None
         )
         if novelty_progress_tools is not None:
@@ -1452,6 +1462,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 gate_message = (
                     "The bounded context window is exhausted without a mutation. Validation is not progress; "
                     "make one targeted mutation or call finish_task."
+                )
+            if blocked_progress_helper_paths:
+                gate_message += (
+                    " A validation-helper write was rejected on the previous turn; write_file is unavailable. "
+                    "Use patch_file on the product source implicated by the task, or call finish_task."
                 )
             messages_for_call = messages_for_call + [{
                 "role": "system",
@@ -1674,7 +1689,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         blocked_command_reasons = {}
         blocked_mutation_reasons = {}
         if (novelty_action_gate and novelty_context is not None
-                and _novelty_progress_tool_names(novelty_context) is not None):
+                and _novelty_progress_tool_names(
+                    novelty_context,
+                    helper_mutation_blocked=bool(blocked_progress_helper_paths),
+                ) is not None):
             # A progress gate is asking for product state change, not another
             # temporary verifier. Keep helper creation legal during ordinary
             # validation, but do not let a helper write satisfy this specific
@@ -1744,6 +1762,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             blocked_command_reasons=blocked_command_reasons,
             blocked_mutation_reasons=blocked_mutation_reasons,
         )
+        for call, tmsg in zip(turn_calls, tool_messages):
+            path = (call.function.arguments or {}).get("path", "")
+            if (
+                lifecycle_policy.is_validation_helper_path(path)
+                and tmsg["content"].startswith(
+                    "REJECTED: the novelty progress gate requires a product mutation"
+                )
+            ):
+                blocked_progress_helper_paths.add(path)
 
         # Proactive validation hook: when the actor writes a clearly named
         # helper below .agentic/, execute it immediately instead of spending a

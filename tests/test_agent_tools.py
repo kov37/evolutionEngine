@@ -1251,6 +1251,16 @@ class KernelToolTests(unittest.TestCase):
         )
         context.close()
 
+    def test_novelty_progress_surface_removes_write_after_helper_rejection(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
+        for iteration in range(1, 4):
+            context.observe(iteration, "run_tests", {}, "passed")
+        self.assertEqual(
+            _novelty_progress_tool_names(context, helper_mutation_blocked=True),
+            {"patch_file", "finish_task"},
+        )
+        context.close()
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])

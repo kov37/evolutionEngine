@@ -3249,3 +3249,19 @@ so this does not remove useful test construction; it only prevents a temporary
 checker from satisfying a mutation-required boundary. Deterministic coverage
 is now 144 tests and 35 subtests. The next live run must verify this guard with
 the unchanged fixture.
+
+The rerun from `777bed9` confirmed that the helper guard itself is correct:
+the actor's `.agentic/verify_cdf.py` writes were rejected on iterations 14–16,
+and the novelty ledger recorded only one real mutation. The actor nevertheless
+replayed the stale `write_file` call, so the run ended at 16 turns with eight
+validations, zero requested methods, and a bounded 19/20 grade (the grader
+timed out at its 10-second limit). This is now a tool-selection recovery
+problem, not silent helper progress.
+
+The engine now remembers rejected helper paths while the run is active. On the
+next gated turn it removes `write_file` from the current contract, leaves
+`patch_file` available for the product source, and adds an explicit recovery
+message. The ledger already ignores rejected/helper mutations. Deterministic
+coverage is now 145 tests and 35 subtests. Rerun the unchanged benchmark from
+the new commit; success evidence is a product-path mutation or an honest
+completion attempt after the helper capability disappears.
