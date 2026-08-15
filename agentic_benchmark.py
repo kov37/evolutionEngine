@@ -98,6 +98,25 @@ def _metrics(output: str) -> dict:
     }
 
 
+def _profile_limits(profile: str, iterations: int, chat_timeout: float,
+                    run_timeout: float) -> tuple[int, float, float]:
+    """Return bounded limits for a development smoke run.
+
+    The full profile remains the default.  Smoke is intentionally a cap, not a
+    different task or grader: it lets a developer test first mutation and one
+    validation boundary without accidentally spending a full overnight
+    budget on a known-stalled model.
+    """
+    if profile == "smoke":
+        return min(iterations, 8), min(chat_timeout, 45.0), min(run_timeout, 300.0)
+    return iterations, chat_timeout, run_timeout
+
+
+def _run_completed(timed_out: bool, returncode: int | None) -> bool:
+    """Whether the actor reached the benchmark handoff boundary normally."""
+    return not timed_out and returncode == 0
+
+
 def _event_kind(line: str) -> str:
     """Classify one live actor line for the durable monitor stream."""
     stripped = line.strip()
@@ -692,8 +711,14 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     scorecard = {
         "artifact_passed": artifact_passed,
         "finish_called": metrics["done_signal"],
+        "run_completed": _run_completed(timed_out, returncode),
     }
-    passed = artifact_passed
+    passed = artifact_passed and scorecard["run_completed"]
+    if not passed and artifact_passed and not scorecard["run_completed"]:
+        detail = (
+            "Artifact passed, but the agent run did not complete normally: "
+            + json.dumps(scorecard, sort_keys=True)
+        )
     if task.max_success_iterations is not None:
         scorecard["iteration_target"] = task.max_success_iterations
         scorecard["iteration_target_met"] = (
@@ -734,6 +759,8 @@ def main() -> int:
     parser.add_argument("--chat-timeout", type=float, default=30)
     parser.add_argument("--run-timeout", type=float, default=600,
                         help="Maximum seconds for one agent run before its process group is terminated.")
+    parser.add_argument("--profile", choices=["full", "smoke"], default="full",
+                        help="smoke caps the run at 8 iterations, 45s/chat, and 300s total.")
     parser.add_argument("--model", default="qwen3.6:35b-mlx",
                         help="Ollama actor model used for the run.")
     parser.add_argument("--backend", choices=["ollama", "llama-cpp"], default="ollama",
@@ -749,10 +776,13 @@ def main() -> int:
     args = parser.parse_args()
     selected = list(TASKS.values()) if args.task == "all" else [TASKS[args.task]]
     conditions = ["baseline", "novelty"] if args.condition == "both" else [args.condition]
-    records = [run_one(task, condition, args.iterations, args.action_critic,
-                       args.action_gate, args.chat_timeout, args.model,
+    iterations, chat_timeout, run_timeout = _profile_limits(
+        args.profile, args.iterations, args.chat_timeout, args.run_timeout
+    )
+    records = [run_one(task, condition, iterations, args.action_critic,
+                       args.action_gate, chat_timeout, args.model,
                        args.backend, args.base_url, args.action_first,
-                       args.run_timeout, args.keep_workspace)
+                       run_timeout, args.keep_workspace)
                for task in selected for condition in conditions]
     passed = sum(r["passed"] for r in records)
     print(json.dumps({"summary": {"passed": passed, "total": len(records),

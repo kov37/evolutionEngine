@@ -1531,3 +1531,36 @@ The next real-model check should verify that the same provider failure ends in
 one bounded turn and that a healthy small request still works. Do not weaken
 the independent WebSocket grader or alter the fixture to compensate for a
 provider transport failure.
+
+### 2026-08-15 — short development profile and external mini-SWE baseline
+
+The next WebSocket run was intentionally interrupted at 501.2 seconds after
+14 actor iterations to avoid spending the remaining budget. Its independent
+grader passed the generated artifact, but the actor had not called
+`finish_task` and exited with return code `-15`. The benchmark incorrectly
+recorded `passed: true` because it considered artifact correctness alone for
+tasks without the historical iteration scorecard. `run_completed` is now part
+of the scorecard, and an interrupted, timed-out, or nonzero actor run cannot be
+reported as a passing benchmark even when its partial artifact happens to pass.
+
+The benchmark now has an explicit `--profile smoke` mode. It keeps the same
+fixture, actor, and independent grader, but caps a development run at 8 actor
+iterations, 45 seconds per model call, and 300 seconds total. `full` remains
+the default for final measurements. This separates fast convergence debugging
+from expensive capability measurement without changing task semantics.
+
+As an external baseline, mini-SWE-agent v2.4.6 was run against the same frozen
+WebSocket fixture using the Qwen3.8-27B MLX server. Its local-model adapter
+required the absolute loaded model path in the request; an alias caused MLX to
+look for a nonexistent Hugging Face repository. With the correct path, it made
+10 model calls / 8 assistant turns in the short run, created `package.json`
+and installed `ws`, but never mutated `server.js` or `index.html`. The
+independent grader failed on the original `http://` WebSocket URL. Several
+turns searched the whole filesystem or reread the trajectory, and two model
+responses exceeded mini-SWE-agent's one-bash-command format. This is a useful
+external baseline for analysis paralysis; it is not evidence against the
+NoveltyEngine implementation.
+
+Do not add mini-SWE-agent-specific branches to the engine. Future comparisons
+should use the smoke profile first, then a full run only after a real mutation
+and validation boundary are observed.

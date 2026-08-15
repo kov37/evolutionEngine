@@ -18,7 +18,7 @@ from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import build_validation_policy, orientation_action_tools
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
-from agentic_benchmark import TASKS
+from agentic_benchmark import TASKS, _profile_limits, _run_completed
 
 
 class _FakeMessage:
@@ -174,6 +174,15 @@ class KernelToolTests(unittest.TestCase):
         compile(grade, ".agentic_grader.py", "exec")
         self.assertIn("port = 18767", grade)
         self.assertIn("env['PORT'] = str(port)", grade)
+
+    def test_smoke_profile_caps_expensive_real_model_runs(self):
+        self.assertEqual(_profile_limits("smoke", 20, 90, 600), (8, 45.0, 300.0))
+        self.assertEqual(_profile_limits("full", 20, 90, 600), (20, 90, 600))
+
+    def test_interrupted_artifact_is_not_reported_as_completed(self):
+        self.assertFalse(_run_completed(False, -15))
+        self.assertFalse(_run_completed(True, -15))
+        self.assertTrue(_run_completed(False, 0))
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
