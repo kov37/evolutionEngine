@@ -3329,7 +3329,7 @@ evidence for this change. Next work should be a generic way to measure and,
 if justified, reduce unnecessary orientation/validation turns without
 injecting the expected two-file patch or changing the fixture.
 
-The checkpoint for this change is commit `485af02` (`Add bounded multi-file
+The checkpoint for this change is commit `2266a44` (`Add bounded multi-file
 transaction recovery`). It is ready to push after the telemetry head is
 reconciled; the benchmark result JSONL and historical monitor logs remain
 local evidence rather than source changes.
