@@ -122,6 +122,20 @@ def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed:
     return bool(artifact_passed and finish_called and run_completed)
 
 
+def _verifier_repair_prompt(task: Task, detail: str) -> str:
+    """Turn independent-grader evidence into one generic bounded repair pass."""
+    return (
+        task.prompt
+        + "\n\n## Independent verifier feedback\n"
+        + "The previous handoff was rejected by the independent verifier. Treat the exact feedback "
+          "below as authoritative failure evidence. Inspect the current workspace, repair the "
+          "implementation or missing artifact that caused it, run a focused check that covers the "
+          "failure, and call finish_task only after the verifier condition is satisfied. Do not "
+          "rewrite the verifier or supplied task files.\n"
+        + detail[-3000:]
+    )
+
+
 def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
     """Run cheap deterministic guard tests before any expensive model run."""
     command = [
@@ -731,6 +745,49 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     elapsed = time.monotonic() - started
     artifact_passed, detail = _grade(task, work)
     metrics = _metrics(stdout or "")
+    verifier_repair = None
+    # A clean actor handoff is not enough when the independent verifier rejects
+    # the artifact. Give the same workspace one bounded repair pass with the
+    # verifier's exact evidence. This is a generic external-validation loop:
+    # the harness does not interpret the task or synthesize a WebSocket-specific
+    # fix, and it never runs more than one feedback pass per benchmark attempt.
+    if not artifact_passed and _run_completed(timed_out, returncode):
+        print("🔁 Independent verifier rejected the artifact; starting one bounded repair pass.")
+        repair_monitor_path = RUNS / f"monitor-{task.name}-{condition}-{time.time_ns()}-repair.jsonl"
+        repair_cmd = [
+            sys.executable, "-u", str(ROOT / "agent.py"), "--project", str(work),
+            "--iteration-budget", str(min(iterations, 10)), "--chat-timeout", str(chat_timeout),
+            "--model", model, "--backend", backend, "--base-url", base_url,
+        ]
+        if action_first:
+            repair_cmd.append("--action-first")
+        if condition == "novelty":
+            repair_cmd.extend(["--novelty-context"])
+            if action_critic:
+                repair_cmd.append("--novelty-action-critic")
+            if action_gate:
+                repair_cmd.append("--novelty-action-gate")
+        repair_cmd.append(_verifier_repair_prompt(task, detail))
+        repair_started = time.monotonic()
+        repair_proc = subprocess.Popen(
+            repair_cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        repair_stdout, repair_timed_out, repair_returncode = _stream_agent(
+            repair_proc, repair_started, run_timeout, repair_monitor_path
+        )
+        stdout += "\n" + repair_stdout
+        timed_out = timed_out or repair_timed_out
+        returncode = repair_returncode
+        artifact_passed, detail = _grade(task, work)
+        verifier_repair = {
+            "monitor_log": str(repair_monitor_path),
+            "timed_out": repair_timed_out,
+            "returncode": repair_returncode,
+            "elapsed_seconds": round(time.monotonic() - repair_started, 1),
+            "artifact_passed": artifact_passed,
+        }
+        metrics = _metrics(stdout or "")
     scorecard = {
         "artifact_passed": artifact_passed,
         "finish_called": metrics["done_signal"],
@@ -767,6 +824,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "scorecard": scorecard,
         "monitor_log": str(monitor_path),
     }
+    if verifier_repair is not None:
+        record["verifier_repair"] = verifier_repair
     RUNS.mkdir(parents=True, exist_ok=True)
     with (RUNS / "results.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")

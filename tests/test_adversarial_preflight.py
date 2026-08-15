@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 import action_governor
-from agentic_benchmark import _scorecard_passed
+from agentic_benchmark import _scorecard_passed, _verifier_repair_prompt
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import is_inspection_command
 from validation_contract import from_task
@@ -18,6 +18,13 @@ from workspace.run_tests_tool import run_tests
 
 
 class AdversarialPreflightTests(unittest.TestCase):
+    def test_external_verifier_feedback_is_preserved_for_one_repair_pass(self):
+        task = type("Task", (), {"prompt": "Repair the application."})()
+        prompt = _verifier_repair_prompt(task, "AssertionError: required artifact is stale")
+        self.assertIn("Independent verifier feedback", prompt)
+        self.assertIn("required artifact is stale", prompt)
+        self.assertIn("Do not rewrite the verifier", prompt)
+
     def test_readback_wrappers_are_inspection(self):
         commands = [
             ["cat", "index.html"],
