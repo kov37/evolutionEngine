@@ -2624,3 +2624,18 @@ mutations, 6 validations, and 1 validation failure; the 4B made 3 worker calls
 and produced 6 stale-result observations, but stale diagnoses were not placed
 in the actor prompt. This is a measured improvement in both reliability and
 latency, while preserving the worker as an advisory current-event component.
+
+### 2026-08-15 — allow one bounded process-status check
+
+The freshness-safe run still showed one avoidable control-plane rejection: the
+actor tried `process_status` after starting a managed server, but ordinary
+validation policy had removed that tool to prevent status-looping. The engine
+now exposes exactly one `process_status` call when it knows a managed
+background process is alive. The capability is removed after that call and is
+reset only when a later mutation causes a service restart.
+
+This keeps readiness inspection separate from behavioral evidence while
+removing a predictable false tool failure. The focused suite now passes 126
+tests and preflight remains green. Rerun the WebSocket task from the new commit
+to measure whether the bounded status capability removes a turn without
+reintroducing status loops.

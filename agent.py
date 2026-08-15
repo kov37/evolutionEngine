@@ -814,6 +814,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     protected_edit_recovery_pending = False
     repair_turns_used = 0
     repair_recovery_mode = False
+    process_status_used = False
     repair_recovery_entries = 0
     # Permit a small bounded set of related product mutations after the first
     # successful write so multi-file changes can reach a coherent validation
@@ -1191,6 +1192,8 @@ You have this focused toolbelt: {offered_tool_names}.
                 repair_recovery_mode=repair_recovery_mode,
                 mutation_batch_remaining=validation_batch_remaining,
                 accepted_validation_evidence=bool(validation_evidence),
+                background_process_active=bool(active_background_handles()),
+                process_status_used=process_status_used,
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
@@ -1533,6 +1536,8 @@ You have this focused toolbelt: {offered_tool_names}.
         for call, tmsg in zip(turn_calls, tool_messages):
             tool_name = call.function.name
             args = call.function.arguments or {}
+            if tool_name == "process_status":
+                process_status_used = True
             capability = action_governor.classify(tool_name, args)
             result = tmsg.get("content", "")
             if _governed and capability == "MUTATE" and args.get("path"):
@@ -1714,6 +1719,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 for handle in stale_service_handles:
                     print(f"♻️ [stale service] automatic stop: {stop_process(handle)}")
                 stale_service_restart_pending = True
+                process_status_used = False
                 print(f"♻️ [stale service] restart required after mutation: {stale_service_handles}")
         if not validation_required and not repair_required:
             if turn_mutated:

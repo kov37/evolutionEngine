@@ -282,6 +282,8 @@ def build_validation_policy(
     repair_recovery_mode: bool,
     mutation_batch_remaining: int = 0,
     accepted_validation_evidence: bool = False,
+    background_process_active: bool = False,
+    process_status_used: bool = False,
 ) -> ValidationActionPolicy | None:
     """Return one immutable policy, or ``None`` outside validation.
 
@@ -298,6 +300,11 @@ def build_validation_policy(
         # app has been launched, leaving those tools in the validation surface
         # invites repeated status checks instead of a behavioral probe.
         validation_tools = set(VALIDATION_TOOLS - {"process_status", "stop_process"})
+        if background_process_active and not process_status_used:
+            # A live managed service makes one readiness/status inspection
+            # useful setup evidence. Keep it one-shot so the actor cannot
+            # replace the behavioral check with an endless status loop.
+            validation_tools.add("process_status")
         # A temporary behavioral probe is a validation artifact, not a
         # product mutation. Dispatch restricts this write surface to .agentic/.
         validation_tools.add("write_file")
@@ -320,6 +327,8 @@ def build_validation_policy(
                 "a single-line node -e or python -c command). Keep every tool argument single-line. "
                 "If a helper file is clearer, write it only below .agentic/ and run that helper; "
                 "do not edit product or supplied test files." + batch_note
+                + (" One process_status check is available for the active managed service; then run the behavioral check."
+                   if background_process_active and not process_status_used else "")
             ),
         )
 

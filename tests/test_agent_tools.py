@@ -256,6 +256,25 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("node -e", policy.prompt)
         self.assertIn("below .agentic/", policy.prompt)
 
+    def test_validation_policy_allows_one_status_check_for_live_service(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=False, setup_failure=False,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=0, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, background_process_active=True,
+            process_status_used=False,
+        )
+        self.assertIn("process_status", policy.tools)
+        self.assertIn("One process_status check", policy.prompt)
+        used = build_validation_policy(
+            validation_required=True, repair_required=False, setup_failure=False,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=0, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, background_process_active=True,
+            process_status_used=True,
+        )
+        self.assertNotIn("process_status", used.tools)
+
     def test_dependency_install_is_setup_not_behavioral_evidence(self):
         self.assertTrue(is_dependency_setup_command(["npm", "install", "--no-audit"]))
         self.assertTrue(is_dependency_setup_command("python3 -m pip install ws"))
