@@ -325,6 +325,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_is_validation_setup_failure(
             "the test module produced no test evidence; invoke a test runner"
         ))
+        self.assertTrue(_is_validation_setup_failure(
+            "ConnectionRefusedError: server at 127.0.0.1:8765 is down"
+        ))
         self.assertFalse(_is_validation_setup_failure(
             "the command passed but does not show an assertion or behavioral probe"
         ))

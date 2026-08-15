@@ -2428,3 +2428,18 @@ dynamic write APIs are treated as mutations, and output-only interpreter calls
 cannot satisfy behavioral validation merely because their printed text contains
 words such as “assert” or “passed”. Use this preflight corpus before another
 long actor run; reserve live calls for cases that pass the control-plane checks.
+
+### 2026-08-15 — classify unreachable validation services as setup recovery
+
+The live `3d_scene` run wrote a valid `scene.html`, but the harness stopped its
+stale server after the mutation. The next validation received
+`ConnectionRefusedError`. The actor was entering product repair even though no
+request reached the artifact, which removed the process/command surface needed
+to restore validation.
+
+Connection-refused, failed-to-connect, URL-open connection, and explicit
+server-down signals now enter the setup plane. The actor may restore the
+validation target before changing product code. This preserves the artifact
+and keeps the rule generic: an unreachable validation target is an
+execution/setup failure, while a reachable target returning a bad result is a
+product failure.

@@ -558,6 +558,11 @@ def _is_validation_setup_failure(text: str) -> bool:
         "could not start", "no such file or directory", "importerror",
         "no tests discovered", "dependency", "permission denied",
         "test module ran as a script", "test runner exited successfully but discovered zero tests",
+        # A stopped or unreachable local service is a setup-plane failure.
+        # Reopen the process/command surface so the actor can restore the
+        # validation target before changing product code.
+        "connection refused", "connectionrefusederror", "failed to connect",
+        "urlopen error", "server is down",
     ))
 
 
