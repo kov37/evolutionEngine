@@ -13,6 +13,7 @@ from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import _failure_diagnostic, assertion_driven_tool_contract, from_task
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
+from lifecycle_policy import build_validation_policy
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
 from agentic_benchmark import TASKS
@@ -63,6 +64,36 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_force_repair_recovery(True, True, True))
         self.assertTrue(_force_repair_recovery(True, True, False))
         self.assertFalse(_force_repair_recovery(False, True, False))
+
+    def test_validation_policy_is_setup_then_command(self):
+        first = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=True,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False,
+        )
+        second = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=True,
+            repair_inspection_used=True, last_mutation_rejected=False,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False,
+        )
+        self.assertIn("read_file", first.tools)
+        self.assertIn("run_command", first.tools)
+        self.assertNotIn("patch_file", second.tools)
+        self.assertEqual(second.tools & {"run_tests", "run_command"}, {"run_tests", "run_command"})
+        self.assertTrue(second.setup_recovery)
+
+    def test_validation_policy_is_repair_then_patch(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=False,
+            repair_inspection_used=True, last_mutation_rejected=False,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False,
+        )
+        self.assertNotIn("read_file", policy.tools)
+        self.assertIn("patch_file", policy.tools)
+        self.assertTrue(policy.requires_mutation)
 
     def test_recovery_guard_is_safe_before_first_validation(self):
         self.assertFalse(_force_repair_recovery(False, False, False))
@@ -454,6 +485,21 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertEqual(judgment.failure_class, "setup")
         self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
+        context.close()
+
+    def test_synchronous_triage_classifies_zero_test_summary_as_setup(self):
+        context = NoveltyContext(
+            chat_fn=lambda **kwargs: _FakeResponse(
+                '{"failure_class":"behavior","next_action":"patch_file","confidence":0.99}'
+            ),
+            worker_interval=100,
+        )
+        judgment = context.synchronous_triage(
+            4, "repair", "(False, 'Ran 0 tests: no tests discovered')",
+            legal_actions=("run_command", "patch_file"),
+        )
+        self.assertEqual(judgment.failure_class, "setup")
+        self.assertEqual(judgment.next_action, "run_command")
         context.close()
 
     def test_dependency_install_without_behavioral_evidence_is_setup(self):

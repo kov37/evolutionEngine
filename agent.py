@@ -23,6 +23,7 @@ import adaptive_budget
 import escalation_governor
 import kernel.io_tools as io_tools
 import kernel.memory as memory
+import lifecycle_policy
 import message_compaction
 import progress_governor
 import risk_layer
@@ -993,117 +994,35 @@ You have this focused toolbelt: {offered_tool_names}.
             )
 
         if validation_required:
-            # Validation and repair are separate states. After a failed
-            # check, force an inspect/repair turn before offering another
-            # check; otherwise a model can loop over superficially different
-            # probes without ever changing the defective artifact.
-            if repair_required:
-                validation_tools = {"read_file", "find_files", "search_file", "patch_file", "write_file",
-                                    "diff_files", "git_diff", "process_status", "stop_process"}
-                # A failed check can be an execution/setup failure rather
-                # than an assertion failure. In that case the actor needs a
-                # command/test tool available to select the right interpreter,
-                # install an explicitly required dependency, or rerun from a
-                # valid target. Keep this conditional so ordinary failures
-                # still force an implementation mutation before probing again.
-                # The compact repair packet preserves the observed command,
-                # while the assessment suggestion carries the plane
-                # classification (for example, "no assertion").  Combine
-                # both so a weak probe cannot be mistaken for a product bug.
-                setup_failure = _is_validation_setup_failure(
-                    f"{last_repair_packet}\n{last_validation_failure}"
-                )
-                if setup_failure:
-                    # Setup recovery may select a runner or install a declared
-                    # dependency, but it must not receive an unrestricted
-                    # shell escape. Inspection and validation remain explicit
-                    # argv commands through run_command.
-                    validation_tools.update({"run_tests", "run_command"})
-                    if repair_inspection_used:
-                        # Once the setup evidence has been inspected, another
-                        # read cannot change runner or discovery state. Force
-                        # the concrete validation fallback named by the packet.
-                        validation_tools -= {"read_file", "find_files", "search_file",
-                                              "list_workspace", "list_dir", "list_symbols", "grep_dir"}
-                elif repair_inspection_used:
-                    # Give the actor one targeted look at the reported code,
-                    # then remove read-only escape hatches until it mutates.
-                    validation_tools -= {"read_file", "find_files", "search_file", "list_workspace",
-                                         "list_dir", "list_symbols", "grep_dir"}
-                if last_mutation_rejected:
-                    # A rejected mutation is a strong signal that a broad
-                    # rewrite is unsafe. Keep the recovery turn on the
-                    # checkpointed file and require a narrow patch instead of
-                    # letting the actor replace the whole artifact again.
-                    validation_tools.discard("write_file")
-                if validation_failures >= 2 and not setup_failure:
-                    # Repeated behavioral failures mean a full rewrite is
-                    # destroying useful state. Force the actor to preserve
-                    # the current artifact and make a localized patch.
-                    validation_tools.discard("write_file")
-                if protected_edit_recovery_pending:
-                    # After a protected-test rejection, force one fresh
-                    # executable check before allowing another edit proposal.
-                    validation_tools -= {"patch_file", "write_file"}
-                    validation_tools.update({"run_tests", "run_command", "run_shell"})
-                if _force_repair_recovery(repair_recovery_mode, repair_required, setup_failure):
-                    # Repeated non-progress makes more observation
-                    # counterproductive. Force a mutation representation,
-                    # while retaining diff/finish for a safe handoff.
-                    validation_tools = {"patch_file", "write_file", "diff_files", "git_diff", "finish_task"}
-            else:
-                validation_tools = {"run_tests", "run_command", "run_shell", "process_status", "stop_process",
-                                    "diff_files", "git_diff"}
+            # One pure policy function derives the complete validation tool
+            # surface.  This keeps the FSM state, setup/behavior plane, and
+            # repair budget from being interpreted by separate branches.
+            setup_failure = _is_validation_setup_failure(
+                f"{last_repair_packet}\n{last_validation_failure}"
+            )
+            validation_policy = lifecycle_policy.build_validation_policy(
+                validation_required=validation_required,
+                repair_required=repair_required,
+                setup_failure=setup_failure,
+                repair_inspection_used=repair_inspection_used,
+                last_mutation_rejected=last_mutation_rejected,
+                validation_failures=validation_failures,
+                protected_edit_recovery_pending=protected_edit_recovery_pending,
+                repair_recovery_mode=repair_recovery_mode,
+            )
+            validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = novelty_context.consume_gate_restrictions() if novelty_context is not None else set()
             if gate_banned:
                 validation_tools -= gate_banned
                 print(f"🚦 [4B triage gate] tools removed: {sorted(gate_banned)}")
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
-            repair_instruction = (
-                "A validation check failed. Repair the execution/setup problem first; you may retry with an "
-                "available command or test target. The replacement check must contain an explicit assertion or "
-                "test-function call; printing a value or starting a process is not validation. "
-                if setup_failure else
-                "A validation check failed. Inspect this failure and make one targeted repair now; "
-            )
+            validation_prompt = (validation_policy.prompt if validation_policy else "")
             if repair_required:
-                validation_prompt = (
-                    repair_instruction
-                    + "Do not run another check or finish until you have changed the defective artifact, unless "
-                    + "the failure is solely execution/setup-related. "
-                    + "When the failure is an assertion or contract mismatch, compare the actual and expected "
-                    + "values semantically: fix the computation, shape, ordering, or value meaning—not merely "
-                    + "the reported types or formatting. "
-                    + "For stateful behavior, trace the test operations in their exact written order and identify "
-                    + "which state transition produced the observed value before editing. Do not narrate a hypothesis "
-                    + "without a tool call; make one concrete localized mutation, then validate it. "
-                    + "For unittest diffs, a '-' line is the actual value and a '+' line is the expected value; "
-                    + "preserve meaningful case, nesting, and ordering distinctions. "
-                    + ("The previous mutation was rejected by the tool. Do not repeat that exact edit; use a "
-                       "different valid mutation representation and account for the rejection message. "
-                       "Prefer patch_file with a small complete replacement; do not rewrite the whole file. "
-                       if last_mutation_rejected else "")
-                    + ("After two or more failed validations, use patch_file only and preserve the existing "
-                       "implementation structure; do not replace the whole file. "
-                       if validation_failures >= 2 and not setup_failure else "")
-                    + "Treat the validation script as evidence, not the artifact: do not weaken or rewrite "
-                    + "the probe to make it pass. Only change the probe for an explicit dependency, setup, "
-                    + "or syntax failure; otherwise repair the implementation named by the evidence. "
-                    + "Failure evidence:\n"
+                validation_prompt += (
+                    " Treat the validation script as evidence, not the artifact: do not weaken or rewrite "
+                    "the probe. When actual and expected values differ, repair the implementation's meaning, "
+                    "shape, ordering, or state transition—not just formatting. Failure evidence:\n"
                     + last_repair_packet
-                    + ("\nRepeated semantic failure: trace the reported actual value back to each "
-                       "contributing input or state transition, compare that trace with the expected "
-                       "value, and then make one concrete mutation. Do not speculate, reread unchanged "
-                       "files repeatedly, or repeat the same edit."
-                       if validation_failures >= 2 and not setup_failure else "")
-                    + ("\nRepair lock: the failure has already been inspected. Make one targeted mutation now; "
-                       "do not reread the same file or explain the problem."
-                       if repair_inspection_used else "")
-                )
-            else:
-                validation_prompt = (
-                    "Validation phase tool restriction: only validation tools are available this turn. "
-                    "Run a focused test or executable check and inspect its result."
                 )
             messages_for_call = messages_for_call + [{
                 "role": "system",

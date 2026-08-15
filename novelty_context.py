@@ -273,14 +273,15 @@ class NoveltyContext:
         """Classify a repair packet without a model when timing is critical."""
         lower = packet.lower()
         setup = any(marker in lower for marker in (
-            "no tests", "no test evidence", "pytest", "module not found",
+            "no tests", "ran 0 tests", "zero tests", "no test evidence", "pytest", "module not found",
             "dependency", "could not start", "permission denied",
             # Package-manager success is preparation, not product evidence.
             # Treat it as setup even when the surrounding repair packet calls
             # the probe a failure because it produced no behavioral assertion.
             "npm install", "npm ci", "added 1 package", "added ",
             "audited ", "pip install", "brew install", "package installed",
-            "setup-only", "without a behavioral assertion",
+            "setup-only", "without a behavioral assertion", "does not show an assertion",
+            "does not show behavioral evidence", "no interaction evidence",
         ))
         failure_class = "setup" if setup else "behavior"
         action = "run_command" if setup else "patch_file"

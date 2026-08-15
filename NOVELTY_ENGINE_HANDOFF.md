@@ -1432,3 +1432,16 @@ explicit `validation_passed -> COMPLETE` transition for setup recovery, and a
 regression test covers that path. The transition remains table-driven and
 validation evidence remains authoritative; no model or benchmark-specific
 exception was added.
+
+### 2026-08-15 — centralized validation action policy
+
+The lifecycle FSM is now paired with a pure `lifecycle_policy.py` policy
+function. It derives one immutable validation-phase action surface from the
+current recovery snapshot: setup failures get one inspection and then only
+explicit runner/command tools; behavior failures get one inspection and then
+targeted mutation; protected or repeated failures narrow the surface further.
+`agent.py` consumes this policy instead of reconstructing the validation tool
+set through several independent branches. The 4B gate can still remove tools,
+but cannot add tools or override the deterministic plane. Added unit coverage
+for the setup-then-command and repair-then-patch transitions. The deterministic
+suite passes 65 tests.
