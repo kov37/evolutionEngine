@@ -1460,3 +1460,10 @@ uses the centralized policy surface: targeted read/search plus mutation and
 finish remain available, while broad listing/exploration stays unavailable.
 Setup recovery separately removes mutation tools, so these two policies do
 not conflict. Added deterministic coverage; the suite now passes 66 tests.
+
+The following live run exposed stale-worker authority: the 4B gate removed
+mutation tools during a current behavior-repair state because its pending
+judgment still described setup. The deterministic policy now filters worker
+restrictions by the active plane. A behavior repair always retains its legal
+mutation tool; a setup recovery may still retain the worker's mutation ban.
+Added regression coverage. The deterministic suite passes 67 tests.

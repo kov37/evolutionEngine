@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _authoritative_gate_restrictions, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -64,6 +64,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_force_repair_recovery(True, True, True))
         self.assertTrue(_force_repair_recovery(True, True, False))
         self.assertFalse(_force_repair_recovery(False, True, False))
+
+    def test_stale_worker_gate_cannot_remove_behavior_repair_tools(self):
+        self.assertEqual(
+            _authoritative_gate_restrictions({"patch_file", "write_file", "finish_task"}, False),
+            {"finish_task"},
+        )
+        self.assertEqual(
+            _authoritative_gate_restrictions({"patch_file", "write_file"}, True),
+            {"patch_file", "write_file"},
+        )
 
     def test_validation_policy_is_setup_then_command(self):
         first = build_validation_policy(

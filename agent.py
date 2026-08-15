@@ -520,6 +520,14 @@ def _force_repair_recovery(recovery_mode, repair_required, setup_failure):
     return bool(recovery_mode and repair_required and not setup_failure)
 
 
+def _authoritative_gate_restrictions(gate_banned, setup_failure):
+    """Keep stale 4B restrictions subordinate to the deterministic plane."""
+    banned = set(gate_banned or ())
+    if not setup_failure:
+        banned -= {"patch_file", "write_file"}
+    return banned
+
+
 def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
@@ -1015,6 +1023,12 @@ You have this focused toolbelt: {offered_tool_names}.
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = novelty_context.consume_gate_restrictions() if novelty_context is not None else set()
+            # The synchronous worker is advisory.  Once the deterministic
+            # validation policy has classified the active failure as product
+            # behavior, stale setup advice must not remove the only legal
+            # mutation tools.  The worker may narrow a behavior state (for
+            # example by removing finish_task), never invert its plane.
+            gate_banned = _authoritative_gate_restrictions(gate_banned, setup_failure)
             if gate_banned:
                 validation_tools -= gate_banned
                 print(f"🚦 [4B triage gate] tools removed: {sorted(gate_banned)}")
