@@ -880,6 +880,30 @@ class KernelToolTests(unittest.TestCase):
             )
             self.assertTrue(run_tests(tmp)[0])
 
+    def test_run_tests_discovers_nested_package_from_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "pkg"
+            tests = package / "tests"
+            tests.mkdir(parents=True)
+            (package / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_pkg.py").write_text(
+                "import unittest\nfrom pkg import VALUE\n\n"
+                "class Contract(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        self.assertEqual(VALUE, 42)\n",
+                encoding="utf-8",
+            )
+            previous_root = Path(__file__).resolve().parents[1] / "workspace"
+            set_root(tmp)
+            try:
+                success, summary = run_tests(str(tests))
+            finally:
+                set_root(previous_root)
+            self.assertTrue(success, summary)
+            self.assertIn("1 passed", summary)
+
     def test_dispatch_blocks_command_plane_mutation_with_specific_reason(self):
         class Call:
             class Function:

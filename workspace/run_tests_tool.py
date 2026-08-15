@@ -42,6 +42,29 @@ def _alarm_handler(signum, frame):
     raise _TestRunTimeout
 
 
+def _project_import_root(absolute_path: str) -> str:
+    """Return the active project root for imports during test discovery.
+
+    The agent confines a graduated ``run_tests`` path to the active project,
+    but unittest normally puts only the test directory on ``sys.path``. That
+    breaks ordinary source-tree layouts such as ``project/pkg/tests`` where
+    tests import ``pkg`` from the project root. Keep this helper independent
+    of language or package names: use the orchestrator's sandbox root when
+    available, and fall back to the path's containing directory for direct
+    standalone use.
+    """
+    try:
+        from kernel.sandbox import get_root
+        configured = os.path.realpath(get_root())
+        candidate = os.path.realpath(absolute_path)
+        if os.path.commonpath((configured, candidate)) == configured:
+            return configured
+    except (ImportError, OSError, ValueError):
+        pass
+    fallback = os.path.dirname(absolute_path) if os.path.isfile(absolute_path) else absolute_path
+    return os.path.realpath(fallback)
+
+
 def _pytest_fallback(path: str, absolute_path: str) -> tuple[bool, str] | None:
     """Run pytest when unittest found no cases, if pytest is already present.
 
@@ -106,7 +129,8 @@ def _function_style_fallback(path: str, absolute_path: str) -> tuple[bool, str] 
     if not test_files:
         return None
 
-    import_roots = sorted({os.path.dirname(filename) for filename in test_files})
+    project_root = _project_import_root(absolute_path)
+    import_roots = sorted({project_root, *(os.path.dirname(filename) for filename in test_files)})
     old_sys_path = list(sys.path)
     for root in reversed(import_roots):
         if root and root not in sys.path:
@@ -200,6 +224,7 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     # normalize a file target into its parent directory plus an exact pattern
     # so the tool contract remains ergonomic and deterministic.
     absolute_path = os.path.abspath(path)
+    project_root = _project_import_root(absolute_path)
     # This tool is called repeatedly inside one long-lived agent process.
     # unittest imports test modules normally, so a second validation can
     # otherwise reuse the first version of the implementation from
@@ -252,20 +277,33 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
         discovered_basenames = set()
         project_basenames = set()
     if discovered_basenames or project_basenames:
+        # Never evict every loaded package whose filename is ``__init__.py``.
+        # Nested project tests commonly contain that file, and basename-only
+        # cleanup would otherwise remove pytest/unittest packages from
+        # sys.modules while the agent's own test process is still running.
+        stale_basenames = (discovered_basenames | project_basenames) - {"__init__.py"}
         for module_name, module in list(sys.modules.items()):
             module_file = getattr(module, "__file__", None)
-            if module_file and os.path.basename(module_file) in (discovered_basenames | project_basenames):
+            if module_file and os.path.basename(module_file) in stale_basenames:
                 sys.modules.pop(module_name, None)
     importlib.invalidate_caches()
     if os.path.isfile(absolute_path):
-        start_dir = os.path.dirname(absolute_path) or os.curdir
+        start_dir = os.path.realpath(os.path.dirname(absolute_path) or os.curdir)
         pattern = os.path.basename(absolute_path)
-        top_level_dir = start_dir
+        top_level_dir = project_root if start_dir != project_root else start_dir
     else:
-        start_dir = path
+        # Normalize macOS /var -> /private/var symlinks before unittest's
+        # containment assertion compares start_dir with top_level_dir.
+        start_dir = os.path.realpath(absolute_path)
         pattern = "test*.py"
-        top_level_dir = path
-    suite = loader.discover(start_dir=start_dir, pattern=pattern, top_level_dir=top_level_dir)
+        top_level_dir = project_root if start_dir != project_root else start_dir
+    previous_sys_path = list(sys.path)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    try:
+        suite = loader.discover(start_dir=start_dir, pattern=pattern, top_level_dir=top_level_dir)
+    finally:
+        sys.path[:] = previous_sys_path
 
     # Filter out non-test suites to get the real test count
     # loader.countTestCases() already excludes empty sub-suites
