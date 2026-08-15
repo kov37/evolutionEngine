@@ -122,6 +122,23 @@ def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed:
     return bool(artifact_passed and finish_called and run_completed)
 
 
+def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
+    """Run cheap deterministic guard tests before any expensive model run."""
+    command = [
+        sys.executable, "-m", "unittest",
+        "tests.test_agent_tools", "tests.test_adversarial_preflight",
+    ]
+    try:
+        proc = subprocess.run(
+            command, cwd=ROOT, text=True, capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"preflight timed out after {timeout_seconds:.1f}s: {exc}"
+    output = (proc.stdout + proc.stderr).strip()
+    return proc.returncode == 0, output[-4000:]
+
+
 def _event_kind(line: str) -> str:
     """Classify one live actor line for the durable monitor stream."""
     stripped = line.strip()
@@ -783,7 +800,17 @@ def main() -> int:
                         help="Use the model-neutral initial action contract.")
     parser.add_argument("--keep-workspace", action="store_true",
                         help="Preserve the generated task workspace for inspection.")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="Skip the cheap deterministic guard suite (debugging only).")
     args = parser.parse_args()
+    if not args.skip_preflight:
+        print("🧪 Running deterministic preflight before real-model benchmark...")
+        preflight_ok, preflight_detail = _run_preflight()
+        if not preflight_ok:
+            print("❌ PREFLIGHT FAILED — expensive model run not started.")
+            print(preflight_detail)
+            return 2
+        print("✅ Preflight passed; starting real-model benchmark.")
     selected = list(TASKS.values()) if args.task == "all" else [TASKS[args.task]]
     conditions = ["baseline", "novelty"] if args.condition == "both" else [args.condition]
     iterations, chat_timeout, run_timeout = _profile_limits(

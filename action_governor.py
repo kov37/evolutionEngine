@@ -75,7 +75,10 @@ _ASSERTIVE_CHECK_RE = re.compile(
 # code_change task that hadn't written anything yet. Writing to /dev/null
 # can never be a real mutation of anything the task cares about, so it's
 # safe to exclude unconditionally.
-_SHELL_MUTATE_RE = re.compile(r"(>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b)")
+_SHELL_MUTATE_RE = re.compile(
+    r"(>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
+    r"\btee\b|(?:readfilesync|writefilesync)|\.write_text\s*\(|\.write\s*\()"
+)
 
 
 def classify_run_shell(command: str) -> str:
@@ -98,10 +101,14 @@ def classify(tool_name: str, arguments: dict) -> str:
         argv = (arguments or {}).get("command", [])
         if isinstance(argv, list):
             command_text = " ".join(str(part) for part in argv)
-            if _SHELL_MUTATE_RE.search(command_text):
-                return "MUTATE"
-            if _SHELL_VALIDATE_RE.search(command_text):
-                return "VALIDATE"
+        elif isinstance(argv, str):
+            command_text = argv
+        else:
+            command_text = ""
+        if _SHELL_MUTATE_RE.search(command_text):
+            return "MUTATE"
+        if _SHELL_VALIDATE_RE.search(command_text):
+            return "VALIDATE"
         return "OBSERVE"
     return CAPABILITY_CLASS.get(tool_name, "OBSERVE")
 

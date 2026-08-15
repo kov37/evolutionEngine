@@ -1682,3 +1682,79 @@ penalties as defaults.
 
 The deterministic suite now passes 74 tests with one environment-dependent
 skip.
+
+### 2026-08-15 — command-plane mutation enforcement during validation
+
+The latest trace exposed a remaining generic bypass. After `write_file` was
+correctly unavailable during validation, the actor issued
+`bash -c 'cat > index.html'` and `bash -c 'cat > package.json'` through
+`run_command`. The ledger classified these as mutations, but dispatch did not
+enforce the validation/setup plane or protect the files before execution.
+
+The command classifier now handles both argv and string command forms and
+recognizes redirects, `tee`, inline Python/Node writes, and common file-copy or
+in-place edit forms. During ordinary validation and setup recovery, dispatch
+rejects mutation-shaped shell commands with a specific command-plane message;
+behavior-repair turns may still use shell mutation when the task genuinely
+requires it. This preserves shell-based dependency installation and repair
+while preventing a validation-only command from silently becoming a product
+edit.
+
+The deterministic suite passes 76 tests with one environment-dependent skip.
+The next live run should verify that the shell writes are rejected and that the
+actor is redirected to an assertion-bearing behavioral check, then either
+finish or enter the normal repair state.
+
+### 2026-08-15 — validation contract rejects source dumps as evidence
+
+The next live run showed a validator failure independent of the command
+guard. The actor used `run_command` to print `server.js` and `index.html`.
+Because the printed source contained words such as `WebSocket` and `message`,
+the text heuristic treated the file dump as a successful behavioral exchange
+and the orchestrator called completion. The independent grader correctly
+failed the unchanged frontend.
+
+`ValidationContract.assess()` now rejects recognized read-only commands before
+examining their output. The inspection classifier unwraps `bash/sh/zsh/fish
+-c` wrappers, recognizes version/help probes, and preserves compound commands
+as potentially behavioral. This prevents source listings, file dumps, and
+environment metadata from becoming validation evidence while retaining real
+client/test commands. The deterministic suite passes 77 tests with one
+environment-dependent skip.
+
+### 2026-08-15 — deterministic preflight gate before expensive runs
+
+The validator fix was verified with 77 deterministic tests, but the broader
+lesson is procedural: a real-model run should not be the first place a parser
+quirk is discovered. `agentic_benchmark.py` now runs
+`python -m unittest tests.test_agent_tools` before launching any task. A
+preflight failure exits immediately and reports the failure; `--skip-preflight`
+exists only for debugging the benchmark harness itself.
+
+This gate is intentionally cheap and model-independent. It catches command
+classification, validation-plane, completion-score, context, and dispatch
+regressions before consuming a long llama.cpp run. It does not replace the
+real-model benchmark, because tool selection and convergence still require a
+live actor.
+
+### 2026-08-15 — adversarial model-free preflight matrix
+
+The short smoke run timed out at the Qwen mutation call under the 45-second
+smoke cap, but it did not reach a false completion. Rather than immediately
+spending another expensive model run, the preflight was expanded with an
+adversarial matrix covering:
+
+- direct and wrapped file readbacks (`cat`, `bash -c`, inline Python/Node);
+- version/help and compound-command distinctions;
+- redirects, `tee`, inline writes, `sed -i`, and copies;
+- source text containing misleading words such as `WebSocket`, `message`, and
+  `pong`;
+- genuine client evidence;
+- FSM illegal transitions and recovery transitions;
+- the artifact/finish/process completion truth table.
+
+The benchmark preflight now runs both `tests.test_agent_tools` and
+`tests.test_adversarial_preflight`. The combined model-free gate passes 84
+tests with one environment-dependent skip in 0.13 seconds. This should be the
+first check before every long real-model cycle; model calls remain necessary
+only for actor action selection and convergence.

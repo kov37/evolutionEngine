@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
+import action_governor
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
 from kernel.io_tools import patch_file, validate_python_syntax
@@ -253,6 +254,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_scorecard_passed(True, True, False))
         self.assertTrue(_scorecard_passed(True, True, True))
 
+
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "service.py"
@@ -378,6 +380,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertIn("interaction evidence", reason)
 
+    def test_validation_rejects_wrapped_file_dump_as_behavior(self):
+        contract = from_task("Build a WebSocket server and run a real local client smoke test.")
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["bash", "-c", "cat index.html"]},
+            "Exit code: 0\nSTDOUT:\nnew WebSocket('ws://localhost:8080');\n",
+        )
+        self.assertFalse(accepted)
+        self.assertIn("only inspected files", reason)
+
     def test_assertion_contract_separates_setup_from_evidence(self):
         setup = assertion_driven_tool_contract(
             "run_command", {"command": ["npm", "install"]},
@@ -475,6 +487,7 @@ class KernelToolTests(unittest.TestCase):
                 "        self.assertEqual(target.VALUE, 1)\n",
                 encoding="utf-8",
             )
+
             self.assertTrue(run_tests(tmp)[0])
             (root / "target.py").write_text("VALUE = 2\n", encoding="utf-8")
             (root / "test_target.py").write_text(
@@ -485,6 +498,34 @@ class KernelToolTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertTrue(run_tests(tmp)[0])
+
+    def test_dispatch_blocks_command_plane_mutation_with_specific_reason(self):
+        class Call:
+            class Function:
+                name = "run_command"
+                arguments = {"command": ["bash", "-c", "cat > index.html <<'EOF'\nnew\nEOF"]}
+            function = Function()
+        key = ("run_command", json.dumps(Call.Function.arguments, sort_keys=True, separators=(",", ":")))
+        messages = dispatch_tool_calls(
+            [Call()], {"run_command": lambda **_: "should not run"},
+            blocked_command_calls={key},
+            blocked_command_reasons={key: "REJECTED: validation plane mutation"},
+        )
+        self.assertEqual(messages[0]["content"], "REJECTED: validation plane mutation")
+
+    def test_command_classifier_catches_shell_write_forms(self):
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": "bash -c 'cat > app.js'"}),
+            "MUTATE",
+        )
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": ["tee", "app.js"]}),
+            "MUTATE",
+        )
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": ["python3", "-c", "open('x','w').write('x')"]}),
+            "MUTATE",
+        )
 
     def test_run_tests_falls_back_to_function_style_pytest(self):
         """The generic runner must cover pytest-style modules without editing them."""

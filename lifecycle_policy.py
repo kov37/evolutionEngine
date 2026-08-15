@@ -59,6 +59,15 @@ def is_inspection_command(command) -> bool:
     if not argv or any(token in {"&&", "||", ";", "|"} for token in argv):
         return False
     head = argv[0].rsplit("/", 1)[-1]
+    # Shell wrappers are a common command-plane escape hatch. Inspect the
+    # wrapped single command recursively, but keep compound shell programs
+    # available because they may be real setup or behavioral checks.
+    if head in {"bash", "sh", "zsh", "fish"} and "-c" in argv:
+        command_index = argv.index("-c")
+        wrapped = argv[command_index + 1:]
+        if not wrapped:
+            return False
+        return is_inspection_command(" ".join(wrapped))
     if head in {
         "cat", "head", "tail", "less", "more", "sed", "awk", "grep",
         "rg", "find", "ls", "pwd", "tree", "file", "wc",
@@ -75,6 +84,8 @@ def is_inspection_command(command) -> bool:
         "node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "php",
     }:
         return False
+    if len(argv) == 2 and argv[1] in {"-v", "--version", "-h", "--help"}:
+        return True
     try:
         code_index = next(i for i, token in enumerate(argv[1:], 1) if token in {"-e", "-c"})
     except StopIteration:

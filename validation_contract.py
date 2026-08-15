@@ -9,6 +9,8 @@ It must remain useful when the actor, provider, model, and tool names change.
 from dataclasses import dataclass
 import re
 
+from lifecycle_policy import is_inspection_command
+
 
 def _failure_diagnostic(text: str) -> str:
     """Extract compact exception and assertion-diff evidence."""
@@ -183,7 +185,16 @@ class ValidationContract:
             return False, "the validation tool failed to execute", "fix the command or test invocation and rerun it", None, ()
         if base_contract["setup_only"]:
             return False, base_contract["reason"], "complete the setup, then run a focused behavioral check", None, ()
-        command = (arguments or {}).get("command", "")
+        raw_command = (arguments or {}).get("command", "")
+        if tool_name in {"run_command", "run_shell"} and is_inspection_command(raw_command):
+            return (
+                False,
+                "the command only inspected files or reported environment metadata",
+                "run an executable behavioral assertion or client exchange instead of listing or printing source",
+                None,
+                (),
+            )
+        command = raw_command
         if isinstance(command, list):
             command = " ".join(str(x) for x in command)
         probe = f"{command} {text}".lower()

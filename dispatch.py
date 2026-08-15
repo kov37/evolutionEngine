@@ -89,7 +89,8 @@ def _format_result(result) -> str:
 
 
 def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=None,
-                        blocked_mutation_paths=None, blocked_command_calls=None):
+                        blocked_mutation_paths=None, blocked_command_calls=None,
+                        blocked_command_reasons=None):
     """Execute every tool call in one model turn. Returns a list of
     {"role": "tool", ...} messages ready to append to the conversation.
     Never raises — tool errors become an ERROR/REJECTED string in content.
@@ -129,11 +130,12 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
             continue
         if (blocked_command_calls
                 and _call_key(call.function.name, call.function.arguments) in blocked_command_calls):
-            result = (
+            call_key = _call_key(call.function.name, call.function.arguments)
+            result = (blocked_command_reasons or {}).get(call_key) or (
                 "REJECTED: this shell command only inspects files. Orientation recovery already has "
                 "usable evidence; make the implementation change or run a behavioral validation command."
             )
-            print(f"🚫 blocked inspection command {call.function.name}({call.function.arguments})")
+            print(f"🚫 blocked command-plane call {call.function.name}({call.function.arguments})")
             messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
             continue
         if allowed_names is not None and call.function.name not in allowed_names:

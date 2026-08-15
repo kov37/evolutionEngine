@@ -1047,6 +1047,7 @@ You have this focused toolbelt: {offered_tool_names}.
 
         orientation_recovery_active = lifecycle.state == LifecycleState.RECOVER
         orientation_evidence_available = False
+        setup_failure = False
         if (not validation_required and not repair_required
                 and lifecycle.state == LifecycleState.ACT
                 and orientation_turns_without_mutation >= ORIENTATION_TURN_BUDGET):
@@ -1302,6 +1303,7 @@ You have this focused toolbelt: {offered_tool_names}.
         allowed_names = {t.__name__ for t in tools_for_call}
         blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
         blocked_command_calls = set()
+        blocked_command_reasons = {}
         if orientation_recovery_active and orientation_evidence_available:
             for call in msg.tool_calls:
                 if call.function.name in {"run_command", "run_shell"}:
@@ -1310,10 +1312,37 @@ You have this focused toolbelt: {offered_tool_names}.
                         args.get("command", args.get("argv"))
                     ):
                         blocked_command_calls.add(_call_key(call.function.name, args))
+                        blocked_command_reasons[_call_key(call.function.name, args)] = (
+                            "REJECTED: this shell command only inspects files. Orientation recovery already has "
+                            "usable evidence; make the implementation change or run a behavioral validation command."
+                        )
+        if validation_required:
+            # run_command/run_shell are intentionally still available for
+            # behavioral checks and dependency setup. Their command contents
+            # are a second capability plane, however: a redirect, tee, copy,
+            # or inline file-write must not bypass a validation-only wall.
+            # Product mutation remains legal in a behavior-repair turn, while
+            # setup recovery and ordinary validation must not rewrite the
+            # artifact or supplied evidence.
+            command_mutation_blocked = not repair_required or setup_failure
+            if command_mutation_blocked:
+                for call in msg.tool_calls:
+                    if call.function.name not in {"run_command", "run_shell"}:
+                        continue
+                    args = call.function.arguments or {}
+                    if action_governor.classify(call.function.name, args) == "MUTATE":
+                        key = _call_key(call.function.name, args)
+                        blocked_command_calls.add(key)
+                        blocked_command_reasons[key] = (
+                            "REJECTED: validation/setup plane is active and this shell command mutates files. "
+                            "Run a behavioral assertion without redirects or file writes; use patch_file/write_file "
+                            "only when the FSM enters product repair."
+                        )
         tool_messages = dispatch_tool_calls(
             msg.tool_calls, tool_map, allowed_names=allowed_names, blocked_calls=blocked_calls,
             blocked_mutation_paths=blocked_mutation_paths,
             blocked_command_calls=blocked_command_calls,
+            blocked_command_reasons=blocked_command_reasons,
         )
         messages.extend(tool_messages)
         # This runs regardless of which optional memory mode is enabled.
