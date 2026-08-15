@@ -31,11 +31,21 @@ def classes_with_method(file_path, class_names, method_name="_cdf"):
         tree = ast.parse(open(file_path).read())
     except (SyntaxError, OSError):
         return result
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name in result:
-            result[node.name] = any(
-                isinstance(n, ast.FunctionDef) and n.name == method_name
-                for n in node.body
+    classes = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+    }
+    for requested_name in result:
+        # Older repositories often expose a public distribution name through
+        # a factory while storing the implementation in a suffixed class.
+        # Resolve that conventional spelling without making the reporter
+        # depend on a particular repository or model.
+        node = classes.get(requested_name) or classes.get(requested_name + "Distribution")
+        if node is not None:
+            result[requested_name] = any(
+                isinstance(child, ast.FunctionDef) and child.name == method_name
+                for child in node.body
             )
     return result
 

@@ -783,13 +783,14 @@ class NoveltyContext:
 
         This is deliberately based on the event ledger, not on a model name
         or an iteration number. It prevents an agent from reading forever
-        after it has had a bounded opportunity to orient itself, while still
-        allowing a task to validate or mutate before the gate is reached.
+        after it has had a bounded opportunity to orient itself. A validation
+        is evidence, but repeated validation without a mutation or completion
+        is still a loop, so it must not exempt the actor from the gate.
         """
         with self._lock:
             recent = self.events[-self.action_after_events:]
             return (len(recent) >= self.action_after_events and
-                    not any(e.mutation or e.validation for e in recent))
+                    not any(e.mutation for e in recent))
 
     def recovery_reads_allowed(self) -> bool:
         """Allow targeted reads while the required mutation is still absent.

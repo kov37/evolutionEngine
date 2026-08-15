@@ -1178,6 +1178,17 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(context.requires_progress())
         context.close()
 
+    def test_action_gate_does_not_allow_validation_only_loop(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
+        for iteration in range(1, 4):
+            context.observe(
+                iteration, "run_tests", {}, "pytest passed: 1 passed", validation=True
+            )
+        self.assertTrue(context.requires_progress())
+        context.observe(4, "patch_file", {"path": "src/app.py"}, "Wrote app.py", mutation=True)
+        self.assertFalse(context.requires_progress())
+        context.close()
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])

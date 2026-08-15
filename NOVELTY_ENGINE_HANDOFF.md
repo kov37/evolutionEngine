@@ -3006,15 +3006,17 @@ did not have an overlapping live worker at the repair boundary
 but not the cancellation branch itself. Its monitor is
 `state/benchmark/agentic/monitor-cascading_loop-novelty-1786821348050935000.jsonl`.
 
-### 2026-08-15 — bounded SymPy rerun reaches partial implementation
+### 2026-08-15 — bounded SymPy rerun confirms a validation-only plateau
 
 After the stale-worker scheduler change, a second real Qwen3.8-27B run was
-allowed 20 iterations with action critic/gate enabled. It reached iteration 13,
-made two mutations, and added six of the requested `_cdf` methods. Independent
-grading of the preserved candidate passed 19 of the 20 selected tests; only
-the intended `test_arcsin` remained failing because that distribution's CDF was
-still unimplemented. This is substantial progress over the previous run's
-zero requested methods, but not a complete solve.
+allowed 20 iterations with action critic/gate enabled. It reached iteration 13
+before the actor request stalled. The candidate had two irrelevant import
+mutations and zero of the twelve requested `_cdf` implementations. The six
+`_cdf` methods visible in the file were pre-existing methods for unrelated
+distributions, not work produced by the actor. Independent grading of the
+preserved candidate passed 19 of the 20 selected tests; only the intended
+`test_arcsin` remained failing. This is a convergence failure, not substantial
+SymPy implementation progress.
 
 The run then stopped while waiting on an established llama.cpp HTTP request;
 the actor had not regained control after more than the configured 60-second
@@ -3030,10 +3032,11 @@ subtests pass, and all edited modules compile.
 
 The bounded verification run proved the timeout behavior: it exited cleanly in
 154.5 seconds at iteration 7 with the explicit `llama.cpp chat exceeded 30.0s`
-error. Before that boundary, the actor had one mutation and six `_cdf`
-methods, but its setup probe used the host `python` and reported missing
-`mpmath`; the independent grader still passed 19/20 selected tests. This is a
-runner environment mismatch, not product evidence.
+error. Before that boundary, the actor had one import mutation and zero new
+`_cdf` methods; its setup probe used the host `python` and reported missing
+`mpmath`. The independent grader still passed 19/20 selected tests because
+the base checkout already passed those tests. This is a runner environment
+mismatch, not product evidence.
 
 `swebench_runner.py` now prepends the interpreter directory of the configured
 agent Python to `PATH` and sets `VIRTUAL_ENV` for the actor subprocess. That
@@ -3047,14 +3050,15 @@ host Python directory, so the actor still found the wrong `python`. The runner
 now preserves the configured executable's own `bin` directory with
 `Path(sys.executable).absolute().parent`; this keeps the virtualenv tools first
 even when its interpreter is symlinked. The same short run exercised stale
-worker cancellation (`worker_busy_drops=1`) and still produced the six-method
-partial candidate before the bounded timeout.
+worker cancellation (`worker_busy_drops=1`) but produced no requested method
+implementation before the bounded timeout.
 
 ### 2026-08-15 — short environment-contract verification
 
 A six-iteration real-model check after the symlink correction confirmed the
 runner starts the unchanged SymPy checkout normally and the independent grader
-still reports 19/20 selected tests on the partial six-method candidate. The
+still reports 19/20 selected tests on the unchanged/irrelevantly edited base
+candidate. The
 actor issued one workspace inspection, then its second Qwen request exceeded
 the deliberately short 20-second turn limit before it could issue a Python
 dependency probe. This is a clean bounded timeout and does not invalidate the
@@ -3073,8 +3077,8 @@ The worker produced stale advisory observations on this short run, but the
 deterministic FSM and completion verifier remained authoritative.
 ### 2026-08-15 — bound independent grading of hanging candidates
 
-The 20-iteration SymPy run reached its budget with the same partial six-method
-candidate, but the independent grader then hung in `test_arcsin`: that is the
+The 20-iteration SymPy run reached its budget with no requested `_cdf`
+implementation, but the independent grader then hung in `test_arcsin`: that is the
 known behavior being repaired, and the candidate had not implemented Arcsin's
 CDF. The runner previously allowed the grader subprocess 900 seconds, making a
 single failing/hanging test dominate the entire cycle.
@@ -3084,3 +3088,24 @@ single failing/hanging test dominate the entire cycle.
 `timed_out`, `timeout_seconds`, and return code 124 in the report. This keeps
 the agent and grader failure planes separate and is generic harness behavior,
 not a SymPy-specific verdict.
+
+### 2026-08-15 — close validation-only progress loops
+
+The completed 20-iteration trace showed one import mutation followed by 16
+validation events and no requested product change. `NoveltyContext.requires_progress()`
+had treated any recent validation as an exemption, which was correct for
+avoiding premature edits but also allowed endless checking after an irrelevant
+mutation.
+
+The policy now requires a mutation or explicit completion after the bounded
+event window; validation is evidence, not state-changing progress. The legal
+progress surface still includes `finish_task`, so verification-only tasks can
+complete without editing code. Deterministic coverage is now 137 focused tests
+and 35 subtests.
+
+The same trace exposed a metrics defect: the frozen SymPy runner requested
+public names such as `Arcsin`, while the source defines implementation classes
+such as `ArcsinDistribution`; the status file therefore showed every target as
+false even when a method existed. `status_report.classes_with_method()` now
+resolves that conventional suffix generically, with a regression test. Full
+deterministic coverage is now 138 tests and 35 subtests.
