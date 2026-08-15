@@ -656,6 +656,23 @@ def _auto_validation_command(path: str):
     return None
 
 
+def _has_test_artifacts(workspace_listing: str) -> bool:
+    """Detect conventional test artifacts without inspecting task semantics."""
+    for raw_line in str(workspace_listing or "").splitlines():
+        name = raw_line.strip().split(" (", 1)[0].replace("\\", "/")
+        leaf = name.rstrip("/").rsplit("/", 1)[-1].lower()
+        if leaf in {"test", "tests", "spec", "specs"}:
+            return True
+        is_test_file = leaf.startswith(("test", "spec")) or bool(
+            re.search(r"(?:^|[._-])(test|spec)(?:[._-]|$)", leaf)
+        )
+        if is_test_file and leaf.endswith((
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".rs", ".php"
+        )):
+            return True
+    return False
+
+
 def _has_orientation_evidence(messages) -> bool:
     """Return whether a targeted inspection produced usable evidence."""
     evidence_tools = {"read_file", "find_files", "search_file", "list_symbols"}
@@ -840,7 +857,8 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # count of a large real checkout (sympy has thousands of files) would
     # be slow and mostly noise for this purpose; top-level breadth is a
     # good-enough, cheap proxy.
-    repo_size_hint = len([l for l in io_tools.list_workspace().splitlines() if l.strip()])
+    workspace_listing = io_tools.list_workspace()
+    repo_size_hint = len([l for l in workspace_listing.splitlines() if l.strip()])
     # message_compaction.py's bookkeeping: iteration_number -> index of that
     # iteration's assistant message in `messages`, and -> its real output
     # token count (from response.eval_count). See message_compaction.py's
@@ -896,6 +914,10 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # point. The allowance is consumed immediately and never opens an
     # unbounded edit loop.
     validation_batch_remaining = 0
+    # The last failed test invocation is safe to replay automatically after a
+    # successful product mutation. Keeping its exact argv avoids spending a
+    # model turn on a validation request the engine already knows is needed.
+    last_failed_test_request = None
     orientation_turns_without_mutation = 0
     no_action_turns = 0
     lifecycle = LifecycleFSM()
@@ -937,7 +959,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
             novelty_context.close()
             print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
 
-    offered_tool_names = ", ".join(fn.__name__ for fn in tools)
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
 Every tool you have is confined to this directory and its subdirectories — you cannot read or write
@@ -947,7 +968,8 @@ Every path you pass to a tool is ALREADY relative to that directory. Pass just "
 it with the directory's own name — doing so creates an unwanted nested directory instead of reaching the
 real file.
 
-You have this focused toolbelt: {offered_tool_names}.
+You have a registry of tools. The CURRENT TOOL CONTRACT appended to each turn is authoritative; a tool not
+listed there is invalid for that turn, even if it appeared in an earlier message or in this registry.
 
 - Use patch_file for small surgical edits; `search` must match the existing text exactly — call read_file
   first if you're not certain of the current contents.
@@ -1126,14 +1148,25 @@ You have this focused toolbelt: {offered_tool_names}.
             first_action_names = {"write_file", "patch_file", "read_file",
                                   "list_workspace", "find_files", "run_tests",
                                   "run_command", "finish_task"}
+            initial_action_instruction = (
+                "Initial action contract: take one concrete executable step now. Use the "
+                "available file or command tool to begin the requested work; do not return "
+                "a plan or broad exploration. The full toolbelt returns after this turn."
+            )
+            if "run_tests" in {t.__name__ for t in tools} and _has_test_artifacts(workspace_listing):
+                # Test-first is a general engineering workflow rule. It does
+                # not name a runner, fixture, language, or expected fix; it
+                # simply obtains the cheapest authoritative failure signal
+                # before the actor spends turns inspecting or editing.
+                first_action_names = {"run_tests"}
+                initial_action_instruction = (
+                    "A conventional test artifact is present. Run the supplied tests first with "
+                    "run_tests; do not inspect or edit files until their actual result is known."
+                )
             tools_for_call = [t for t in tools if t.__name__ in first_action_names]
             messages_for_call = messages_for_call + [{
                 "role": "system",
-                "content": (
-                    "Initial action contract: take one concrete executable step now. Use the "
-                    "available file or command tool to begin the requested work; do not return "
-                    "a plan or broad exploration. The full toolbelt returns after this turn."
-                ),
+                "content": initial_action_instruction,
             }]
             print(f"🎯 [initial action contract] {[t.__name__ for t in tools_for_call]}")
         if _governed and ledger.history:
@@ -1326,6 +1359,22 @@ You have this focused toolbelt: {offered_tool_names}.
                 state_text=checkpoint_state,
             )
 
+        # The stable system prompt lists the full registry for orientation,
+        # but lifecycle policy may narrow the legal surface for this turn.
+        # State that narrowed contract explicitly at the changing tail so a
+        # provider cannot safely fall back to a stale tool name from the
+        # original prompt or an earlier assistant message.
+        current_tool_names = sorted({tool.__name__ for tool in tools_for_call})
+        messages_for_call = messages_for_call + [{
+            "role": "system",
+            "content": (
+                "## CURRENT TOOL CONTRACT\n"
+                "For this turn, call exactly one tool from this list and no other tool: "
+                + (", ".join(current_tool_names) if current_tool_names else "(none)")
+                + ". A tool name not in this list is invalid."
+            ),
+        }]
+
         response = None
         last_error = None
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
@@ -1369,6 +1418,15 @@ You have this focused toolbelt: {offered_tool_names}.
                     chat_kwargs["tool_choice"] = "required"
                     chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
                     print("🧰 [repair recovery escalation] requiring a targeted tool call")
+                elif repair_required and repair_inspection_used and backend == "llama-cpp":
+                    # A trusted source excerpt has already satisfied the
+                    # localization step. The legal surface is mutation-only;
+                    # enforce that boundary at the provider as well as in
+                    # dispatch so a stale/read-oriented response cannot burn
+                    # another repair turn.
+                    chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                    print("🧰 [source-backed repair] requiring a targeted tool call")
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
@@ -1577,6 +1635,33 @@ You have this focused toolbelt: {offered_tool_names}.
         # selected deterministically; unknown extensions stay model-controlled.
         auto_calls = []
         auto_messages = []
+        product_mutation_landed = any(
+            action_governor.classify(call.function.name, call.function.arguments or {}) == "MUTATE"
+            and not tmsg.get("content", "").startswith(("ERROR:", "REJECTED:"))
+            for call, tmsg in zip(turn_calls, tool_messages)
+        )
+        if (
+            product_mutation_landed
+            and last_failed_test_request
+            and not any(call.function.name == "run_tests" for call in turn_calls)
+            and "run_tests" in tool_map
+        ):
+            # A failed test is a bounded, already-declared validation action;
+            # rerunning it after the repair is deterministic and safe. This
+            # hook does not infer a task-specific command or edit anything.
+            auto_call = SimpleNamespace(function=SimpleNamespace(
+                name="run_tests",
+                arguments=dict(last_failed_test_request["arguments"]),
+            ))
+            auto_calls.append(auto_call)
+            auto_messages.extend(dispatch_tool_calls(
+                [auto_call], tool_map, allowed_names=allowed_names | {"run_tests"},
+                blocked_calls=blocked_calls,
+                blocked_mutation_paths=blocked_mutation_paths,
+                blocked_command_calls=blocked_command_calls,
+                blocked_command_reasons=blocked_command_reasons,
+            ))
+            print("⚡ [proactive test validation] reran the last failed test after mutation")
         if validation_required and "run_command" in allowed_names:
             for call, tmsg in zip(turn_calls, tool_messages):
                 if call.function.name not in {"write_file", "patch_file"}:
@@ -1600,7 +1685,7 @@ You have this focused toolbelt: {offered_tool_names}.
         if auto_calls:
             turn_calls.extend(auto_calls)
             tool_messages.extend(auto_messages)
-            print(f"⚡ [proactive helper validation] executed {len(auto_calls)} helper(s) immediately")
+            print(f"⚡ [proactive validation] executed {len(auto_calls)} check(s) immediately")
         messages.extend(tool_messages)
         # This runs regardless of which optional memory mode is enabled.
         # Novelty context must not leave raw tool output unbounded.
@@ -1873,10 +1958,27 @@ You have this focused toolbelt: {offered_tool_names}.
                 name = call.function.name
                 args = call.function.arguments or {}
                 if name in {"run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"}:
+                    result_content = tmsg.get("content", "")
+                    source_context = validation_contract.source_context_from_failure(
+                        result_content, get_root()
+                    )
                     packet = validation_plan.synthesize_failure_feedback(
-                        name, args, tmsg.get("content", "")
+                        name, args, result_content,
+                        source_context=source_context,
                     )
                     failed_packets.append(packet)
+                    if name == "run_tests":
+                        last_failed_test_request = {
+                            "tool_name": name,
+                            "arguments": dict(args),
+                        }
+                    # A trustworthy traceback excerpt already supplies the
+                    # local evidence needed for a targeted edit. Remove
+                    # redundant read tools for this repair turn only; if no
+                    # safe excerpt exists, keep the normal inspect-then-patch
+                    # path for complex or indirect failures.
+                    if source_context and not _is_validation_setup_failure(result_content):
+                        repair_inspection_used = True
             # A repair turn may only inspect the evidence. Do not erase the
             # previous failure packet in that case; recovery decisions still
             # need to know whether the active problem is setup or behavior.
@@ -1931,6 +2033,9 @@ You have this focused toolbelt: {offered_tool_names}.
                 "compacting checkpoint and forcing a targeted mutation"
             )
         if turn_validation_succeeded:
+            # Do not carry a stale test invocation into a later, unrelated
+            # lifecycle. A fresh failure will install a fresh request.
+            last_failed_test_request = None
             if repair_mutation_pending:
                 successful_repair_cycles += 1
                 repair_mutation_pending = False

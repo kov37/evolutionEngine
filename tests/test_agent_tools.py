@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -19,6 +19,7 @@ from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
     _failure_diagnostic, assertion_driven_tool_contract, from_task,
     is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
+    source_context_from_failure,
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
@@ -42,6 +43,12 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_action_first_detects_conventional_test_artifacts(self):
+        self.assertTrue(_has_test_artifacts("target.py\ntest_metrics.py"))
+        self.assertTrue(_has_test_artifacts("src/Thing.test.ts\n"))
+        self.assertTrue(_has_test_artifacts("tests/ (dir)\n"))
+        self.assertFalse(_has_test_artifacts("index.html\nserver.js\n"))
+
     def test_repeated_no_action_escalates_to_required_tool_call(self):
         self.assertFalse(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD - 1, "llama-cpp"))
         self.assertTrue(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "llama-cpp"))
@@ -271,6 +278,8 @@ class KernelToolTests(unittest.TestCase):
             repair_recovery_mode=False,
         )
         self.assertNotIn("read_file", policy.tools)
+        self.assertNotIn("diff_files", policy.tools)
+        self.assertNotIn("git_diff", policy.tools)
         self.assertIn("patch_file", policy.tools)
 
     def test_repair_policy_preserves_failure_authority(self):
@@ -694,6 +703,40 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("Next repair focus", packet)
         self.assertIn("one concrete mutation", packet)
 
+    def test_failure_feedback_includes_safe_source_excerpt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target.py"
+            target.write_text(
+                "def calculate(values):\n"
+                "    total = sum(values\n"
+                "    return total / '2'\n",
+                encoding="utf-8",
+            )
+            result = (
+                f'File "{target}", line 2\n'
+                "SyntaxError: '(' was never closed\n"
+            )
+            excerpt = source_context_from_failure(result, root)
+            self.assertIn("target.py (failure line 2)", excerpt)
+            self.assertIn("total = sum(values", excerpt)
+            packet = from_task("Repair the function and run its focused test.").failure_packet(
+                "run_tests", {"path": "."}, result, source_context=excerpt
+            )
+            self.assertIn("Source context from the failure location", packet)
+            self.assertIn("total = sum(values", packet)
+
+    def test_failure_source_excerpt_cannot_escape_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root.parent / "outside-agent-test.py"
+            outside.write_text("secret = True\n", encoding="utf-8")
+            try:
+                result = f'File "{outside}", line 1\nSyntaxError: bad\n'
+                self.assertEqual(source_context_from_failure(result, root), "")
+            finally:
+                outside.unlink(missing_ok=True)
+
     def test_failure_feedback_replaces_zero_test_runner_with_explicit_assertion(self):
         contract = from_task("Repair the function and run the supplied test.")
         packet = contract.synthesize_failure_feedback(
@@ -715,6 +758,13 @@ class KernelToolTests(unittest.TestCase):
             "Repair the app. Independent verifier feedback: "
             "Traceback (most recent call last): File "
             "\"/private/var/folders/abc/.agentic_grader.py\", line 5, in <module>"
+        )
+        self.assertEqual(contract.endpoints, ())
+
+    def test_provider_absolute_paths_do_not_become_app_endpoints(self):
+        contract = from_task(
+            "Repair the function. Verifier output: File "
+            "\"/opt/homebrew/Cellar/python/3.14/test_metrics.py\", line 4"
         )
         self.assertEqual(contract.endpoints, ())
 

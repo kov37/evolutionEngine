@@ -353,6 +353,11 @@ def build_validation_policy(
         tools -= {"process_status", "stop_process"}
         if repair_inspection_used:
             tools -= READ_TOOLS
+            # Once focused evidence has already been supplied (including a
+            # trusted traceback excerpt), diff/status inspection is another
+            # non-mutating detour. Keep the repair surface executable and
+            # bounded: patch/write, with the normal lifecycle controls.
+            tools -= {"diff_files", "git_diff"}
         prompt = (
             "A validation check failed. Inspect this failure and make one targeted repair now; "
             "do not run another check or finish until the defective artifact has changed."
@@ -368,7 +373,7 @@ def build_validation_policy(
         tools.update(VALIDATION_TOOLS)
         prompt = "The previous edit targeted a protected path. Run a fresh executable check before proposing another edit."
     if repair_recovery_mode and repair_required and not setup_failure:
-        tools = {"patch_file", "diff_files", "git_diff", "finish_task"}
+        tools = {"patch_file", "finish_task"}
         if not last_mutation_rejected:
             tools.add("write_file")
         prompt = "Repair recovery is active. Use the evidence already gathered and make exactly one targeted patch now."

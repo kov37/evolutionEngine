@@ -285,7 +285,13 @@ class AdversarialPreflightTests(unittest.TestCase):
             )
             passed, passed_summary = run_tests(tmp)
             self.assertTrue(passed)
-            self.assertIn("1 function-style tests", passed_summary)
+            # The dependency-free fallback and an installed pytest are both
+            # valid runners. The contract is that one assertion executed and
+            # passed, not which available runner produced the summary.
+            self.assertTrue(
+                "1 function-style tests" in passed_summary
+                or "pytest passed" in passed_summary
+            )
 
     def test_fsm_recovery_has_no_implicit_transition(self):
         fsm = LifecycleFSM()

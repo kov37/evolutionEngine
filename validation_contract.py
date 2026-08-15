@@ -7,6 +7,7 @@ It must remain useful when the actor, provider, model, and tool names change.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 import shlex
 
@@ -26,6 +27,63 @@ def _failure_diagnostic(text: str) -> str:
         useful.append("actual vs expected (unittest '-' is actual, '+' is expected): "
                       + " | ".join(minus[:4]) + " => " + " | ".join(plus[:4]))
     return "\n".join(dict.fromkeys(useful))[:1200]
+
+
+def source_context_from_failure(result_content: str, project_root, max_chars: int = 800) -> str:
+    """Return a bounded source excerpt for a traceback that names this project.
+
+    The validator already has the authoritative failure output.  When that
+    output includes a file and line, carrying a few surrounding lines into
+    the repair packet avoids making the actor spend turns rereading the same
+    file.  Paths are resolved and confined to ``project_root`` so a test
+    result cannot make the agent read an unrelated host file.  This is a
+    transport-independent convenience, not a language- or task-specific
+    diagnosis; if no safe source location is found, it returns an empty
+    string and the normal tools remain the fallback.
+    """
+    root = Path(project_root).resolve()
+    text = str(result_content or "")
+    locations = []
+    patterns = (
+        re.compile(r"File [\"']([^\"']+)[\"'], line (\d+)"),
+        re.compile(r"(?:\(|\s)([^()\s]+):(\d+):\d+\)?"),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            raw_path, raw_line = match.groups()
+            try:
+                line_number = int(raw_line)
+            except ValueError:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved != root and root not in resolved.parents:
+                continue
+            if not resolved.is_file():
+                continue
+            locations.append((resolved, line_number))
+    for resolved, line_number in locations:
+        try:
+            lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if not lines:
+            continue
+        index = max(0, min(len(lines) - 1, line_number - 1))
+        start = max(0, index - 2)
+        end = min(len(lines), index + 3)
+        relative = resolved.relative_to(root).as_posix()
+        excerpt = "\n".join(
+            f"{number + 1:>4}: {lines[number]}" for number in range(start, end)
+        )
+        rendered = f"{relative} (failure line {line_number}):\n{excerpt}"
+        return rendered[:max_chars]
+    return ""
 
 
 _CRITERION_RE = re.compile(
@@ -499,11 +557,15 @@ class ValidationContract:
             return text.startswith("Stopped process")
         return False
 
-    def synthesize_failure_feedback(self, tool_name, arguments, result_content):
+    def synthesize_failure_feedback(
+        self, tool_name, arguments, result_content, *, source_context=""
+    ):
         """Return bounded next-action feedback for a failed tool result."""
-        return self.failure_packet(tool_name, arguments, result_content)[:2200]
+        return self.failure_packet(
+            tool_name, arguments, result_content, source_context=source_context
+        )[:2200]
 
-    def failure_packet(self, tool_name, arguments, result_content):
+    def failure_packet(self, tool_name, arguments, result_content, *, source_context=""):
         """Render compact, actionable evidence for the mandatory repair turn."""
         text = str(result_content or "")
         command = (arguments or {}).get("command", "")
@@ -571,6 +633,8 @@ class ValidationContract:
             "Expected:\n- " + "\n- ".join(expected) + "\n"
             "Observed failure:\n" + observed + "\n"
             + ("Structured diagnosis:\n" + diagnostic + "\n" if diagnostic else "")
+            + ("Source context from the failure location:\n" + str(source_context).strip() + "\n"
+               if source_context else "")
             + "Next repair focus:\n" + next_action + "\n"
             "Constraint: make one concrete mutation now; do not rerun the same check unchanged. "
             "If actual and expected values differ, treat that difference as a behavioral contract to explain, "
@@ -589,6 +653,8 @@ def _is_probable_filesystem_path(path: str) -> bool:
     normalized = str(path or "").replace("\\", "/").lower()
     return normalized.startswith((
         "/private/", "/var/", "/tmp/", "/users/", "/home/", "/workspace/",
+        "/opt/", "/usr/", "/system/", "/library/", "/applications/",
+        "/etc/", "/bin/", "/sbin/", "/dev/", "/proc/", "/root/", "/srv/",
     )) or "/.agentic" in normalized
 
 

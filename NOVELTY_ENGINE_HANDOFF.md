@@ -2896,3 +2896,49 @@ efficiency miss, not an implementation or completion failure. The fixture was
 left unchanged. Reducing the two-repair sequence below that threshold is the
 next optimization problem, but any change must remain generic and preserve
 fresh failure evidence between sequential defects.
+
+### 2026-08-15 — source-backed repair and test-first convergence pass
+
+The next optimization cycle targeted wasted control-plane turns rather than
+the cascading fixture. The validation contract now extracts a small source
+excerpt around a traceback location, after resolving and confining the path to
+the agent workspace. That excerpt is included in the bounded repair packet.
+When it has trustworthy source evidence, the repair policy removes read,
+diff, and status detours and leaves a mutation surface. A per-turn tool
+contract is appended after all lifecycle restrictions so a stale tool name in
+the original prompt cannot override the current FSM state. Recovery uses the
+same mutation-only surface.
+
+After a failed `run_tests` call, the engine retains its exact invocation and
+reruns it automatically after a successful product mutation. This is a
+bounded deterministic validation hook; it does not invent a command or edit
+the workspace. The `--action-first` policy now chooses `run_tests` first when
+conventional test artifacts are present, while workspaces without tests keep
+their normal discovery surface. Absolute provider/runtime paths such as
+`/opt/.../test_metrics.py` are excluded from API endpoint extraction, and the
+model-free runner assertion accepts either pytest or the dependency-free
+function-test fallback.
+
+Deterministic evidence after these changes: 135 focused tests pass, the
+adversarial preflight passes, and compilation is clean. A live Qwen3.8-27B
+MLX run against the unchanged cascading fixture then met the strict scorecard:
+3 actor iterations, 3 reported tool calls, one product mutation, automatic
+revalidation, independent artifact pass, `finish_task` pass, and 32.0 seconds.
+The model emitted one stale `read_file` request; dispatch rejected it, the FSM
+entered bounded recovery, and the next forced mutation repaired both defects.
+This is the first strict `passed: true` cascade record, not a grader or fixture
+change. The monitor is
+`state/benchmark/agentic/monitor-cascading_loop-novelty-1786820299319808000.jsonl`.
+
+During the cycle the MLX server log showed Metal out-of-memory failures after
+long repeated runs. The known server was restarted with `--prompt-cache-size
+1`; the endpoint recovered and the passing run completed. If generation
+timeouts recur, inspect the server log for GPU memory before changing agent
+logic. The 4B worker made zero calls on this short trajectory because the
+deterministic local recovery signal was sufficient.
+
+The next generic capability to evaluate is actor-critic test generation: the
+actor may propose a focused test, deterministic policy must reject weak or
+self-serving tests, the 4B may critique coverage, and an independent grader
+must remain authoritative. Do not let generated tests replace supplied tests
+or become the sole proof of correctness.
