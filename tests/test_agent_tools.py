@@ -362,6 +362,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(is_probe_quality_failure(
             "the command only inspected files or reported environment metadata"
         ))
+        self.assertTrue(is_probe_quality_failure(
+            "the web command exited cleanly but produced no interaction evidence"
+        ))
         self.assertFalse(is_probe_quality_failure(
             "AssertionError: expected 201, got 500"
         ))

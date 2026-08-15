@@ -147,6 +147,7 @@ def is_probe_quality_failure(reason):
         "zero exit code without a behavioral",
         "output-only command",
         "process readiness is setup",
+        "no interaction evidence",
     ))
 
 

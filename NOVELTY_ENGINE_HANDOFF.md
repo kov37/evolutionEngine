@@ -2475,3 +2475,17 @@ result flows through the normal validation contract, FSM, evidence ledger, and
 completion check, so this shortcut cannot declare success without accepted
 behavioral evidence. This removes one actor turn while preserving the generic
 validation boundary.
+
+### 2026-08-15 — keep weak web probes in validation recovery
+
+The first validation in the fresh `3d_scene` rerun fetched `scene.html` and
+returned HTTP 200, but it did not exercise an interaction. The contract
+correctly rejected it as “no interaction evidence”; the recovery classifier
+did not recognize that reason phrase, so the FSM escalated to product repair
+and blocked `run_command` while the actor still needed to run a real probe.
+
+`no interaction evidence` is now explicitly a probe-quality failure. It keeps
+the FSM in validation, preserves the artifact, and reopens the executable
+validation surface. This is a wording-independent plane rule: a successful
+readback is not a failed product behavior, regardless of whether the artifact
+is HTML, an API, a CLI, or a library.
