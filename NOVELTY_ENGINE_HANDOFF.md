@@ -2007,3 +2007,20 @@ passing grader, but no `finish_task`; it is recorded as incomplete rather than
 counted as a success. The next run should verify whether the actor converts
 the same smoke-test plan into an inline command and then completes the
 handoff.
+
+### 2026-08-15 — bound transient model-provider disconnect recovery
+
+The verification rerun followed the intended path through the combined
+application repair, dependency installation, server launch, and process
+status check. The MLX endpoint then closed one HTTP connection before the next
+actor turn. A direct provider health request succeeded afterward, and the
+same failure repeated on the next run at the same boundary. This is distinct
+from context overflow: the request was within the measured context budget and
+the model server stayed alive.
+
+The actor loop now retries only the specific transient disconnect signatures
+(`RemoteDisconnected`, a remote end closing without a response, or a peer
+reset) once, with a one-second delay. Refused connections, DNS failures, and
+the second disconnect remain terminal, so a dead provider cannot create an
+overnight retry storm. The deterministic suite passes 97 tests. The next live
+run verifies whether this recovers the final smoke-test turn.

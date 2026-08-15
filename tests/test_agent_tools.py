@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _terminal_provider_error, _worker_triage_enabled
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 from kernel.discovery import find_files
@@ -1028,6 +1028,12 @@ class KernelToolTests(unittest.TestCase):
             RuntimeError("RemoteDisconnected: Remote end closed connection without response")
         ))
         self.assertFalse(_terminal_provider_error(RuntimeError("temporary malformed response")))
+
+    def test_provider_disconnect_gets_one_bounded_retry(self):
+        error = RuntimeError("RemoteDisconnected: Remote end closed connection without response")
+        self.assertTrue(_retryable_provider_disconnect(error, 1))
+        self.assertFalse(_retryable_provider_disconnect(error, 2))
+        self.assertFalse(_retryable_provider_disconnect(ConnectionRefusedError(61, "Connection refused"), 1))
 
     def test_missing_tokenize_endpoint_is_cached_per_provider(self):
         base_url = "http://token-test:8080/v1"

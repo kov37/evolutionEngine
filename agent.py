@@ -525,6 +525,24 @@ def _terminal_provider_error(error) -> bool:
     ))
 
 
+def _retryable_provider_disconnect(error, attempt: int) -> bool:
+    """Allow one quick retry for a live provider that dropped one response.
+
+    A refused connection or unknown host is terminal.  A server that is
+    healthy before and after a single request can briefly close an HTTP
+    connection while switching/evicting a model or handling a long request;
+    retry that exact class once, but never turn it into an unbounded stall.
+    """
+    if attempt >= 2:
+        return False
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(marker in text for marker in (
+        "remote end closed connection without response",
+        "remotedisconnected",
+        "connection reset by peer",
+    ))
+
+
 def _is_validation_setup_failure(text: str) -> bool:
     """Return whether a failed check needs command/runner recovery first.
 
@@ -1233,6 +1251,10 @@ You have this focused toolbelt: {offered_tool_names}.
                 if _terminal_provider_error(e):
                     recent_errors.append(f"iter {iteration}: provider unavailable: {e}")
                     recent_errors[:] = recent_errors[-5:]
+                    if _retryable_provider_disconnect(e, attempt):
+                        print(f"⚠️  transient provider disconnect; retrying once: {e}")
+                        time.sleep(1)
+                        continue
                     print(f"⚠️  provider unavailable; ending run cleanly instead of retrying: {e}")
                     break
                 print(f"⚠️  chat() failed (attempt {attempt}/{MAX_CHAT_RETRIES}): {type(e).__name__}: {e}")
