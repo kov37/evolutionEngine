@@ -2683,3 +2683,20 @@ iterations `<= 3`; the artifact and handoff themselves passed. Do not weaken or
 rewrite that fixture to make the metric green. The remaining engineering work
 is reducing turns for sequential failures through generic orchestration or
 better action batching, while preserving the visible cascading evidence.
+
+### 2026-08-15 — real Todo app finds a genuine deadlock and reaches a valid artifact
+
+The harder `real_app` workflow was run with the unchanged task and grader. The
+actor created a substantial 7.8 KB standard-library Todo app, served health and
+HTML correctly, and exposed a real POST deadlock: `create_task()` acquired a
+non-reentrant lock and called an ID helper that acquired the same lock again.
+The actor localized this from the POST timeout and patched the server twice;
+the final preserved workspace passes the independent grader, including health,
+HTML, POST creation, and GET collection behavior.
+
+The run nevertheless timed out at 900 seconds before the actor could restart
+the freshly patched service and receive final accepted evidence. This is a
+legitimate workflow failure, not a grader failure: artifact correctness is
+true, but handoff completion is false. The next generic optimization should
+make service restart and repeat-validation deterministic after a product
+mutation, so a valid final artifact is not stranded behind a slow model turn.
