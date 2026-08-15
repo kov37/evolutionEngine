@@ -88,6 +88,13 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(fsm.transition("validation_failed"), LifecycleState.REPAIR)
         self.assertEqual(fsm.transition("turn"), LifecycleState.REPAIR)
 
+    def test_lifecycle_fsm_keeps_bounded_batch_in_validation(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        fsm.transition("mutation")
+        self.assertEqual(fsm.transition("mutation"), LifecycleState.VALIDATE)
+        self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
+
     def test_lifecycle_fsm_completes_from_setup_recovery(self):
         fsm = LifecycleFSM()
         fsm.transition("turn")

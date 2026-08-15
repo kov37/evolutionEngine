@@ -1941,3 +1941,13 @@ remain unchanged.
 
 The deterministic suite passes 91 tests. The next WebSocket run is the live
 verification of this batch contract.
+
+The batch run reached the second mutation as intended: it wrote both
+`server.js` and `index.html` before validation. That live run exposed a missing
+FSM edge: `VALIDATE -> mutation` was not legal, so the orchestrator crashed
+before the behavioral check. The FSM now accepts this one bounded batch event
+and remains in `VALIDATE`, where executable evidence is still required. The
+deterministic suite passes 92 tests. The grader also identified the next
+product/setup requirement for this harder task: the workspace needs a
+`package.json` declaring `ws`; the next live run will verify how the actor
+handles that dependency contract.

@@ -42,6 +42,10 @@ _TRANSITIONS = {
     (LifecycleState.ACT, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.REPAIR, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.RECOVER, "mutation"): LifecycleState.VALIDATE,
+    # A bounded multi-file change batch may add one related artifact while
+    # validation is pending; remain in VALIDATE so the next action is still
+    # required to produce executable evidence.
+    (LifecycleState.VALIDATE, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.REPAIR, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.RECOVER, "validation_failed"): LifecycleState.RECOVER,
