@@ -3005,3 +3005,25 @@ did not have an overlapping live worker at the repair boundary
 (`worker_busy_drops=0`), so it validates compatibility of the new scheduler
 but not the cancellation branch itself. Its monitor is
 `state/benchmark/agentic/monitor-cascading_loop-novelty-1786821348050935000.jsonl`.
+
+### 2026-08-15 — bounded SymPy rerun reaches partial implementation
+
+After the stale-worker scheduler change, a second real Qwen3.8-27B run was
+allowed 20 iterations with action critic/gate enabled. It reached iteration 13,
+made two mutations, and added six of the requested `_cdf` methods. Independent
+grading of the preserved candidate passed 19 of the 20 selected tests; only
+the intended `test_arcsin` remained failing because that distribution's CDF was
+still unimplemented. This is substantial progress over the previous run's
+zero requested methods, but not a complete solve.
+
+The run then stopped while waiting on an established llama.cpp HTTP request;
+the actor had not regained control after more than the configured 60-second
+turn boundary. The next generic repair is now in `agent.py`: llama.cpp calls
+retain their transport timeout and also run under a hard `SIGALRM` wall-clock
+guard, converting a stalled generation into the existing bounded model-error
+path. This does not assume a particular model or task. The candidate and
+status are preserved at
+`/var/folders/6t/fr_n2v_n7zb6nd_nq74t38240000gn/T/sympy-13878-novelty-1786821405-duozmkqs`.
+
+Deterministic regression after the timeout guard: 136 focused tests pass, 35
+subtests pass, and all edited modules compile.

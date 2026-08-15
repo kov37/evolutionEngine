@@ -315,7 +315,24 @@ def _chat_with_timeout(*, timeout_seconds, backend="ollama",
                        base_url="http://127.0.0.1:8080/v1", **kwargs):
     """Call Ollama without allowing one turn to strand the whole run."""
     if backend == "llama-cpp":
-        return _llama_cpp_chat(base_url=base_url, timeout_seconds=timeout_seconds, **kwargs)
+        if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+            return _llama_cpp_chat(base_url=base_url, timeout_seconds=timeout_seconds, **kwargs)
+
+        # urllib's socket timeout is a useful transport guard, but a server
+        # can keep a response technically active while generation is stalled.
+        # The agent needs a hard wall-clock boundary around the whole adapter
+        # call as well, or one model request can strand the FSM indefinitely.
+        def _llama_alarm(_signum, _frame):
+            raise ChatTimeoutError(f"llama.cpp chat exceeded {timeout_seconds}s")
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _llama_alarm)
+        signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        try:
+            return _llama_cpp_chat(base_url=base_url, timeout_seconds=timeout_seconds, **kwargs)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
     if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
         return chat(**kwargs)
 

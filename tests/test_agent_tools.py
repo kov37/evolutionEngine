@@ -1,11 +1,12 @@
 import tempfile
+import time
 import urllib.error
 import unittest
 import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -1325,6 +1326,14 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertIn("deadlock", packet)
         self.assertIn("passing health", packet)
+
+    def test_llama_cpp_chat_has_hard_wall_clock_timeout(self):
+        with patch("agent._llama_cpp_chat", side_effect=lambda **_: time.sleep(0.05)):
+            with self.assertRaises(ChatTimeoutError):
+                _chat_with_timeout(
+                    backend="llama-cpp", base_url="http://provider/v1",
+                    timeout_seconds=0.01, model="model", messages=[], tools=[],
+                )
 
     def test_provider_refusal_is_terminal(self):
         self.assertTrue(_terminal_provider_error(ConnectionRefusedError(61, "Connection refused")))
