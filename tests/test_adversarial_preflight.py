@@ -116,6 +116,14 @@ class AdversarialPreflightTests(unittest.TestCase):
             "MUTATE",
         )
 
+    def test_printable_arrow_is_not_shell_redirect(self):
+        self.assertNotEqual(
+            action_governor.classify(
+                "run_command", {"command": ["python3", "-c", "print('PASS -> value')"]}
+            ),
+            "MUTATE",
+        )
+
     def test_output_only_claims_cannot_be_validation_evidence(self):
         contract = from_task("Build a service and run a real behavioral check.")
         for command in (["echo", "assert passed"], ["printf", "connected\\n"]):

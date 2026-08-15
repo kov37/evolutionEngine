@@ -79,7 +79,7 @@ _ASSERTIVE_CHECK_RE = re.compile(
 # can never be a real mutation of anything the task cares about, so it's
 # safe to exclude unconditionally.
 _SHELL_MUTATE_RE = re.compile(
-    r"(?:(?<![=<>!])>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
+    r"(?:(?<![-=<>!])>>?(?!=)(?!&)(?!\s*/dev/null)|sed\s+-i|\bcp\b|\bmv\b|\btouch\b|\brm\b|"
     r"\btee\b|perl\s+[^\n]*-(?:p?i|in-place)\b|"
     r"(?:writefilesync|appendfilesync|unlinksync|mkdirsync)|"
     r"(?:fs\.)?(?:writefile|appendfile)\s*\(|\.write_text\s*\(|\.write\s*\()",

@@ -2233,3 +2233,16 @@ test covers both malformed-tool errors and real assertion failures, so only the
 former take this path. The deterministic suite and model-free adversarial
 preflight pass 111 tests. The affected real_app run was stopped after the
 failure was isolated; its workspace and monitor remain evidence, not a score.
+
+### 2026-08-15 — do not treat printable arrows as shell redirects
+
+The next confirmation reached the new command-plane recovery correctly, then
+found another deterministic guard false positive. A legitimate inline Python
+behavioral probe printed `PASS: ... -> ...`; the shell mutation detector saw
+the arrow's `>` as a file redirect and blocked the entire verification command.
+
+The redirect pattern now ignores `->` in addition to JavaScript `=>`, while
+continuing to classify real `> file` and `>> file` writes as mutations. A
+regression test covers a Python probe containing the printable arrow. The
+interrupted live run is not scored; the model-free preflight will be rerun
+before the next real-model attempt.
