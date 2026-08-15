@@ -923,11 +923,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
         # pruned entry, without every caller needing to remember to wire
         # this in — it's a direct consequence of enabling pruning below.
         tools = tools + [memory.recall]
-    if novelty_context_enabled:
-        # Keep the aliases in the registry so the final per-turn contract can
-        # swap them in after a rejected helper mutation. They are not offered
-        # by the novelty gate until that recovery condition is true.
-        tools = tools + [patch_product_file, write_product_file]
     tool_map = {fn.__name__: fn for fn in tools}
     sidecar_log = []
     context_summary = ""
@@ -1489,6 +1484,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         )
         if novelty_progress_tools is not None:
             repeated_action = novelty_context.repeated_validation_loop()
+            if blocked_progress_helper_paths:
+                # Add the recovery-only aliases at the transition itself, not
+                # at run startup. This keeps the ordinary model prompt and
+                # tool schema unchanged until a helper rejection proves the
+                # generic mutation surface is being misapplied.
+                for recovery_tool in (patch_product_file, write_product_file):
+                    if recovery_tool.__name__ not in tool_map:
+                        tools.append(recovery_tool)
+                        tool_map[recovery_tool.__name__] = recovery_tool
             # Validation/lifecycle policy may have removed the recovery-only
             # product aliases before this final gate runs. Add only those
             # aliases back from the trusted registry; never re-expand the
