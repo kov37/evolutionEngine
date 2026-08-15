@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 import importlib
 import signal
+import re
 from io import StringIO
 
 
@@ -36,6 +38,40 @@ class _TestRunTimeout(BaseException):
 
 def _alarm_handler(signum, frame):
     raise _TestRunTimeout
+
+
+def _pytest_fallback(path: str, absolute_path: str) -> tuple[bool, str] | None:
+    """Run pytest when unittest found no cases, if pytest is already present.
+
+    Coding workspaces commonly use function-style ``test_*.py`` modules that
+    unittest can import but cannot discover.  The agent should not need to
+    guess a second runner in that situation.  This fallback is deliberately
+    bounded and non-mutating: it never installs dependencies, and ``None``
+    means the existing ``no tests discovered`` result should be preserved.
+    """
+    if importlib.util.find_spec("pytest") is None:
+        return None
+    target = absolute_path if os.path.isfile(absolute_path) else os.path.abspath(path)
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", target],
+            cwd=os.path.dirname(target) if os.path.isfile(target) else target,
+            text=True,
+            capture_output=True,
+            timeout=RUN_TESTS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"pytest test run timed out after {RUN_TESTS_TIMEOUT_SECONDS}s"
+    except OSError as exc:
+        return None
+
+    output = "\n".join(part.strip() for part in (probe.stdout, probe.stderr) if part.strip())
+    output = output[-1800:]
+    if probe.returncode == 0:
+        return True, f"pytest passed: {output or 'tests passed'}"
+    if probe.returncode == 5 and re.search(r"no tests? ran|no tests? collected", output, re.I):
+        return None
+    return False, f"pytest failed (exit {probe.returncode}): {output or 'see pytest output'}"
 
 
 def run_tests(path: str = ".") -> tuple[bool, str]:
@@ -92,6 +128,9 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     actual_test_count = suite.countTestCases()
 
     if actual_test_count == 0:
+        pytest_result = _pytest_fallback(path, absolute_path)
+        if pytest_result is not None:
+            return pytest_result
         return (False, "Ran 0 tests: no tests discovered")
 
     # Run via TextTestRunner — its .run() returns a TestResult object

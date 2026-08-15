@@ -37,6 +37,12 @@ _TRANSITIONS = {
     (LifecycleState.REPAIR, "recovery_budget_exhausted"): LifecycleState.RECOVER,
     (LifecycleState.VALIDATE, "validation_partial"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_passed"): LifecycleState.COMPLETE,
+    # Setup recovery can legitimately succeed without a product mutation:
+    # for example, the first check used a runner that discovered zero tests,
+    # then the actor selects the correct executable check.  Validation is the
+    # authoritative completion evidence in that path, so REPAIR may complete
+    # directly once the new check passes.
+    (LifecycleState.REPAIR, "validation_passed"): LifecycleState.COMPLETE,
     (LifecycleState.RECOVER, "validation_passed"): LifecycleState.COMPLETE,
     (LifecycleState.ACT, "provider_error"): LifecycleState.FAILED,
     (LifecycleState.VALIDATE, "provider_error"): LifecycleState.FAILED,

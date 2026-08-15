@@ -502,7 +502,9 @@ def _is_validation_setup_failure(text: str) -> bool:
     return any(marker in lower for marker in (
         "could not start", "no such file or directory", "importerror",
         "no tests discovered", "no test evidence", "dependency",
-        "permission denied",
+        "permission denied", "does not show an assertion",
+        "does not show behavioral evidence", "no behavioral assertion",
+        "no interaction evidence", "zero exit code without a behavioral",
     ))
 
 
@@ -1004,13 +1006,25 @@ You have this focused toolbelt: {offered_tool_names}.
                 # install an explicitly required dependency, or rerun from a
                 # valid target. Keep this conditional so ordinary failures
                 # still force an implementation mutation before probing again.
-                setup_failure = _is_validation_setup_failure(last_repair_packet)
+                # The compact repair packet preserves the observed command,
+                # while the assessment suggestion carries the plane
+                # classification (for example, "no assertion").  Combine
+                # both so a weak probe cannot be mistaken for a product bug.
+                setup_failure = _is_validation_setup_failure(
+                    f"{last_repair_packet}\n{last_validation_failure}"
+                )
                 if setup_failure:
                     # Setup recovery may select a runner or install a declared
                     # dependency, but it must not receive an unrestricted
                     # shell escape. Inspection and validation remain explicit
                     # argv commands through run_command.
                     validation_tools.update({"run_tests", "run_command"})
+                    if repair_inspection_used:
+                        # Once the setup evidence has been inspected, another
+                        # read cannot change runner or discovery state. Force
+                        # the concrete validation fallback named by the packet.
+                        validation_tools -= {"read_file", "find_files", "search_file",
+                                              "list_workspace", "list_dir", "list_symbols", "grep_dir"}
                 elif repair_inspection_used:
                     # Give the actor one targeted look at the reported code,
                     # then remove read-only escape hatches until it mutates.
@@ -1047,7 +1061,8 @@ You have this focused toolbelt: {offered_tool_names}.
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
             repair_instruction = (
                 "A validation check failed. Repair the execution/setup problem first; you may retry with an "
-                "available command or test target. "
+                "available command or test target. The replacement check must contain an explicit assertion or "
+                "test-function call; printing a value or starting a process is not validation. "
                 if setup_failure else
                 "A validation check failed. Inspect this failure and make one targeted repair now; "
             )

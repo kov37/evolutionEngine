@@ -52,6 +52,13 @@ class KernelToolTests(unittest.TestCase):
         fsm.transition("recovery_budget_exhausted")
         self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
 
+    def test_lifecycle_fsm_completes_after_setup_repair_without_product_mutation(self):
+        fsm = LifecycleFSM()
+        fsm.transition("turn")
+        fsm.transition("mutation")
+        fsm.transition("validation_failed")
+        self.assertEqual(fsm.transition("validation_passed"), LifecycleState.COMPLETE)
+
     def test_setup_failure_never_forces_product_rewrite(self):
         self.assertFalse(_force_repair_recovery(True, True, True))
         self.assertTrue(_force_repair_recovery(True, True, False))
@@ -63,6 +70,9 @@ class KernelToolTests(unittest.TestCase):
     def test_setup_classification_survives_compact_failure_summary(self):
         self.assertTrue(_is_validation_setup_failure(
             "the test module produced no test evidence; invoke a test runner"
+        ))
+        self.assertTrue(_is_validation_setup_failure(
+            "the command passed but does not show an assertion or behavioral probe"
         ))
 
     def test_repair_budget_checkpoint_is_bounded(self):
@@ -336,6 +346,20 @@ class KernelToolTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertTrue(run_tests(tmp)[0])
+
+    def test_run_tests_falls_back_to_function_style_pytest(self):
+        """The generic runner must cover pytest-style modules without editing them."""
+        if __import__("importlib.util").util.find_spec("pytest") is None:
+            self.skipTest("pytest is not installed in this environment")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_function_style.py").write_text(
+                "def test_value():\n    assert 2 + 2 == 4\n",
+                encoding="utf-8",
+            )
+            success, summary = run_tests(tmp)
+            self.assertTrue(success)
+            self.assertIn("pytest passed", summary)
 
     def test_run_tests_preserves_assertion_diff_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -663,6 +687,9 @@ class KernelToolTests(unittest.TestCase):
     def test_silent_test_evidence_is_a_setup_failure(self):
         self.assertTrue(_is_validation_setup_failure(
             "ERROR: test module 'test_metrics.py' produced no test evidence"
+        ))
+        self.assertTrue(_is_validation_setup_failure(
+            "the command passed but does not show an assertion or behavioral probe"
         ))
         self.assertFalse(_is_validation_setup_failure("AssertionError: wrong total"))
 

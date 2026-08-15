@@ -1404,3 +1404,31 @@ the expected WebSocket URL assertion and fails. This confirms the grader can
 both accept the target behavior and reject the broken starting state. Model
 comparison is paused here; the next benchmark run should be interpreted as a
 real agent result rather than a grader-harness result.
+
+### 2026-08-15 — validation runner compatibility and setup recovery gate
+
+The reusable `run_tests` tool still uses unittest as its standard-library
+path, but it now attempts a bounded pytest run when unittest discovers zero
+tests and pytest is already installed. It never installs dependencies and
+preserves the existing no-tests result when pytest is unavailable. This keeps
+the runner compatible with both unittest projects and common function-style
+pytest modules without making either framework mandatory.
+
+The validation recovery policy now combines the raw repair packet with the
+validator's failure-plane suggestion. A successful command that only prints a
+value, starts a process, or contains no assertion is setup/non-evidence, not a
+product failure. After one setup inspection, read-only tools are removed and
+the actor must issue an explicit assertion-bearing command or test invocation.
+This prevents correct code from being rewritten to compensate for a weak
+probe.
+
+### 2026-08-15 — lifecycle FSM completion invariant
+
+The live cascading run found a real FSM inconsistency: after a validation
+failure, a corrected executable check could pass while the FSM remained in
+`REPAIR`; the orchestrator then sent `validation_passed`, which was rejected
+and crashed the run even though the artifact was correct. `REPAIR` now has an
+explicit `validation_passed -> COMPLETE` transition for setup recovery, and a
+regression test covers that path. The transition remains table-driven and
+validation evidence remains authoritative; no model or benchmark-specific
+exception was added.
