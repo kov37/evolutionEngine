@@ -78,6 +78,8 @@ class KernelToolTests(unittest.TestCase):
             validation_failures=1, protected_edit_recovery_pending=False,
             repair_recovery_mode=False,
         )
+        self.assertNotIn("patch_file", first.tools)
+        self.assertNotIn("write_file", first.tools)
         self.assertIn("read_file", first.tools)
         self.assertIn("run_command", first.tools)
         self.assertNotIn("patch_file", second.tools)

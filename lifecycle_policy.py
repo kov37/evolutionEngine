@@ -63,10 +63,12 @@ def build_validation_policy(
 
     tools = set(READ_TOOLS | MUTATION_TOOLS | {"diff_files", "git_diff", "process_status", "stop_process"})
     if setup_failure:
+        # A setup failure never justifies changing product code or supplied
+        # evidence. The first recovery turn may inspect; it cannot guess-edit.
+        tools -= MUTATION_TOOLS
         tools.update({"run_tests", "run_command"})
         if repair_inspection_used:
             tools -= READ_TOOLS
-            tools -= MUTATION_TOOLS
         prompt = (
             "A validation check failed because the execution/setup plane is incomplete. "
             "Use the available runner or explicit argv command to produce an assertion-bearing check. "

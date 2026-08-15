@@ -1445,3 +1445,10 @@ set through several independent branches. The 4B gate can still remove tools,
 but cannot add tools or override the deterministic plane. Added unit coverage
 for the setup-then-command and repair-then-patch transitions. The deterministic
 suite passes 65 tests.
+
+The first live policy run caught an implementation error in that policy: setup
+recovery still exposed mutation tools during its initial inspection turn. The
+policy now removes `patch_file` and `write_file` for every setup failure, not
+only after inspection. This preserves the core invariant that runner,
+dependency, and test-discovery problems cannot trigger speculative product
+edits.
