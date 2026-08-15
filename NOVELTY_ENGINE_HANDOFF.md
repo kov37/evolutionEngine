@@ -3136,3 +3136,9 @@ validation state before building the per-turn tool list and removes validation,
 inspection, and recall tools entirely; only `patch_file`, `write_file`, and
 `finish_task` remain. This makes the control-plane boundary enforceable rather
 than advisory. Deterministic coverage remains 139 tests and 35 subtests.
+
+The next verification showed why that boundary still did not fire: internal
+`repair_checkpoint` events were interleaved between the actor's repeated tool
+events, so adjacency over the raw ledger hid the duplicate validation. The
+detector now compares adjacent actor tool events while ignoring internal
+checkpoint records. The regression suite includes this interleaving case.

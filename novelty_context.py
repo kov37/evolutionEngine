@@ -790,8 +790,9 @@ class NoveltyContext:
         with self._lock:
             recent = self.events[-self.action_after_events:]
             repeated_validation = False
-            if len(self.events) >= 2:
-                previous, latest = self.events[-2:]
+            action_events = [event for event in self.events if event.tool != "repair_checkpoint"]
+            if len(action_events) >= 2:
+                previous, latest = action_events[-2:]
                 repeated_validation = (
                     previous.validation and latest.validation
                     and _call_key(previous.tool, previous.arguments)
@@ -821,9 +822,10 @@ class NoveltyContext:
     def repeated_validation_loop(self) -> bool:
         """Whether the latest two events repeat the same validation call."""
         with self._lock:
-            if len(self.events) < 2:
+            action_events = [event for event in self.events if event.tool != "repair_checkpoint"]
+            if len(action_events) < 2:
                 return False
-            previous, latest = self.events[-2:]
+            previous, latest = action_events[-2:]
             return (
                 previous.validation and latest.validation
                 and _call_key(previous.tool, previous.arguments)
