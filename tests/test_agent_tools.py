@@ -172,6 +172,17 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("read_file", policy.tools)
         self.assertIn("search_file", policy.tools)
 
+    def test_repair_recovery_preserves_rejected_write_method_ban(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=False,
+            repair_inspection_used=True, last_mutation_rejected=True,
+            validation_failures=2, protected_edit_recovery_pending=False,
+            repair_recovery_mode=True,
+        )
+        self.assertIn("patch_file", policy.tools)
+        self.assertNotIn("write_file", policy.tools)
+        self.assertIn("write_file was rejected earlier", policy.prompt)
+
     def test_inventory_does_not_consume_repair_inspection_budget(self):
         self.assertFalse(counts_as_repair_inspection("list_workspace"))
         self.assertFalse(counts_as_repair_inspection("list_dir"))

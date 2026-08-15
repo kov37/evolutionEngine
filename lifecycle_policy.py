@@ -200,8 +200,12 @@ def build_validation_policy(
         tools.update(VALIDATION_TOOLS)
         prompt = "The previous edit targeted a protected path. Run a fresh executable check before proposing another edit."
     if repair_recovery_mode and repair_required and not setup_failure:
-        tools = set({"patch_file", "write_file", "diff_files", "git_diff", "finish_task"})
+        tools = {"patch_file", "diff_files", "git_diff", "finish_task"}
+        if not last_mutation_rejected:
+            tools.add("write_file")
         prompt = "Repair recovery is active. Use the evidence already gathered and make exactly one targeted patch now."
+        if last_mutation_rejected:
+            prompt += " write_file was rejected earlier; use patch_file instead and do not retry it."
 
     return ValidationActionPolicy(
         tools=frozenset(tools),

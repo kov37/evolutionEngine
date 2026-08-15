@@ -1914,3 +1914,10 @@ proves nothing remains a validation failure in the product plane; the actor
 can choose a real probe or continue a related product repair. Function-style
 test modules that silently run as scripts remain setup failures. The
 deterministic suite passes 89 tests.
+
+The repeat WebSocket run confirmed the classification change but exposed a
+recovery precedence bug. The actor reached product repair, yet after a
+rejected `write_file` call the recovery policy re-added `write_file`; the model
+retried the same rejected call until the bounded run ended. Recovery now keeps
+the rejected mutation method removed and explicitly directs the actor to the
+remaining `patch_file` path. Deterministic coverage passes 90 tests.
