@@ -1295,6 +1295,26 @@ dependency, but unrestricted `run_shell` is withheld along with file mutation
 tools. This is an engine policy, not a model or benchmark rule. Added plane
 classification regression checks; the deterministic suite passes 58 tests.
 
+### 2026-08-15 — Qwen3.8 runtime tuning and MLX candidate
+
+The first Qwen3.8 test used `--device none`, which forced the 27B GGUF onto
+CPU and produced roughly 90-second actor turns. A controlled llama.cpp test on
+the M4 Max found the useful configuration: `MTL0`, all GPU layers, Flash
+Attention, one slot, 16K context, and `--reasoning off`. Warmed short requests
+then reached about 0.17 seconds to first streamed byte and 1.1 seconds total;
+thinking-budget probes around 128–1024 tokens took about 3.0–4.7 seconds and
+did not improve the action response. This is the current Qwen coding-agent
+baseline. llama.cpp exposes native reasoning budgets, including per-request
+`thinking_budget_tokens`, but Qwen's high/xhigh labels are not direct
+llama.cpp modes; they must be experimentally mapped to token budgets.
+
+The optimized Qwen GGUF WebSocket run made two useful mutations (`server.js`
+and `index.html`) in eight iterations, with first tool 10.1s and first
+mutation 60.0s. The independent grader then crashed with `NameError: name
+'port' is not defined`, so the run is not a benchmark pass or fail. The native
+MLX 4-bit candidate requested by the user was downloaded to
+`~/.cache/mlx/Qwen3.8-27B-4bit` (about 15 GB); it should be compared next.
+
 ### 2026-08-15 — earlier orientation convergence gate
 
 The Mistral control run and the Qwen3.8 probe both showed the actor spending
