@@ -1334,6 +1334,9 @@ class KernelToolTests(unittest.TestCase):
             result = run_command(["python3", "-c", "print('ok')"])
             self.assertIn("Exit code: 0", result)
             self.assertIn("ok", result)
+            rejected = run_command(["python3", "-c", "print('ok')"], cwd="/")
+            self.assertTrue(rejected.startswith("ERROR:"))
+            self.assertIn("cwd='.'", rejected)
         self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
 
     def test_run_command_accepts_literal_newline_arguments(self):

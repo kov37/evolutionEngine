@@ -230,7 +230,8 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
         timeout = max(1, min(int(timeout), MAX_COMMAND_TIMEOUT_SECONDS))
         workdir = confine(cwd)
     except (TypeError, ValueError) as exc:
-        return f"ERROR: invalid command options: {exc}"
+        guidance = " Use cwd='.' or a project-relative subdirectory; do not use '/' or the host filesystem as cwd."
+        return f"ERROR: invalid command options: {exc}.{guidance}"
     if not os.path.isdir(workdir):
         return f"ERROR: cwd is not a directory: {cwd}"
 
