@@ -17,7 +17,7 @@ from kernel.sandbox import set_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
     _failure_diagnostic, assertion_driven_tool_contract, from_task,
-    is_dependency_setup_command,
+    is_dependency_setup_command, is_tool_plane_failure,
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
@@ -308,6 +308,21 @@ class KernelToolTests(unittest.TestCase):
         ))
         self.assertFalse(_is_validation_setup_failure(
             "the command passed but does not show an assertion or behavioral probe"
+        ))
+
+    def test_tool_plane_failure_does_not_implicate_product_code(self):
+        self.assertTrue(is_tool_plane_failure(
+            "run_command",
+            "ERROR: 'run_command' is unavailable this turn — only ['patch_file'] are allowed right now.",
+        ))
+        self.assertTrue(is_tool_plane_failure(
+            "run_command", "ERROR: bad arguments for run_command: command is required"
+        ))
+        self.assertFalse(is_tool_plane_failure(
+            "run_command", "Exit code: 1\nSTDERR: AssertionError: expected 201, got 500"
+        ))
+        self.assertFalse(is_tool_plane_failure(
+            "patch_file", "ERROR: search text was not found verbatim"
         ))
 
     def test_repair_budget_checkpoint_is_bounded(self):

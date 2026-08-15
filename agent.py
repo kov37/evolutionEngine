@@ -1450,6 +1450,7 @@ You have this focused toolbelt: {offered_tool_names}.
         turn_mutated = False
         turn_validation_succeeded = False
         turn_validation_failed = False
+        turn_tool_plane_failure = False
         validation_suggestions = []
         for call, tmsg in zip(msg.tool_calls, tool_messages):
             tool_name = call.function.name
@@ -1519,8 +1520,19 @@ You have this focused toolbelt: {offered_tool_names}.
                     validation_evidence.add(assessment[3])
                     validation_criteria_hits.update(assessment[4])
                 elif success is False or result.startswith(("ERROR:", "REJECTED:")):
-                    turn_validation_failed = True
-                    validation_suggestions.append(assessment[2])
+                    if validation_contract.is_tool_plane_failure(tool_name, result):
+                        turn_tool_plane_failure = True
+                        validation_suggestions.append(
+                            "tool-plane failure: use the correctly shaped executable validation tool; "
+                            "do not modify the product for this error"
+                        )
+                        print(
+                            f"⚠️ [tool-plane recovery] {tool_name} failed before product validation; "
+                            "reopening validation tools"
+                        )
+                    else:
+                        turn_validation_failed = True
+                        validation_suggestions.append(assessment[2])
                 elif phase_validation:
                     turn_validation_failed = True
                     validation_suggestions.append(assessment[1])
@@ -1528,6 +1540,24 @@ You have this focused toolbelt: {offered_tool_names}.
                         f"⚠️ [validation evidence rejected] {tool_name}: "
                         f"{assessment[1]} — {assessment[2]}"
                     )
+        if turn_tool_plane_failure and not turn_validation_failed:
+            # A dispatch/schema/allow-list failure is not evidence that the
+            # implementation is wrong. Return to the validation surface so a
+            # normalized command can run on the next turn; never force a
+            # product patch or let repair recovery narrow the tools to patch
+            # and finish only.
+            validation_required = True
+            repair_required = False
+            validation_failures = 0
+            repair_turns_used = 0
+            repair_recovery_mode = False
+            repair_inspection_used = False
+            messages.append({"role": "system", "content": (
+                "Tool-plane recovery: the previous validation call was rejected before execution "
+                "because its tool name or argument shape was invalid. This is not a product defect. "
+                "Use run_command/run_shell with the declared schema (command may be an argv list or "
+                "a shell string), execute a real behavioral check, and do not patch the product."
+            )})
         if repair_turn_before_dispatch:
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")

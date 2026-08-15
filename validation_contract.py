@@ -96,6 +96,27 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
             "reason": "tool does not provide executable behavioral evidence"}
 
 
+def is_tool_plane_failure(tool_name, result_content):
+    """Return true when a tool call failed before the product was exercised.
+
+    The distinction matters during repair.  An unavailable tool, malformed
+    tool argument, or dispatch allow-list rejection is a command-plane
+    problem; it must reopen a usable validation surface, not trigger a patch
+    to the product.  Keep this classifier deliberately narrow so real process
+    failures and assertion failures still enter product/setup diagnosis.
+    """
+    if tool_name not in {"run_command", "run_shell", "run_tests", "process_status", "stop_process"}:
+        return False
+    lower = str(result_content or "").lower()
+    return any(marker in lower for marker in (
+        "is unavailable this turn",
+        "only [",
+        "bad arguments for ",
+        "unknown tool",
+        "invalid tool call",
+    ))
+
+
 def is_dependency_setup_command(command) -> bool:
     """Identify normal dependency installation, not a behavioral check."""
     if isinstance(command, (list, tuple)):

@@ -2214,3 +2214,22 @@ reserve, while ordinary turns keep their existing budget. This changes only
 the transport envelope for recovery/action-first turns; it does not encode the
 Todo task or a model name. The deterministic suite and preflight remain green
 at 110 tests.
+
+### 2026-08-15 — recover command-plane failures without patching the product
+
+The following real_app run found a generic FSM error. A valid `/health` probe
+was correctly rejected as incomplete evidence, but the actor then emitted a
+malformed or currently unavailable `run_command` call. Because that dispatch
+error was treated as a product validation failure, repair recovery narrowed the
+tool surface to `patch_file`, `diff_files`, and `finish_task`; the actor then
+made an unnecessary behavior-preserving patch to `server.py` and repeated the
+stale repair checkpoint.
+
+The validation contract now classifies unavailable-tool, bad-argument, and
+unknown-tool errors as command-plane failures. The loop reopens executable
+validation tools, clears product-repair mode, and explicitly tells the actor to
+use the declared command schema without changing product code. A regression
+test covers both malformed-tool errors and real assertion failures, so only the
+former take this path. The deterministic suite and model-free adversarial
+preflight pass 111 tests. The affected real_app run was stopped after the
+failure was isolated; its workspace and monitor remain evidence, not a score.
