@@ -3161,3 +3161,25 @@ unlabeled repeated command. The deterministic suite is 140 tests and 35
 subtests. This is a generic consistency fix; it does not encode SymPy names or
 formulas. The next live run must use the new commit before judging whether the
 tool surface now forces a mutation.
+
+### 2026-08-15 — make the progress gate final
+
+The next 16-turn run used commit `89f687b` and still made one irrelevant
+mutation, zero requested `_cdf` additions, and eleven validations. The novelty
+gate had correctly detected the exhausted no-mutation window, but a later
+validation-policy branch rebuilt `tools_for_call` and restored `run_command` and
+`run_tests`. The model therefore continued validating even though the earlier
+gate had narrowed the surface. The independent grader was bounded correctly
+and timed out after 10 seconds on the unchanged Arcsin behavior; this is not a
+grader hang.
+
+`agent.py` now applies the novelty progress restriction after all lifecycle and
+validation policies, immediately before the authoritative current-tool
+contract is rendered. Once the context window is exhausted, validation is not
+counted as progress: only `patch_file`, `write_file`, and `finish_task` remain.
+Targeted reads remain available only inside the orientation window, unless a
+duplicate non-mutating action already occurred. This is a final-assembly
+invariant, independent of model, provider, or task. A regression test covers
+the mutation-only surface, and deterministic coverage is now 141 tests and 35
+subtests. The next real SymPy run must verify that the actor can no longer
+escape the gate by selecting another validation command.

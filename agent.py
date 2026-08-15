@@ -743,6 +743,26 @@ def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
     return bool(novelty_action_critic or novelty_action_gate)
 
 
+def _novelty_progress_tool_names(novelty_context):
+    """Return the final tool surface when the context ledger requires progress.
+
+    This policy is intentionally computed again at the end of turn assembly.
+    Lifecycle and validation policies may narrow or rebuild ``tools_for_call``
+    later in the loop; a progress gate that runs only before those policies can
+    be silently undone. Once the bounded orientation window is exhausted,
+    validation is evidence but not progress, so only mutation or explicit
+    completion remains legal. During the orientation window, targeted reads
+    remain available unless the same non-mutating action already repeated.
+    """
+    if novelty_context is None or not novelty_context.requires_progress():
+        return None
+    names = {"patch_file", "write_file", "finish_task"}
+    repeated_action = novelty_context.repeated_validation_loop()
+    if novelty_context.recovery_reads_allowed() and not repeated_action:
+        names.update({"read_file", "find_files", "search_file"})
+    return names
+
+
 NO_ACTION_TOOL_FORCE_THRESHOLD = 2
 FORCED_ACTION_MAX_TOKENS = 4096
 
@@ -1235,33 +1255,6 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         "content": f"[progress governor — level {level}] {intervention_msg}{checkpoint_note}",
                     }]
 
-        if novelty_action_gate and novelty_context is not None and novelty_context.requires_progress():
-            progress_tools = {"patch_file", "write_file", "run_tests", "run_command", "run_shell",
-                              "finish_task", "recall"}
-            repeated_validation_loop = novelty_context.repeated_validation_loop()
-            if repeated_validation_loop:
-                # A second identical validation is deterministic evidence of
-                # a control-loop failure. Offering another validator or
-                # inspection tool merely gives the actor a way to evade the
-                # progress gate with a different command. Keep only a
-                # product mutation or explicit completion at this boundary.
-                progress_tools = {"patch_file", "write_file", "finish_task"}
-            if novelty_context.recovery_reads_allowed() and not repeated_validation_loop:
-                progress_tools.update({"read_file", "find_files", "search_file"})
-            gated_names = {t.__name__ for t in tools_for_call} & progress_tools
-            tools_for_call = [t for t in tools_for_call if t.__name__ in gated_names]
-            messages_for_call = messages_for_call + [{
-                "role": "system",
-                "content": (
-                    "[novelty context action gate] The recent context window contains no mutation or "
-                    "validation. Broad exploration tools are temporarily unavailable. Use targeted "
-                    "read_file/find_files/search_file only to establish the exact file, then patch, validate, finish, "
-                    "or recall exact prior text."
-                    + (" The same validation call repeated twice; validation and inspection tools are now "
-                       "unavailable—make one targeted mutation or call finish_task." if repeated_validation_loop else "")
-                ),
-            }]
-
         orientation_recovery_active = lifecycle.state == LifecycleState.RECOVER
         orientation_evidence_available = False
         setup_failure = False
@@ -1385,6 +1378,39 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 mutation_checkpoint=last_mutation_checkpoint,
                 state_text=checkpoint_state,
             )
+
+        # Apply the novelty gate after every lifecycle/validation policy. A
+        # policy layer may narrow this surface, never re-expand it after the
+        # ledger has declared that state-changing progress is required.
+        novelty_progress_tools = (
+            _novelty_progress_tool_names(novelty_context)
+            if novelty_action_gate else None
+        )
+        if novelty_progress_tools is not None:
+            repeated_action = novelty_context.repeated_validation_loop()
+            tools_for_call = [
+                tool for tool in tools_for_call
+                if tool.__name__ in novelty_progress_tools
+            ]
+            if repeated_action:
+                gate_message = (
+                    "The same non-mutating action repeated. Validation and inspection are unavailable; "
+                    "make one targeted mutation or call finish_task."
+                )
+            elif novelty_context.recovery_reads_allowed():
+                gate_message = (
+                    "The bounded context window requires progress. Use one targeted read if needed, "
+                    "then make a mutation or call finish_task."
+                )
+            else:
+                gate_message = (
+                    "The bounded context window is exhausted without a mutation. Validation is not progress; "
+                    "make one targeted mutation or call finish_task."
+                )
+            messages_for_call = messages_for_call + [{
+                "role": "system",
+                "content": "[novelty context action gate] " + gate_message,
+            }]
 
         # The stable system prompt lists the full registry for orientation,
         # but lifecycle policy may narrow the legal surface for this turn.
