@@ -531,6 +531,7 @@ TASKS = {
             "a.on('error', e => fail(e.message)); b.on('error', e => fail(e.message));\n"
             "setTimeout(() => { b.close(); setTimeout(() => a.send(JSON.stringify({type:'message', text:'after-close'})), 100); }, 500);\n"
             "setTimeout(() => fail('timed out waiting for chat exchange'), 2500);\n''', encoding='utf-8')\n"
+            "port = 18767\n"
             "env = os.environ.copy(); env['PORT'] = str(port)\n"
             "proc = subprocess.Popen(['node', 'server.js'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
             "try:\n"

@@ -1345,3 +1345,57 @@ serializes non-string arguments before any provider receives the next message.
 This is provider-neutral and does not branch on MLX or model name. The
 deterministic suite passes 59 tests. Re-run the MLX benchmark after this fix;
 the prior MLX result is a protocol failure, not a model score.
+
+### 2026-08-15 — Qwen3.8 capability review and policy decision
+
+The official [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)
+describes a 27B dense vision-language model with native 262K context,
+multi-token prediction, flexible thinking control, and explicit support for
+`reasoning_effort` values `low`, `medium`, and `xhigh`. Its published results
+include Terminal Bench 2.1 **73.0**, SWE-bench Pro **61.7**, DeepSWE 1.1
+**42.2**, QwenSWEBench **79.0**, WebArena-Verified **64.8**, and
+ClawEval-MM **57.4 Pass@3 / 56.9 average**. These are directional evidence,
+not a direct apples-to-apples comparison: the table uses different harnesses,
+benchmark versions, prompts, and context lengths than our local runs.
+
+For comparison, the [Devstral Small 2 model card](https://huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512)
+reports SWE-bench Verified **68.0**, SWE-bench Multilingual **55.7**, and
+Terminal Bench 2 **22.5**. Qwen's Terminal Bench 2.1 number is not directly
+comparable to Mistral's Terminal Bench 2 number, while Qwen's SWE-bench Pro
+and Mistral's SWE-bench Verified are different tasks. The public evidence
+supports testing Qwen seriously for long-horizon terminal work, not declaring
+it universally better.
+
+The current NoveltyEngine constraints divide into two groups:
+
+* Keep invariant: assertion-driven validation, setup/verification plane
+  separation, protected test paths, FSM transitions, bounded repair budgets,
+  rollback, and tool permissions. These protect the environment and are
+  model-agnostic.
+* Make adaptive: hardcoded `reasoning_format=none`, `reasoning_effort=none`,
+  low temperature, fixed output reserve, and a universal two-turn orientation
+  cutoff. These can suppress Qwen3.8's trained reasoning and long-horizon
+  planning. Qwen's own guidance warns that lower reasoning effort can reduce
+  per-turn latency but increase total retries on multi-turn agents.
+
+Recommended actor policy is therefore a bounded two-speed profile, selected
+by observed task state rather than model name: fast/no-thinking for orientation,
+simple setup, and verification; bounded `medium` reasoning for a fresh
+behavior failure; and `xhigh` only for a repeated, high-value diagnosis with a
+hard token/time ceiling. The FSM and validator remain authoritative in every
+profile. We should retain Mistral as the control actor, test Qwen3.8 GGUF and
+MLX under the same frozen tasks, and choose by first mutation, accepted repair
+rate, validation success, total wall time, and tool-call validity—not by model
+card scores alone.
+
+### 2026-08-15 — WebSocket grader harness repair
+
+The WebSocket benchmark's independent grader had a real harness bug: it
+created the Node probe with port `18767` but never defined the Python variable
+used to set `env['PORT']`. Every recent WebSocket run therefore failed with
+`NameError: name 'port' is not defined` before the application could be
+graded. The grader now defines the same isolated port before launching the
+server. This changes no acceptance assertion or expected behavior; it only
+restores execution of the existing independent check. Added a regression test
+that compiles the generated grader and verifies the port contract. The
+deterministic suite passes 60 tests.

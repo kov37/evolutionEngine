@@ -15,6 +15,7 @@ from validation_contract import _failure_diagnostic, assertion_driven_tool_contr
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
+from agentic_benchmark import TASKS
 
 
 class _FakeMessage:
@@ -96,6 +97,12 @@ class KernelToolTests(unittest.TestCase):
             normalized["tool_calls"][0]["function"]["arguments"],
             '{"path": "server.js"}',
         )
+
+    def test_websocket_grader_defines_its_probe_port(self):
+        grade = TASKS["websocket_chat"].grade
+        compile(grade, ".agentic_grader.py", "exec")
+        self.assertIn("port = 18767", grade)
+        self.assertIn("env['PORT'] = str(port)", grade)
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
