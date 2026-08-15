@@ -3116,3 +3116,15 @@ such as `ArcsinDistribution`; the status file therefore showed every target as
 false even when a method existed. `status_report.classes_with_method()` now
 resolves that conventional suffix generically, with a regression test. Full
 deterministic coverage is now 138 tests and 35 subtests.
+
+The next 12-turn SymPy run showed the remaining control gap: after the first
+irrelevant mutation, the actor repeated the identical non-asserting
+`run_command` four times. The event-window gate could not fire until the next
+turn because the old mutation was still inside its eight-event window.
+
+`NoveltyContext.requires_progress()` now interrupts two identical validation
+calls immediately when no mutation separates them, while retaining the
+bounded-window behavior for broader exploration/validation loops. The
+progress surface still permits a focused mutation or `finish_task`; no model
+or task name is involved. Full deterministic coverage is now 139 tests and 35
+subtests.

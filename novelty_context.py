@@ -789,8 +789,18 @@ class NoveltyContext:
         """
         with self._lock:
             recent = self.events[-self.action_after_events:]
-            return (len(recent) >= self.action_after_events and
-                    not any(e.mutation for e in recent))
+            repeated_validation = False
+            if len(self.events) >= 2:
+                previous, latest = self.events[-2:]
+                repeated_validation = (
+                    previous.validation and latest.validation
+                    and _call_key(previous.tool, previous.arguments)
+                    == _call_key(latest.tool, latest.arguments)
+                )
+            if repeated_validation:
+                return True
+            return (len(recent) >= self.action_after_events
+                    and not any(e.mutation for e in recent))
 
     def recovery_reads_allowed(self) -> bool:
         """Allow targeted reads while the required mutation is still absent.

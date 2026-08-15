@@ -1189,6 +1189,14 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(context.requires_progress())
         context.close()
 
+    def test_action_gate_interrupts_repeated_validation_call_immediately(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=8)
+        context.observe(1, "patch_file", {"path": "src/app.py"}, "Wrote app.py", mutation=True)
+        context.observe(2, "run_command", {"command": "pytest -q"}, "Exit code: 0", validation=True)
+        context.observe(3, "run_command", {"command": "pytest -q"}, "Exit code: 0", validation=True)
+        self.assertTrue(context.requires_progress())
+        context.close()
+
     def test_structured_results_are_compact(self):
         self.assertEqual(_format_result([("file", "a.py"), ("dir", "src")]), "file\ta.py\ndir\tsrc")
         result = _format_result([(str(i),) for i in range(205)])
