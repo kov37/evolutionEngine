@@ -2122,3 +2122,19 @@ probe control-plane invariants and representation boundaries locally first,
 then spend real-model calls only on behavior that cannot be simulated safely.
 The shared output-only classification lives in `lifecycle_policy.py` so the
 action governor and validation contract cannot silently drift apart.
+
+### 2026-08-15 — preserve completion after accepted evidence
+
+The WebSocket run exposed a completion-plane edge case. The actor produced a
+real smoke-test result with every client/server assertion passing, but a later
+blocked attempt to inspect the generated grader was treated as a new product
+repair failure. The repair policy then removed `finish_task`, so the actor
+could not hand off the already-verified workspace and spent its bounded turns
+on an irrelevant grader loop.
+
+The validation policy now carries whether accepted behavioral evidence already
+exists. If a subsequent failure is only a tool-plane restriction, `finish_task`
+remains legal and the prompt directs the actor to hand off rather than rewrite
+product code. Rejected validation evidence is also logged with its reason and
+next action, making this boundary diagnosable in the live monitor. The
+deterministic suite and preflight pass 105 tests.

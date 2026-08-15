@@ -230,6 +230,7 @@ def build_validation_policy(
     protected_edit_recovery_pending: bool,
     repair_recovery_mode: bool,
     mutation_batch_remaining: int = 0,
+    accepted_validation_evidence: bool = False,
 ) -> ValidationActionPolicy | None:
     """Return one immutable policy, or ``None`` outside validation.
 
@@ -309,6 +310,12 @@ def build_validation_policy(
         prompt = "Repair recovery is active. Use the evidence already gathered and make exactly one targeted patch now."
         if last_mutation_rejected:
             prompt += " write_file was rejected earlier; use patch_file instead and do not retry it."
+    if accepted_validation_evidence and not setup_failure:
+        # A later orchestration/tool-plane failure must not erase an already
+        # accepted behavioral result or force a needless product rewrite.
+        # Keep finish_task legal so the actor can hand off the verified state.
+        tools.add("finish_task")
+        prompt += " An earlier executable check already passed; if this failure is only a tool-plane restriction, call finish_task rather than changing product code."
 
     return ValidationActionPolicy(
         tools=frozenset(tools),

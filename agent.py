@@ -1153,6 +1153,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 protected_edit_recovery_pending=protected_edit_recovery_pending,
                 repair_recovery_mode=repair_recovery_mode,
                 mutation_batch_remaining=validation_batch_remaining,
+                accepted_validation_evidence=bool(validation_evidence),
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
@@ -1499,6 +1500,10 @@ You have this focused toolbelt: {offered_tool_names}.
                 elif phase_validation:
                     turn_validation_failed = True
                     validation_suggestions.append(assessment[1])
+                    print(
+                        f"⚠️ [validation evidence rejected] {tool_name}: "
+                        f"{assessment[1]} — {assessment[2]}"
+                    )
         if repair_turn_before_dispatch:
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")

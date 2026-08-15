@@ -178,6 +178,15 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertNotIn("read_file", policy.tools)
         self.assertIn("patch_file", policy.tools)
+
+    def test_repair_keeps_finish_available_after_accepted_evidence(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=False,
+            repair_inspection_used=True, last_mutation_rejected=False,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, accepted_validation_evidence=True,
+        )
+        self.assertIn("finish_task", policy.tools)
         self.assertTrue(policy.requires_mutation)
 
     def test_behavior_repair_does_not_offer_broad_inventory(self):
