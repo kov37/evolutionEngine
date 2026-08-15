@@ -3075,6 +3075,13 @@ independent artifact pass, and a valid completion signal. The monitor is
 `state/benchmark/agentic/monitor-cascading_loop-novelty-1786822609902261000.jsonl`.
 The worker produced stale advisory observations on this short run, but the
 deterministic FSM and completion verifier remained authoritative.
+
+After the validation-only gate change, the same cascade still passed strictly
+in 3 iterations and 38.2 seconds. This run exercised the stale-worker
+cancellation path (`worker_busy_drops=1`) while preserving one mutation, two
+accepted validations, independent artifact grading, and completion. Its
+monitor is
+`state/benchmark/agentic/monitor-cascading_loop-novelty-1786823689670615000.jsonl`.
 ### 2026-08-15 — bound independent grading of hanging candidates
 
 The 20-iteration SymPy run reached its budget with no requested `_cdf`
