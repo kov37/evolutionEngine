@@ -724,7 +724,8 @@ def _auto_validation_command(path: str):
 
 
 def _transaction_window_open(transaction, *, validation_required: bool,
-                              repair_required: bool, mutation_batch_remaining: int) -> bool:
+                              repair_required: bool, mutation_batch_remaining: int,
+                              pending_product_paths=()) -> bool:
     """Return whether proactive validation may be deferred for related edits.
 
     A normal single-file repair must retain the fast validate-after-mutation
@@ -732,6 +733,15 @@ def _transaction_window_open(transaction, *, validation_required: bool,
     transaction, or when an explicit related-mutation batch is still active.
     The predicate is intentionally independent of task names and models.
     """
+    if transaction is not None and transaction.active:
+        # The decision is made after the current tool results are available.
+        # If this turn just added a second distinct product file, the bridge
+        # is complete enough to validate immediately instead of spending one
+        # more actor turn on a known test command.
+        current_files = set(transaction.files)
+        current_files.update(str(path) for path in pending_product_paths if path)
+        if len(current_files) > 1:
+            return False
     return bool(
         (
             transaction is not None
@@ -1919,11 +1929,24 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         # Keep the first repair edit and defer the automatic replay while the
         # bounded mutation batch is open; otherwise the proactive hook makes
         # the batch allowance unreachable by validating after every file.
+        pending_product_paths = set()
+        if transaction is not None:
+            for call, tmsg in zip(turn_calls, tool_messages):
+                if action_governor.classify(call.function.name, call.function.arguments or {}) != "MUTATE":
+                    continue
+                if tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
+                    continue
+                normalized = transaction_buffer.normalize_product_path(
+                    get_root(), (call.function.arguments or {}).get("path", "")
+                )
+                if normalized:
+                    pending_product_paths.add(normalized)
         transaction_window_open = _transaction_window_open(
             transaction,
             validation_required=validation_required,
             repair_required=repair_required,
             mutation_batch_remaining=validation_batch_remaining,
+            pending_product_paths=pending_product_paths,
         )
         if (
             product_mutation_landed

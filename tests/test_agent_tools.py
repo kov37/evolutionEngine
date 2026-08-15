@@ -168,6 +168,13 @@ class KernelToolTests(unittest.TestCase):
             repair_required=True,
             mutation_batch_remaining=0,
         ))
+        self.assertFalse(_transaction_window_open(
+            transaction,
+            validation_required=True,
+            repair_required=True,
+            mutation_batch_remaining=0,
+            pending_product_paths=("matrix.py",),
+        ))
         self.assertTrue(_transaction_window_open(
             None,
             validation_required=True,

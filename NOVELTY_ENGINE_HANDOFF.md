@@ -3351,3 +3351,23 @@ the strict three-iteration workflow target; this is an honest timing/model
 trajectory miss, not evidence that the product repair failed. The next clean
 multi-file run should verify that the narrower hook still preserves File A
 through its intermediate failure and allows File B to complete the repair.
+
+### 2026-08-15 — validate immediately after the second transaction file
+
+The transaction deferral predicate now considers the current turn's pending
+product paths. It continues to defer validation while a transaction has only
+one known product file, but once the current mutation adds a second distinct
+product file, it immediately replays the known failed test in the same turn.
+This removes the unnecessary extra actor turn after the transaction bridge is
+complete. It is based only on host path state and applies to any language or
+task.
+
+Deterministic evidence remains `157 passed, 35 subtests passed`. The clean
+real-model run used Qwen3.8-27B-4bit, qwen3.5:4b, action critic/gate, and a
+60-second per-call model ceiling. It changed `core_math.py`, preserved it
+through the intermediate failure, changed `matrix_solver.py`, immediately
+reran the failed test after that second mutation, and passed in **5
+iterations** against the strict target of 6. Metrics: 2 product mutations, 3
+validations, 3 worker calls, 5 stale judgments, 95.6 seconds. The transaction
+buffer ended inactive with an empty file set. This is a full workflow pass,
+not merely an artifact pass.

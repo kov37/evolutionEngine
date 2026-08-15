@@ -172,15 +172,17 @@ then name the exact deterministic and real-model tests that would verify it.
     },
     "latest_attempt": {
       "artifact_passed": true,
-      "workflow_passed": false,
-      "iterations": 7,
+      "workflow_passed": true,
+      "iterations": 5,
       "iteration_target": 6,
       "mutations": 2,
       "validations": 3,
-      "worker_calls": 2,
-      "stale_judgments": 7,
+      "worker_calls": 3,
+      "stale_judgments": 5,
+      "elapsed_seconds": 95.6,
+      "chat_timeout_seconds": 60,
       "transaction": "preserved core_math.py after the intermediate failure, then cleared after final pass",
-      "monitor_log": "state/benchmark/agentic/monitor-multi_file_transaction-novelty-1786833309476886000.jsonl"
+      "monitor_log": "state/benchmark/agentic/monitor-multi_file_transaction-novelty-1786834348369614000.jsonl"
     }
   },
   "sympy_13878": {
@@ -215,7 +217,7 @@ then name the exact deterministic and real-model tests that would verify it.
   "transaction_window_current_change": {
     "intent": "preserve accepted product files through one bounded multi-file repair follow-up",
     "bound": "one follow-up failure; no automatic destructive rollback on expiry",
-    "status": "implemented in dirty worktree; deterministic suite 153/35; artifact passed in 7 real-model iterations"
+    "status": "implemented; deterministic suite 157/35; strict real-model workflow passed in 5 iterations"
   }
 }
 ```
