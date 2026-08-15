@@ -2978,3 +2978,21 @@ has executable evidence: synchronous 4B triage must be a bounded gate, stale
 advice must never steer the actor, and irrelevant or duplicate mutations need
 generic quality checks. Generated tests can follow as a proposal/critique
 capability only after the independent verifier remains authoritative.
+
+### 2026-08-15 — supersede stale asynchronous worker calls at repair gates
+
+The SymPy trace showed why asynchronous advice was ineffective: a repair
+checkpoint could arrive while an older 4B process was still evaluating a prior
+event. The old implementation returned a local fallback but left the old
+worker and its coalesced event alive, so the next turns accumulated stale
+judgments.
+
+`NoveltyContext.synchronous_triage()` now cancels the obsolete killable worker
+and drops its pending older event before starting the current failure
+checkpoint. If the fresh worker exceeds the bounded triage timeout, the
+orchestrator cancels it as well and keeps the deterministic local diagnosis.
+In-process test callables remain non-interruptible and continue to use the
+safe fallback path. This changes scheduling only; it does not make a model
+name, task, or benchmark authoritative.
+
+Focused deterministic regression: 114 tests pass after this change.

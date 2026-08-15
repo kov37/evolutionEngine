@@ -349,11 +349,23 @@ class NoveltyContext:
     ) -> WorkerJudgment:
         """Run a bounded triage gate before the next actor prompt.
 
-        If another worker call is already running, return the deterministic
-        checkpoint immediately. The 4B can never delay the actor indefinitely.
+        A repair checkpoint supersedes an older asynchronous call. Keeping the
+        old call alive would let it finish with advice about a previous event
+        and would make every following checkpoint stale. The fresh call is
+        still bounded; deterministic local classification remains the fallback.
         """
         with self._lock:
             before = self._next_event_id
+            # The real worker backend is a killable child process. Cancel an
+            # obsolete async call before starting a failure-boundary gate. A
+            # test/in-process chat callable cannot be safely interrupted, so
+            # request_repair_checkpoint will retain its deterministic fallback
+            # and coalesce the new event instead.
+            if self._process_mode and (
+                (self._process is not None and self._process.is_alive())
+                or (self._future is not None and not self._future.done())
+            ):
+                self._cancel_active_worker_locked()
         self.request_repair_checkpoint(
             iteration, lifecycle_state, failure_packet, legal_actions, protected_paths
         )
@@ -371,6 +383,13 @@ class NoveltyContext:
             )
         if started:
             judgment = self.collect(wait=True, timeout=max(0.1, timeout))
+            # ``collect(wait=True)`` intentionally returns the local fallback
+            # when the bounded join expires. Do not leave the expired worker
+            # running into the next actor turn, where it would recreate the
+            # stale-judgment problem this gate is meant to prevent.
+            with self._lock:
+                if self._active_event is not None and self._active_event.tool == "repair_checkpoint":
+                    self._cancel_active_worker_locked()
         else:
             judgment = fallback
         # The model may refine a known setup failure, but it may not turn
@@ -611,6 +630,28 @@ class NoveltyContext:
         self._pending_event = None
         self._pending_fallback = None
         self._start_worker_locked(event, fallback)
+
+    def _cancel_active_worker_locked(self) -> None:
+        """Stop an obsolete worker without allowing it to publish a judgment."""
+        if self._process is not None:
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=0.25)
+                self.worker_busy_drops += 1
+            if self._process_conn is not None:
+                self._process_conn.close()
+                self._process_conn = None
+            self._process = None
+        if self._future is not None:
+            if not self._future.done():
+                self._future.cancel()
+                self.worker_busy_drops += 1
+            self._future = None
+        self._active_event = None
+        # A failure-boundary checkpoint is newer than any coalesced ordinary
+        # event. Do not replay that obsolete event after the checkpoint.
+        self._pending_event = None
+        self._pending_fallback = None
 
     def render_for_model(self, action_critic: bool = False) -> str:
         judgment = self.collect(wait=False)
