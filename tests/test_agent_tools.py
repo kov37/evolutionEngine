@@ -27,7 +27,7 @@ from lifecycle_policy import (
 )
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
-from agentic_benchmark import TASKS, _profile_limits, _run_completed, _scorecard_passed
+from agentic_benchmark import TASKS, _profile_limits, _provider_interrupted, _run_completed, _scorecard_passed
 
 
 class _FakeMessage:
@@ -354,6 +354,13 @@ class KernelToolTests(unittest.TestCase):
 
     def test_artifact_without_finish_signal_is_not_a_pass(self):
         self.assertFalse(_scorecard_passed(True, False, True))
+
+    def test_verifier_reconciles_provider_loss_after_artifact_pass(self):
+        self.assertTrue(_scorecard_passed(True, False, True, True))
+        self.assertTrue(_provider_interrupted(
+            "provider unavailable; ending run cleanly instead of retrying"
+        ))
+        self.assertFalse(_provider_interrupted("validation failed; repair required"))
         self.assertFalse(_scorecard_passed(True, True, False))
         self.assertTrue(_scorecard_passed(True, True, True))
 

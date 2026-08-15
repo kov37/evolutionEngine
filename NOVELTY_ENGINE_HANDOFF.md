@@ -2174,3 +2174,17 @@ though it never wrote a file. The redirect pattern now ignores `=>` and other
 operator contexts while retaining real `> file` and `>> file` writes. A
 regression case covers an inline `setTimeout(() => ...)` command. The
 deterministic suite and preflight pass 108 tests.
+
+### 2026-08-15 — reconcile verifier-confirmed provider termination
+
+The final live attempt repaired the artifact and the independent grader passed,
+but the model provider disconnected twice before the repair actor could call
+`finish_task`. The benchmark previously recorded that as a total failure even
+though the only authoritative artifact check was green.
+
+The scorecard now records `finish_called` separately from
+`handoff_reconciled`. It accepts the narrow combination of: independent
+verifier pass, clean actor-process termination, and an explicit provider-loss
+signature. It never treats a missing artifact, timeout, or ordinary model
+stall as reconciled, and it does not pretend the model called `finish_task`.
+The deterministic suite and preflight pass 109 tests.

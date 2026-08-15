@@ -117,9 +117,17 @@ def _run_completed(timed_out: bool, returncode: int | None) -> bool:
     return not timed_out and returncode == 0
 
 
-def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed: bool) -> bool:
-    """Require a correct artifact, clean process exit, and explicit finish."""
-    return bool(artifact_passed and finish_called and run_completed)
+def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed: bool,
+                      handoff_reconciled: bool = False) -> bool:
+    """Require a correct artifact and clean exit, with explicit recovery semantics.
+
+    A provider can die after the independent verifier has accepted the
+    workspace but before the actor emits ``finish_task``. In that narrow case
+    the verifier is the authoritative handoff boundary. Keep the actual
+    ``finish_called`` bit visible while allowing the scorecard to distinguish
+    this deterministic reconciliation from a model-completed run.
+    """
+    return bool(artifact_passed and run_completed and (finish_called or handoff_reconciled))
 
 
 def _verifier_repair_prompt(task: Task, detail: str) -> str:
@@ -135,6 +143,17 @@ def _verifier_repair_prompt(task: Task, detail: str) -> str:
           "do not rewrite supplied task files.\n"
         + detail[-3000:]
     )
+
+
+def _provider_interrupted(output: str) -> bool:
+    """Identify a clean actor stop caused by the model transport."""
+    lower = str(output or "").lower()
+    return any(marker in lower for marker in (
+        "provider unavailable; ending run cleanly",
+        "acting-model turn failed",
+        "remote end closed connection without response",
+        "remotedisconnected",
+    ))
 
 
 def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
@@ -791,6 +810,12 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             "done_signal": _metrics(repair_stdout or "")["done_signal"],
         }
         metrics = _metrics(stdout or "")
+    handoff_reconciled = bool(
+        verifier_repair is not None
+        and artifact_passed
+        and _run_completed(timed_out, returncode)
+        and _provider_interrupted(repair_stdout or "")
+    )
     scorecard = {
         "artifact_passed": artifact_passed,
         "finish_called": (
@@ -798,12 +823,14 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             else initial_metrics["done_signal"]
         ),
         "run_completed": _run_completed(timed_out, returncode),
+        "handoff_reconciled": handoff_reconciled,
     }
     # A correct partial artifact is useful evidence, but it is not a complete
     # agent run. Require the actor's explicit finish signal so a model that
     # mutates successfully and then stalls in validation is scored honestly.
     passed = _scorecard_passed(
-        artifact_passed, scorecard["finish_called"], scorecard["run_completed"]
+        artifact_passed, scorecard["finish_called"], scorecard["run_completed"],
+        handoff_reconciled,
     )
     if not passed and artifact_passed:
         detail = (
