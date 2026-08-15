@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
+from agent import NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 from kernel.discovery import find_files
@@ -41,6 +41,11 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_repeated_no_action_escalates_to_required_tool_call(self):
+        self.assertFalse(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD - 1, "llama-cpp"))
+        self.assertTrue(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "llama-cpp"))
+        self.assertFalse(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "ollama"))
+
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}
 

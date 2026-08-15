@@ -2188,3 +2188,18 @@ verifier pass, clean actor-process termination, and an explicit provider-loss
 signature. It never treats a missing artifact, timeout, or ordinary model
 stall as reconciled, and it does not pretend the model called `finish_task`.
 The deterministic suite and preflight pass 109 tests.
+
+### 2026-08-15 — require a tool call after repeated prose-only turns
+
+The first harder `real_app` run revealed a generic action failure: Qwen
+returned three consecutive long responses with no tool call, no mutation, and
+no validation. The engine appended increasingly explicit prose reminders, but
+that remained advisory and consumed roughly five minutes without touching the
+workspace.
+
+The loop now counts consecutive no-action turns and, after two, sends the
+llama.cpp request with `tool_choice: "required"`. The counter resets after any
+real tool call; it is independent of model name and task wording, and applies
+only at the provider boundary that supports this structured control. The
+deterministic suite and preflight pass 110 tests. The interrupted real_app run
+is retained as evidence of the failure, not counted as a product result.

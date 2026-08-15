@@ -614,6 +614,14 @@ def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
     return bool(novelty_action_critic or novelty_action_gate)
 
 
+NO_ACTION_TOOL_FORCE_THRESHOLD = 2
+
+
+def _force_tool_call_after_no_action(no_action_turns: int, backend: str) -> bool:
+    """Use the provider's structured tool mode after repeated prose-only turns."""
+    return backend == "llama-cpp" and int(no_action_turns or 0) >= NO_ACTION_TOOL_FORCE_THRESHOLD
+
+
 def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
@@ -786,6 +794,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # unbounded edit loop.
     validation_batch_remaining = 0
     orientation_turns_without_mutation = 0
+    no_action_turns = 0
     lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
     agent_started_at = time.monotonic()
@@ -1220,6 +1229,16 @@ You have this focused toolbelt: {offered_tool_names}.
                     # well, so a plain explanation cannot consume another
                     # recovery turn.
                     chat_kwargs["tool_choice"] = "required"
+                if _force_tool_call_after_no_action(no_action_turns, backend):
+                    # Repeated prose-only turns are a transport/control-plane
+                    # failure, not a reasoning opportunity. llama.cpp can
+                    # enforce the structured tool boundary directly; this is
+                    # independent of model name and task wording.
+                    chat_kwargs["tool_choice"] = "required"
+                    print(
+                        f"🧰 [no-action escalation] {no_action_turns} prose-only turns; "
+                        "requiring an executable tool call"
+                    )
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
@@ -1311,6 +1330,7 @@ You have this focused toolbelt: {offered_tool_names}.
             print(f"🧠 {msg.content}")
 
         if not msg.tool_calls:
+            no_action_turns += 1
             print("⚠️  Model returned no tool call — nudging it to act.")
             legal_names = {t.__name__ for t in tools_for_call}
             if novelty_context is not None:
@@ -1337,6 +1357,8 @@ You have this focused toolbelt: {offered_tool_names}.
                 ),
             })
             continue
+
+        no_action_turns = 0
 
         tool_start_idx = len(messages)
         # risk_layer.py: checkpoint every file about to be MUTATEd, BEFORE
