@@ -340,6 +340,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(is_probe_quality_failure(
             "the passing API check does not assert response shape: object"
         ))
+        self.assertTrue(is_probe_quality_failure(
+            "the command only inspected files or reported environment metadata"
+        ))
         self.assertFalse(is_probe_quality_failure(
             "AssertionError: expected 201, got 500"
         ))

@@ -2358,3 +2358,15 @@ a failed or timed-out check cannot be dismissed because another check passed;
 the actor must preserve unrelated passing behavior and inspect the endpoint or
 artifact named by the failure packet. This is a general precedence rule, not a
 Todo-specific instruction.
+
+### 2026-08-15 — keep inspection-only checks in validation, not repair
+
+The next live confirmation found that a health-only check was correctly
+rejected as insufficient evidence, but the rejection entered product repair and
+removed `run_command`. The actor therefore could not perform the required
+full behavioral probe and kept replaying a blocked command.
+
+Inspection-only, output-only, zero-assertion, and setup-only results are now
+classified as probe-quality failures. They keep the FSM in validation, reopen
+an executable validation tool, and do not authorize product mutation. Actual
+assertion failures continue to enter repair.

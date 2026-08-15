@@ -133,6 +133,10 @@ def is_probe_quality_failure(reason):
         "does not show an assertion",
         "not executable evidence",
         "not behavioral evidence",
+        "only inspected files",
+        "zero exit code without a behavioral",
+        "output-only command",
+        "process readiness is setup",
     ))
 
 
