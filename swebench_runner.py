@@ -171,7 +171,10 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     # and package manager that launched the agent. Without this, a model's
     # ordinary `python`/`pip` probe can silently hit the host installation
     # while the independent grader uses the configured virtual environment.
-    interpreter_bin = str(Path(sys.executable).resolve().parent)
+    # Do not call ``resolve()`` here: virtualenv Python is commonly a symlink
+    # to the host binary, and resolving it would discard the virtualenv's
+    # `bin` directory—the exact mismatch this environment contract prevents.
+    interpreter_bin = str(Path(sys.executable).absolute().parent)
     agent_env["PATH"] = os.pathsep.join(
         part for part in (interpreter_bin, agent_env.get("PATH")) if part
     )

@@ -3040,3 +3040,12 @@ agent Python to `PATH` and sets `VIRTUAL_ENV` for the actor subprocess. That
 makes ordinary `python` and `pip` tool calls resolve to the same environment
 used by the agent and grader, while retaining the external legacy compatibility
 shim. This is a generic execution-contract repair, not a SymPy-specific rule.
+
+The first verification caught an implementation detail: using
+`Path(sys.executable).resolve()` followed the virtualenv symlink back to the
+host Python directory, so the actor still found the wrong `python`. The runner
+now preserves the configured executable's own `bin` directory with
+`Path(sys.executable).absolute().parent`; this keeps the virtualenv tools first
+even when its interpreter is symlinked. The same short run exercised stale
+worker cancellation (`worker_busy_drops=1`) and still produced the six-method
+partial candidate before the bounded timeout.
