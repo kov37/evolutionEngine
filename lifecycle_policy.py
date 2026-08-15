@@ -62,6 +62,15 @@ def is_dependency_manifest_path(path: str) -> bool:
     )
 
 
+def is_validation_helper_path(path: str) -> bool:
+    """Return true for ephemeral probes kept below the agent-owned directory."""
+    normalized = str(path or "").replace("\\", "/").lstrip("/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = [part for part in normalized.split("/") if part]
+    return len(parts) >= 2 and parts[0] == ".agentic"
+
+
 def orientation_action_tools(*, evidence_available: bool = False) -> frozenset[str]:
     """Return the action surface after the orientation budget.
 
@@ -176,6 +185,9 @@ def build_validation_policy(
 
     if not repair_required:
         validation_tools = set(VALIDATION_TOOLS)
+        # A temporary behavioral probe is a validation artifact, not a
+        # product mutation. Dispatch restricts this write surface to .agentic/.
+        validation_tools.add("write_file")
         batch_note = ""
         if mutation_batch_remaining > 0:
             validation_tools |= MUTATION_TOOLS
@@ -192,8 +204,9 @@ def build_validation_policy(
                 "Validation phase tool restriction: only validation tools are available this turn. "
                 "Run a focused test or executable check and inspect its result. If the check needs "
                 "a temporary probe, execute it inline through run_command/run_shell (for example, "
-                "a single-line node -e or python -c command). Keep every tool argument single-line; "
-                "do not create a new helper file with a write tool." + batch_note
+                "a single-line node -e or python -c command). Keep every tool argument single-line. "
+                "If a helper file is clearer, write it only below .agentic/ and run that helper; "
+                "do not edit product or supplied test files." + batch_note
             ),
         )
 

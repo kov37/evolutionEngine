@@ -2062,3 +2062,18 @@ tests, and lookalike files. Shell commands remain mutation-blocked in setup
 recovery. The full deterministic suite passes 99 tests, and the next live run
 will verify the intended sequence: manifest mutation, dependency install,
 behavioral smoke test, and explicit completion.
+
+### 2026-08-15 — give validation a safe helper-file lane
+
+The next run showed a second setup/validation interaction. The model emitted a
+single-line command, but the command was too deeply nested for the MLX parser's
+Python-literal fallback: embedded JavaScript quotes and arrays made the tool
+argument invalid. The model could have avoided this entirely by writing a
+small probe file, but ordinary validation exposed no write tool.
+
+Validation now offers `write_file` only as a temporary-probe capability. The
+dispatch allowlist permits it only below `.agentic/`; dependency setup may
+also write only an approved dependency manifest. A helper write does not count
+as a product mutation or reopen the product-edit FSM, so the next legal action
+remains execution of the helper. Product code, supplied tests, and arbitrary
+paths remain frozen. The deterministic suite remains green at 99 tests.

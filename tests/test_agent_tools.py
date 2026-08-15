@@ -22,7 +22,7 @@ from validation_contract import (
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
     build_validation_policy, counts_as_repair_inspection, is_dependency_manifest_path,
-    is_inspection_command,
+    is_inspection_command, is_validation_helper_path,
     orientation_action_tools,
 )
 from workspace import run_tests_tool
@@ -166,6 +166,8 @@ class KernelToolTests(unittest.TestCase):
             self.assertTrue(is_dependency_manifest_path(path))
         for path in ("server.js", "index.html", "tests/test_app.py", "package.json.bak"):
             self.assertFalse(is_dependency_manifest_path(path))
+        self.assertTrue(is_validation_helper_path(".agentic/smoke.cjs"))
+        self.assertFalse(is_validation_helper_path("smoke.cjs"))
 
     def test_validation_policy_is_repair_then_patch(self):
         policy = build_validation_policy(
@@ -200,6 +202,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("patch_file", policy.tools)
         self.assertIn("write_file", policy.tools)
         self.assertIn("run_tests", policy.tools)
+        self.assertIn("write_file", policy.tools)
         self.assertIn("2 related product artifact", policy.prompt)
 
     def test_validation_policy_directs_temporary_probes_inline(self):
@@ -210,7 +213,7 @@ class KernelToolTests(unittest.TestCase):
             repair_recovery_mode=False,
         )
         self.assertIn("node -e", policy.prompt)
-        self.assertIn("do not create a new helper file", policy.prompt)
+        self.assertIn("below .agentic/", policy.prompt)
 
     def test_dependency_install_is_setup_not_behavioral_evidence(self):
         self.assertTrue(is_dependency_setup_command(["npm", "install", "--no-audit"]))

@@ -955,8 +955,9 @@ You have this focused toolbelt: {offered_tool_names}.
                     "and response structure; for CLIs, check exit status and output; for libraries, "
                     "run the focused regression test. If a temporary probe is needed, run it inline "
                     "with run_command/run_shell (for example, a single-line node -e or python -c "
-                    "command). Keep tool arguments single-line; do not create a new helper file during "
-                    "validation. Record failures and repair from their evidence."
+                    "command). Keep tool arguments single-line. If a helper file is clearer, write it "
+                    "only below .agentic/ and run that helper; do not edit product or supplied test files. "
+                    "Record failures and repair from their evidence."
                     + batch_instruction + " "
                     + validation_plan.render() + "\n"
                     + ("Required interfaces still without accepted evidence: " + ", ".join(uncovered) + "\n"
@@ -1330,8 +1331,8 @@ You have this focused toolbelt: {offered_tool_names}.
                     "Do not return another explanation. Take one executable action now: use "
                     + next_action
                     + "; for a temporary validation probe, use a single-line inline run_command/run_shell "
-                    "rather than creating a helper file; keep tool arguments single-line; call finish_task "
-                    "only after verification."
+                    "or write the helper only below .agentic/; keep tool arguments single-line; call "
+                    "finish_task only after verification."
                 ),
             })
             continue
@@ -1387,12 +1388,13 @@ You have this focused toolbelt: {offered_tool_names}.
                         continue
                     args = call.function.arguments or {}
                     path = args.get("path", "")
-                    if not lifecycle_policy.is_dependency_manifest_path(path):
+                    if not (lifecycle_policy.is_dependency_manifest_path(path)
+                            or lifecycle_policy.is_validation_helper_path(path)):
                         key = _call_key(call.function.name, args)
                         blocked_command_calls.add(key)
                         blocked_command_reasons[key] = (
-                            "REJECTED: setup recovery permits mutation only of a dependency manifest "
-                            "(for example package.json); product and test paths remain frozen."
+                            "REJECTED: setup/validation recovery permits mutation only of a dependency "
+                            "manifest or a helper below .agentic/; product and test paths remain frozen."
                         )
             if command_mutation_blocked:
                 for call in msg.tool_calls:
@@ -1455,7 +1457,11 @@ You have this focused toolbelt: {offered_tool_names}.
                 # A governor heuristic must never turn a failed mutation into
                 # a successful repair cycle and reopen broad editing.
                 success = False
-            if capability == "MUTATE" and success is True:
+            helper_mutation = (
+                capability == "MUTATE"
+                and lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+            )
+            if capability == "MUTATE" and success is True and not helper_mutation:
                 turn_mutated = True
                 last_mutation_rejected = False
                 if first_mutation_elapsed is None:
