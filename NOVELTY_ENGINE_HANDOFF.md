@@ -2318,3 +2318,17 @@ same state, deterministic validation policy also restores an executable
 validation tool if escalation had removed it; governor restrictions may reduce
 exploration, but cannot remove the active verification plane. A regression test
 covers the transition.
+
+### 2026-08-15 — preserve repair state after a wrong-phase tool call
+
+The next live run found a repair-loop edge. After the API POST timeout, the
+actor replayed a historical `run_command` call even though the FSM had entered
+product repair. Dispatch correctly rejected that call, but the generic
+command-plane recovery cleared `repair_required`, reopened validation, and let
+the same stale call repeat indefinitely.
+
+Recovery now distinguishes a malformed command during validation from a valid
+tool used in the wrong lifecycle phase. The latter preserves product-repair
+state and explicitly directs the actor to inspect and patch; the bounded repair
+budget can then force a mutation. This prevents a failed tool call from
+silently changing the FSM phase.

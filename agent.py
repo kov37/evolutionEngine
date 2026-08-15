@@ -1569,23 +1569,34 @@ You have this focused toolbelt: {offered_tool_names}.
             )})
             print("⚠️ [probe-quality recovery] reopening behavioral validation without product repair")
         if turn_tool_plane_failure and not turn_validation_failed:
-            # A dispatch/schema/allow-list failure is not evidence that the
-            # implementation is wrong. Return to the validation surface so a
-            # normalized command can run on the next turn; never force a
-            # product patch or let repair recovery narrow the tools to patch
-            # and finish only.
-            validation_required = True
-            repair_required = False
-            validation_failures = 0
-            repair_turns_used = 0
-            repair_recovery_mode = False
-            repair_inspection_used = False
-            messages.append({"role": "system", "content": (
-                "Tool-plane recovery: the previous validation call was rejected before execution "
-                "because its tool name or argument shape was invalid. This is not a product defect. "
-                "Use run_command/run_shell with the declared schema (command may be an argv list or "
-                "a shell string), execute a real behavioral check, and do not patch the product."
-            )})
+            if repair_required:
+                # A validation tool recalled during product repair is a phase
+                # violation, not a reason to reopen validation. Preserve the
+                # repair state so the bounded repair governor can force the
+                # actor toward read_file/patch_file instead of cycling through
+                # the same historical run_command call.
+                messages.append({"role": "system", "content": (
+                    "Repair-phase tool rejection: the previous run_command call is not legal while "
+                    "repairing the observed product failure. Do not rerun it. Use read_file to inspect "
+                    "the implicated implementation, then patch_file or write_file; validate afterward."
+                )})
+                print("⚠️ [repair-phase recovery] preserving product repair state after blocked validation call")
+            else:
+                # A dispatch/schema/allow-list failure during validation is
+                # not evidence that the implementation is wrong. Reopen the
+                # validation surface, but never force a product patch.
+                validation_required = True
+                repair_required = False
+                validation_failures = 0
+                repair_turns_used = 0
+                repair_recovery_mode = False
+                repair_inspection_used = False
+                messages.append({"role": "system", "content": (
+                    "Tool-plane recovery: the previous validation call was rejected before execution "
+                    "because its tool name or argument shape was invalid. This is not a product defect. "
+                    "Use run_command/run_shell with the declared schema (command may be an argv list or "
+                    "a shell string), execute a real behavioral check, and do not patch the product."
+                )})
         if repair_turn_before_dispatch:
             repair_turns_used += 1
             print(f"🧭 [repair turn] {repair_turns_used}/{REPAIR_TURN_BUDGET}")
