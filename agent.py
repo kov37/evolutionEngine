@@ -1648,17 +1648,28 @@ You have this focused toolbelt: {offered_tool_names}.
             print("⚠️ [probe-quality recovery] reopening behavioral validation without product repair")
         if turn_tool_plane_failure and not turn_validation_failed:
             if repair_required:
-                # A validation tool recalled during product repair is a phase
-                # violation, not a reason to reopen validation. Preserve the
-                # repair state so the bounded repair governor can force the
-                # actor toward read_file/patch_file instead of cycling through
-                # the same historical run_command call.
+                # A rejected validation call is control-plane evidence, not a
+                # product failure. Reopen the validation surface even if the
+                # actor was nominally in repair: the failed call may have been
+                # the only attempt to start a required service or invoke a
+                # helper. Keeping mutation-only repair tools here creates a
+                # generic failure loop in which a healthy product is edited
+                # because its checker was never actually executed.
+                validation_required = True
+                repair_required = False
+                validation_failures = 0
+                repair_turns_used = 0
+                repair_recovery_mode = False
+                repair_inspection_used = False
+                lifecycle.transition("tool_plane_recovery")
                 messages.append({"role": "system", "content": (
-                    "Repair-phase tool rejection: the previous run_command call is not legal while "
-                    "repairing the observed product failure. Do not rerun it. Use read_file to inspect "
-                    "the implicated implementation, then patch_file or write_file; validate afterward."
+                    "Tool-plane recovery: the previous validation call was rejected before execution. "
+                    "This is not evidence that the product is defective. Reopen the validation target "
+                    "or service if needed, then use run_command/run_shell with the declared argument "
+                    "schema to execute the focused behavioral check. Product files remain frozen until "
+                    "a real check reports a product failure."
                 )})
-                print("⚠️ [repair-phase recovery] preserving product repair state after blocked validation call")
+                print("⚠️ [tool-plane recovery] reopening validation after a blocked repair-phase call")
             else:
                 # A dispatch/schema/allow-list failure during validation is
                 # not evidence that the implementation is wrong. Reopen the
@@ -1669,6 +1680,7 @@ You have this focused toolbelt: {offered_tool_names}.
                 repair_turns_used = 0
                 repair_recovery_mode = False
                 repair_inspection_used = False
+                lifecycle.transition("tool_plane_recovery")
                 messages.append({"role": "system", "content": (
                     "Tool-plane recovery: the previous validation call was rejected before execution "
                     "because its tool name or argument shape was invalid. This is not a product defect. "

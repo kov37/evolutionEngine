@@ -2543,3 +2543,23 @@ validation failures, 0 repair entries, first mutation at 177.9 seconds, and
 297.6 seconds total. This verifies the engine's generic plane separation and
 completion behavior on a real model; it is not evidence that the 4B worker is
 contributing useful guidance here because the run recorded zero worker calls.
+
+### 2026-08-15 — reopen validation after a blocked validation call
+
+The WebSocket benchmark then exposed a lifecycle error. Qwen3.8 wrote correct
+server, browser, and dependency files, but its first generated smoke helper ran
+before a server had been started. When the actor attempted to recover, it used
+an invalid `run_command` argument shape. The engine correctly rejected that
+call, but incorrectly preserved product-repair mode and narrowed the next tool
+surface to `patch_file`/`write_file`. The actor consequently kept editing its
+helper instead of restoring validation; the repair counter also printed values
+past `3/3`.
+
+The controller now treats a rejected validation call as a distinct
+control-plane event. It clears product-repair mode, freezes product mutation,
+reopens `run_command`/`run_shell`, and requires a real behavioral check before
+any product edit is legal. The centralized FSM has an explicit
+`tool_plane_recovery` transition from ACT, VALIDATE, and REPAIR into VALIDATE.
+The deterministic suite now passes 125 tests and the offline preflight is green.
+The interrupted WebSocket trace is retained as the regression case; rerun it
+from the latest commit before evaluating the next failure.

@@ -40,6 +40,11 @@ _TRANSITIONS = {
     # orientation and spend turns inventorying a workspace whose failure
     # already identifies the next repair target.
     (LifecycleState.ACT, "validation_failed"): LifecycleState.REPAIR,
+    # A malformed or unavailable validation call is a control-plane event.
+    # Reopen validation without treating the product as defective, regardless
+    # of whether the failed call happened during ACT, VALIDATE, or REPAIR.
+    (LifecycleState.ACT, "tool_plane_recovery"): LifecycleState.VALIDATE,
+    (LifecycleState.VALIDATE, "tool_plane_recovery"): LifecycleState.VALIDATE,
     (LifecycleState.REPAIR, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.RECOVER, "mutation"): LifecycleState.VALIDATE,
     # A bounded multi-file change batch may add one related artifact while
@@ -48,6 +53,7 @@ _TRANSITIONS = {
     (LifecycleState.VALIDATE, "mutation"): LifecycleState.VALIDATE,
     (LifecycleState.VALIDATE, "validation_failed"): LifecycleState.REPAIR,
     (LifecycleState.REPAIR, "validation_failed"): LifecycleState.REPAIR,
+    (LifecycleState.REPAIR, "tool_plane_recovery"): LifecycleState.VALIDATE,
     # A repair-phase probe may be valid for one interface while the contract
     # still requires more interfaces. Continue in VALIDATE rather than
     # crashing when partial evidence arrives after a failed turn.
