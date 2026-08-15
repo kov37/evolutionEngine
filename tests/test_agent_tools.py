@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _terminal_provider_error
+from agent import ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _completion_ready, _force_repair_recovery, _intervention_messages, _is_validation_setup_failure, _json_message, _terminal_provider_error
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -79,6 +79,23 @@ class KernelToolTests(unittest.TestCase):
             [f"evidence-{i}" for i in range(4, 12)],
         )
         self.assertEqual(ORIENTATION_TURN_BUDGET, 2)
+
+    def test_tool_call_arguments_are_serialized_at_transport_boundary(self):
+        message = type("Message", (), {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [type("Call", (), {
+                "function": type("Function", (), {
+                    "name": "read_file",
+                    "arguments": {"path": "server.js"},
+                })(),
+            })()],
+        })()
+        normalized = _json_message(message)
+        self.assertEqual(
+            normalized["tool_calls"][0]["function"]["arguments"],
+            '{"path": "server.js"}',
+        )
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:

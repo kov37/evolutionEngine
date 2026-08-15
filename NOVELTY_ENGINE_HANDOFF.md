@@ -1333,3 +1333,15 @@ pass/fail capability result. First mutation was 182.9 seconds and first
 validation was 262.2 seconds on this CPU-only server. A longer unchanged run
 is required to measure whether the actor can now continue from setup into the
 real WebSocket verification probe.
+
+### 2026-08-15 — provider-neutral tool-call argument normalization
+
+The first MLX agent run exposed a transport compatibility defect. The actor
+adapter parsed tool-call `function.arguments` into a Python dict for dispatch,
+then reused that dict in the next assistant message. MLX's OpenAI-compatible
+server expects the field to remain a JSON string and returned `the JSON object
+must be str, bytes or bytearray, not dict`. The transport boundary now
+serializes non-string arguments before any provider receives the next message.
+This is provider-neutral and does not branch on MLX or model name. The
+deterministic suite passes 59 tests. Re-run the MLX benchmark after this fix;
+the prior MLX result is a protocol failure, not a model score.

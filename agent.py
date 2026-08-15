@@ -81,6 +81,15 @@ def _json_message(message):
                 })
     if out.get("role") == "tool" and "tool_name" in out:
         out["name"] = out.pop("tool_name")
+    # OpenAI-compatible servers represent function arguments as a JSON
+    # string in assistant tool-call messages.  Some providers return that
+    # string, while the local response adapter naturally parses it to a dict
+    # for dispatch.  Re-serialize at the transport boundary so the next
+    # request is valid for both strict and permissive servers.
+    for call in out.get("tool_calls") or []:
+        function = call.get("function") if isinstance(call, dict) else None
+        if isinstance(function, dict) and not isinstance(function.get("arguments"), str):
+            function["arguments"] = json.dumps(function.get("arguments") or {}, ensure_ascii=False)
     return out
 
 
