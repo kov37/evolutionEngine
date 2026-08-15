@@ -1398,4 +1398,9 @@ graded. The grader now defines the same isolated port before launching the
 server. This changes no acceptance assertion or expected behavior; it only
 restores execution of the existing independent check. Added a regression test
 that compiles the generated grader and verifies the port contract. The
-deterministic suite passes 60 tests.
+deterministic suite passes 60 tests. A positive-control application now passes
+the repaired grader, while the original intentionally broken fixture reaches
+the expected WebSocket URL assertion and fails. This confirms the grader can
+both accept the target behavior and reject the broken starting state. Model
+comparison is paused here; the next benchmark run should be interpreted as a
+real agent result rather than a grader-harness result.
