@@ -21,7 +21,8 @@ from validation_contract import (
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
-    build_validation_policy, counts_as_repair_inspection, is_inspection_command,
+    build_validation_policy, counts_as_repair_inspection, is_dependency_manifest_path,
+    is_inspection_command,
     orientation_action_tools,
 )
 from workspace import run_tests_tool
@@ -151,13 +152,20 @@ class KernelToolTests(unittest.TestCase):
             validation_failures=1, protected_edit_recovery_pending=False,
             repair_recovery_mode=False,
         )
-        self.assertNotIn("patch_file", first.tools)
-        self.assertNotIn("write_file", first.tools)
+        self.assertIn("patch_file", first.tools)
+        self.assertIn("write_file", first.tools)
         self.assertIn("read_file", first.tools)
         self.assertIn("run_command", first.tools)
-        self.assertNotIn("patch_file", second.tools)
+        self.assertIn("patch_file", second.tools)
+        self.assertIn("write_file", second.tools)
         self.assertEqual(second.tools & {"run_tests", "run_command"}, {"run_tests", "run_command"})
         self.assertTrue(second.setup_recovery)
+
+    def test_setup_mutation_allowlist_only_contains_dependency_manifests(self):
+        for path in ("package.json", "requirements-dev.txt", "src/package.json"):
+            self.assertTrue(is_dependency_manifest_path(path))
+        for path in ("server.js", "index.html", "tests/test_app.py", "package.json.bak"):
+            self.assertFalse(is_dependency_manifest_path(path))
 
     def test_validation_policy_is_repair_then_patch(self):
         policy = build_validation_policy(

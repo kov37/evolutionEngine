@@ -27,6 +27,13 @@ REPAIR_INSPECTION_TOOLS = frozenset({
 # set because its missing target may be the environment itself.
 BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS - frozenset({"list_workspace", "list_dir"})
 MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
+DEPENDENCY_MANIFEST_NAMES = frozenset({
+    "package.json", "package-lock.json", "npm-shrinkwrap.json",
+    "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock",
+    "cargo.toml", "cargo.lock", "go.mod", "go.sum",
+    "gemfile", "gemfile.lock", "composer.json", "composer.lock",
+    "pom.xml", "build.gradle", "settings.gradle",
+})
 VALIDATION_TOOLS = frozenset({
     "run_tests", "run_command", "run_shell", "process_status", "stop_process",
     "diff_files", "git_diff",
@@ -44,6 +51,15 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
 def counts_as_repair_inspection(tool_name: str) -> bool:
     """Return whether a tool produced focused evidence for a repair turn."""
     return tool_name in REPAIR_INSPECTION_TOOLS
+
+
+def is_dependency_manifest_path(path: str) -> bool:
+    """Return true only for a conventional dependency/config manifest path."""
+    normalized = str(path or "").replace("\\", "/").rstrip("/")
+    name = normalized.rsplit("/", 1)[-1].lower()
+    return name in DEPENDENCY_MANIFEST_NAMES or (
+        name.startswith("requirements") and name.endswith(".txt")
+    )
 
 
 def orientation_action_tools(*, evidence_available: bool = False) -> frozenset[str]:
@@ -184,15 +200,18 @@ def build_validation_policy(
     tools = set(READ_TOOLS | MUTATION_TOOLS | {"diff_files", "git_diff", "process_status", "stop_process"})
     if setup_failure:
         # A setup failure never justifies changing product code or supplied
-        # evidence. The first recovery turn may inspect; it cannot guess-edit.
-        tools -= MUTATION_TOOLS
+        # evidence. A dependency manifest is the one bounded exception: the
+        # runner cannot install a declared dependency until that manifest
+        # exists, and dispatch applies the same path allowlist below.
+        tools |= MUTATION_TOOLS
         tools.update({"run_tests", "run_command"})
         if repair_inspection_used:
             tools -= READ_TOOLS
         prompt = (
             "A validation check failed because the execution/setup plane is incomplete. "
             "Use the available runner or explicit argv command to produce an assertion-bearing check. "
-            "Do not mutate the product, rewrite the supplied test, or merely print a value."
+            "You may create or update only a dependency manifest such as package.json; do not mutate "
+            "product code, rewrite the supplied test, or merely print a value."
         )
     else:
         tools -= READ_TOOLS - BEHAVIOR_REPAIR_READ_TOOLS

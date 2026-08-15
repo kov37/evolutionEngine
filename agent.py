@@ -1381,6 +1381,19 @@ You have this focused toolbelt: {offered_tool_names}.
             # setup recovery and ordinary validation must not rewrite the
             # artifact or supplied evidence.
             command_mutation_blocked = not repair_required or setup_failure
+            if setup_failure:
+                for call in msg.tool_calls:
+                    if call.function.name not in {"patch_file", "write_file"}:
+                        continue
+                    args = call.function.arguments or {}
+                    path = args.get("path", "")
+                    if not lifecycle_policy.is_dependency_manifest_path(path):
+                        key = _call_key(call.function.name, args)
+                        blocked_command_calls.add(key)
+                        blocked_command_reasons[key] = (
+                            "REJECTED: setup recovery permits mutation only of a dependency manifest "
+                            "(for example package.json); product and test paths remain frozen."
+                        )
             if command_mutation_blocked:
                 for call in msg.tool_calls:
                     if call.function.name not in {"run_command", "run_shell"}:

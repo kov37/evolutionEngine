@@ -2043,3 +2043,22 @@ deterministic suite adds coverage for the command boundary and passes 98
 tests. This is model/provider agnostic at the agent layer: any provider that
 cannot safely encode multiline tool arguments gets a bounded, explicit error
 instead of crashing its transport.
+
+### 2026-08-15 — allow only dependency manifests during setup recovery
+
+After the multiline parser fix, the live run reached the dependency phase
+without an HTTP crash. It discovered `node_modules/ws` was absent and correctly
+classified the check as setup, but the setup-plane mutation freeze also hid
+`write_file`/`patch_file`. The actor therefore could not create the missing
+`package.json`; it spent the remaining turns retrying an illegal product/setup
+path and the grader eventually passed only because the source artifacts were
+already correct.
+
+Setup recovery now exposes mutation tools with a narrow deterministic path
+allowlist. It may create or update conventional dependency manifests
+(`package.json`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`, and the
+equivalent ecosystem lock/manifests), while dispatch rejects product code,
+tests, and lookalike files. Shell commands remain mutation-blocked in setup
+recovery. The full deterministic suite passes 99 tests, and the next live run
+will verify the intended sequence: manifest mutation, dependency install,
+behavioral smoke test, and explicit completion.
