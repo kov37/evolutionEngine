@@ -2942,3 +2942,39 @@ actor may propose a focused test, deterministic policy must reject weak or
 self-serving tests, the 4B may critique coverage, and an independent grader
 must remain authoritative. Do not let generated tests replace supplied tests
 or become the sole proof of correctness.
+
+### 2026-08-15 — make the frozen SymPy runner executable on modern Python
+
+The SymPy 13878 source is from a Python-legacy commit and imports ABC names
+removed from `collections`. The first preflight confirmed that the code
+collects correctly under the host pytest only when the existing compatibility
+shim is loaded. The runner already used that shim in its independent grader,
+but the actor's own focused commands did not inherit it; this could turn a
+valid repair into a setup failure before the model reached product behavior.
+
+`swebench_runner.py` now creates the same shim in an external temporary
+directory and prepends that directory to the actor subprocess's `PYTHONPATH`.
+The candidate workspace remains a clean copy of the frozen repository; the
+shim is not an agent mutation and is never included in the official-style
+grader artifact. A direct preflight now collects `test_arcsin` successfully.
+This is verification-environment compatibility, not a SymPy-specific branch
+in NoveltyEngine's control loop.
+
+### 2026-08-15 — SymPy 13878 live run exposes a generic convergence stall
+
+The first live Qwen3.8-27B run against the unchanged SymPy 13878 fixture was
+stopped after it became unresponsive at actor iteration 18. The candidate had
+only two mutations, both irrelevant duplicate import edits; none of the twelve
+requested `_cdf` implementations had changed. It had recorded 13 validations,
+5 asynchronous 4B calls, and 13 stale-judgment observations. The runner and
+actor were idle with an open model HTTP connection, so this was a real
+transport/convergence stall rather than useful model computation. The exact
+candidate and `status.json` were preserved at
+`/var/folders/6t/fr_n2v_n7zb6nd_nq74t38240000gn/T/sympy-13878-novelty-1786820466-m3y0xgo0`.
+
+The trace also confirms that actor-critic test generation should not be the
+immediate next feature. First make repair convergence reliable when the actor
+has executable evidence: synchronous 4B triage must be a bounded gate, stale
+advice must never steer the actor, and irrelevant or duplicate mutations need
+generic quality checks. Generated tests can follow as a proposal/critique
+capability only after the independent verifier remains authoritative.

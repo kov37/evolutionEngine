@@ -28,6 +28,23 @@ BASE_DIR = ROOT / "assets" / "benchmarks" / "sympy-13878"
 BASE_COMMIT = "7b127bdf71a36d85216315f80c1b54d22b060818"
 
 
+def _compatibility_shim_text() -> str:
+    """Bridge the frozen Python-legacy checkout to the host interpreter."""
+    return (
+        "import collections, collections.abc\n"
+        "for _name in ('Mapping', 'MutableMapping', 'MutableSet', 'Sequence', 'Iterable', 'Callable'):\n"
+        "    if not hasattr(collections, _name): setattr(collections, _name, getattr(collections.abc, _name))\n"
+        "try:\n"
+        "    import setuptools._distutils as _distutils\n"
+        "    import sys\n"
+        "    sys.modules.setdefault('distutils', _distutils)\n"
+        "    import setuptools._distutils.version as _version\n"
+        "    sys.modules.setdefault('distutils.version', _version)\n"
+        "except ImportError:\n"
+        "    pass\n"
+    )
+
+
 def _load_instance() -> dict:
     try:
         import pyarrow.parquet as pq
@@ -66,20 +83,7 @@ def _run_tests(project: Path, test_patch: str) -> dict:
     # This historical SymPy commit predates Python 3.10's collections ABC
     # move. Keep the compatibility shim isolated to the grader environment;
     # it is not part of the candidate workspace or the agent's task.
-    (project / "sitecustomize.py").write_text(
-        "import collections, collections.abc\n"
-        "for _name in ('Mapping', 'MutableMapping', 'MutableSet', 'Sequence', 'Iterable', 'Callable'):\n"
-        "    if not hasattr(collections, _name): setattr(collections, _name, getattr(collections.abc, _name))\n"
-        "try:\n"
-        "    import setuptools._distutils as _distutils\n"
-        "    import sys\n"
-        "    sys.modules.setdefault('distutils', _distutils)\n"
-        "    import setuptools._distutils.version as _version\n"
-        "    sys.modules.setdefault('distutils.version', _version)\n"
-        "except ImportError:\n"
-        "    pass\n",
-        encoding="utf-8",
-    )
+    (project / "sitecustomize.py").write_text(_compatibility_shim_text(), encoding="utf-8")
     patch_path = project / ".swebench_test.patch"
     patch_path.write_text(test_patch, encoding="utf-8")
     applied = subprocess.run(["git", "apply", str(patch_path)], cwd=project, text=True,
@@ -121,6 +125,11 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
     work = Path(tempfile.mkdtemp(prefix=f"{run_id}-"))
     candidate = work / "candidate"
     shutil.copytree(BASE_DIR, candidate)
+    compatibility_dir = work / "compat"
+    compatibility_dir.mkdir()
+    (compatibility_dir / "sitecustomize.py").write_text(
+        _compatibility_shim_text(), encoding="utf-8"
+    )
     task = (
         "Work on this SymPy issue. Use the available tools to inspect and modify the repository, "
         "run focused tests, and call finish_task only after the implementation is complete and "
@@ -157,7 +166,14 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "Logistic,Nakagami,StudentT,UniformSum",
     ])
     started = time.time()
-    agent = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=3600)
+    agent_env = os.environ.copy()
+    existing_pythonpath = agent_env.get("PYTHONPATH")
+    agent_env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(compatibility_dir), existing_pythonpath) if part
+    )
+    agent = subprocess.run(
+        command, cwd=ROOT, env=agent_env, text=True, capture_output=True, timeout=3600
+    )
     elapsed = time.time() - started
 
     grade = Path(tempfile.mkdtemp(prefix=f"{run_id}-grade-")) / "candidate"
