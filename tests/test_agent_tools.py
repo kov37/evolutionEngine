@@ -356,6 +356,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("node -e", policy.prompt)
         self.assertIn("below .agentic/", policy.prompt)
 
+    def test_probe_quality_recovery_prefers_authoritative_test_runner(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=False, setup_failure=False,
+            repair_inspection_used=False, last_mutation_rejected=False,
+            validation_failures=0, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, probe_quality_recovery=True,
+        )
+        self.assertEqual(policy.tools, {"run_tests", "finish_task"})
+        self.assertIn("use run_tests now", policy.prompt)
+
     def test_validation_policy_allows_one_status_check_for_live_service(self):
         policy = build_validation_policy(
             validation_required=True, repair_required=False, setup_failure=False,

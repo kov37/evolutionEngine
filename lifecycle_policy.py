@@ -284,6 +284,7 @@ def build_validation_policy(
     accepted_validation_evidence: bool = False,
     background_process_active: bool = False,
     process_status_used: bool = False,
+    probe_quality_recovery: bool = False,
 ) -> ValidationActionPolicy | None:
     """Return one immutable policy, or ``None`` outside validation.
 
@@ -316,6 +317,15 @@ def build_validation_policy(
                 "the current change batch before validation; use mutations only for distinct unfinished "
                 "artifacts, then validate."
             )
+        if probe_quality_recovery:
+            # A successful command without an assertion is a verification-plan
+            # failure, not permission to edit the product. Prefer the trusted
+            # test runner for the next turn and keep completion visible so an
+            # already-proven state can still be handed off. This prevents a
+            # small actor from repeating print-only probes indefinitely while
+            # remaining task and model agnostic.
+            validation_tools = {"run_tests", "finish_task"}
+            batch_note = ""
         return ValidationActionPolicy(
             tools=frozenset(validation_tools),
             setup_recovery=False,
@@ -327,6 +337,8 @@ def build_validation_policy(
                 "a single-line node -e or python -c command). Keep every tool argument single-line. "
                 "If a helper file is clearer, write it only below .agentic/ and run that helper; "
                 "do not edit product or supplied test files." + batch_note
+                + (" The previous executable command lacked an assertion; use run_tests now instead of "
+                   "another print-only or version probe." if probe_quality_recovery else "")
                 + (" One process_status check is available for the active managed service; then run the behavioral check."
                    if background_process_active and not process_status_used else "")
             ),

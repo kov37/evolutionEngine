@@ -1003,6 +1003,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     last_validation_failure = ""
     last_repair_packet = ""
     validation_failures_total = 0
+    probe_quality_recovery_pending = False
     repair_mode_entries = 0
     repair_mutations = 0
     revalidation_attempts = 0
@@ -1405,6 +1406,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 accepted_validation_evidence=bool(validation_evidence),
                 background_process_active=bool(active_background_handles()),
                 process_status_used=process_status_used,
+                probe_quality_recovery=(
+                    probe_quality_recovery_pending
+                    and _has_test_artifacts(workspace_listing)
+                ),
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
             gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
@@ -1978,6 +1983,12 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     first_validation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first validation] {first_validation_elapsed:.3f}s")
             if capability == "VALIDATE" or phase_validation:
+                if probe_quality_recovery_pending and tool_name == "run_tests":
+                    # The recovery contract has now been exercised. Whether
+                    # the suite passes or fails, let the normal validation
+                    # state machine classify that authoritative result on the
+                    # next turn instead of keeping the one-shot lock forever.
+                    probe_quality_recovery_pending = False
                 if protected_edit_recovery_pending and tool_name in {
                     "run_tests", "run_command", "run_shell",
                 }:
@@ -2035,10 +2046,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             repair_turns_used = 0
             repair_recovery_mode = False
             repair_inspection_used = False
+            probe_quality_recovery_pending = _has_test_artifacts(workspace_listing)
             messages.append({"role": "system", "content": (
                 "Probe-quality recovery: the application check executed, but it did not explicitly "
                 "assert every required response shape or interface. This is not a product defect. "
-                "Improve or replace the validation command, rerun it, and do not patch the product."
+                "Use the trusted test runner on the next turn, rerun it, and do not patch the product."
             )})
             print("⚠️ [probe-quality recovery] reopening behavioral validation without product repair")
         if turn_tool_plane_failure and not turn_validation_failed:
