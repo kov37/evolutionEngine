@@ -1672,6 +1672,23 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
         blocked_command_calls = set()
         blocked_command_reasons = {}
+        blocked_mutation_reasons = {}
+        if (novelty_action_gate and novelty_context is not None
+                and _novelty_progress_tool_names(novelty_context) is not None):
+            # A progress gate is asking for product state change, not another
+            # temporary verifier. Keep helper creation legal during ordinary
+            # validation, but do not let a helper write satisfy this specific
+            # product-progress boundary.
+            for call in turn_calls:
+                if call.function.name not in {"write_file", "patch_file"}:
+                    continue
+                path = (call.function.arguments or {}).get("path", "")
+                if lifecycle_policy.is_validation_helper_path(path):
+                    blocked_mutation_reasons[_call_key(call.function.name, call.function.arguments)] = (
+                        "REJECTED: the novelty progress gate requires a product mutation; validation "
+                        "helpers below .agentic/ cannot satisfy this turn. Patch the implicated product "
+                        "artifact or call finish_task if it is already complete."
+                    )
         if orientation_recovery_active and orientation_evidence_available:
             for call in turn_calls:
                 if call.function.name in {"run_command", "run_shell"}:
@@ -1725,6 +1742,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             blocked_mutation_paths=blocked_mutation_paths,
             blocked_command_calls=blocked_command_calls,
             blocked_command_reasons=blocked_command_reasons,
+            blocked_mutation_reasons=blocked_mutation_reasons,
         )
 
         # Proactive validation hook: when the actor writes a clearly named
@@ -2174,7 +2192,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 }
                 novelty_context.observe(
                     iteration, tool_name, args, tmsg["content"],
-                    mutation=capability == "MUTATE",
+                    mutation=(
+                        capability == "MUTATE"
+                        and not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                        and not tmsg["content"].startswith(("ERROR:", "REJECTED:"))
+                    ),
                     validation=capability == "VALIDATE" or phase_validation,
                 )
             print(f"🧬 [novelty context] {novelty_context.render_for_model()}")

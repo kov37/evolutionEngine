@@ -3230,3 +3230,22 @@ unchanged for failures without safe localization. A regression test covers the
 new prompt boundary; deterministic coverage is now 143 tests and 35 subtests.
 Run the frozen benchmark from the resulting commit before changing the policy
 again.
+
+The rerun from `9b34f4d` validated the compact repair path. The source-backed
+repair prompt was 2,207 tokens (down from 7,085), and the actor made a
+targeted repair instead of timing out. It still repaired only its temporary
+`.agentic/validate_cdf.py` helper, then exhausted the 16-turn budget before a
+product mutation; the independent grade remained 19/20 with zero requested
+`_cdf` methods. The run took 619.5 seconds, with three recorded mutations and
+seven validations. This is a latency/context improvement, not yet a capability
+pass.
+
+The next generic guard is now implemented: when the novelty progress gate is
+active, a successful write or patch below the reserved `.agentic/` validation
+area cannot count as product progress. Dispatch returns a clear rejection and
+the novelty ledger ignores rejected/helper mutations when deciding whether the
+actor has progressed. Helper files remain legal during ordinary validation,
+so this does not remove useful test construction; it only prevents a temporary
+checker from satisfying a mutation-required boundary. Deterministic coverage
+is now 144 tests and 35 subtests. The next live run must verify this guard with
+the unchanged fixture.

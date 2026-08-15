@@ -655,6 +655,21 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertTrue(messages[0]["content"].startswith("REJECTED:"))
         self.assertIn("blocked", messages[0]["content"])
+
+    def test_dispatch_blocks_helper_mutation_when_progress_requires_product_change(self):
+        class Call:
+            class Function:
+                name = "write_file"
+                arguments = {"path": ".agentic/check.py", "content": "print('x')"}
+            function = Function()
+        messages = dispatch_tool_calls(
+            [Call()], {"write_file": lambda **_: "should not run"},
+            blocked_mutation_reasons={
+                ("write_file", '{"content":"print(\'x\')","path":".agentic/check.py"}'):
+                    "REJECTED: product mutation required"
+            },
+        )
+        self.assertEqual(messages[0]["content"], "REJECTED: product mutation required")
         self.assertEqual(
             _normalize_tool_arguments(
                 "run_command",

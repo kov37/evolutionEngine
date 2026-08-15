@@ -90,7 +90,7 @@ def _format_result(result) -> str:
 
 def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=None,
                         blocked_mutation_paths=None, blocked_command_calls=None,
-                        blocked_command_reasons=None):
+                        blocked_command_reasons=None, blocked_mutation_reasons=None):
     """Execute every tool call in one model turn. Returns a list of
     {"role": "tool", ...} messages ready to append to the conversation.
     Never raises — tool errors become an ERROR/REJECTED string in content.
@@ -117,6 +117,14 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
                 "edit was rejected. Repair the implementation, then run the validation command."
             )
             print(f"🚫 blocked mutation path {call.function.name}({call_arguments})")
+            messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
+            continue
+        mutation_key = _call_key(call.function.name, call.function.arguments)
+        if (blocked_mutation_reasons
+                and call.function.name in {"write_file", "patch_file"}
+                and mutation_key in blocked_mutation_reasons):
+            result = blocked_mutation_reasons[mutation_key]
+            print(f"🚫 blocked progress mutation {call.function.name}({call_arguments})")
             messages.append({"role": "tool", "tool_name": call.function.name, "content": result})
             continue
         if blocked_calls and _call_key(call.function.name, call.function.arguments) in blocked_calls:
