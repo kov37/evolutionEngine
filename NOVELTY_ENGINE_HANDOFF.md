@@ -1888,3 +1888,12 @@ Failure summaries now preserve bounded `File ...` frames for both unittest and
 function-style fallback results. This is generic error evidence, not a
 benchmark hint, and the cascade preflight asserts that the implicated source
 filename survives. The deterministic suite remains green at 89 tests.
+
+The live verification confirmed the improvement. Qwen used `read_file`
+directly on turn 2, patched on turn 3, exposed the second TypeError on turn 4,
+patched again on turn 5, and passed on turn 6. First mutation fell to 49.4
+seconds; the artifact passed and the orchestrator completed honestly. The
+frozen 3-turn scorecard remains unmet because the current outer loop permits
+one model response/action phase per iteration. The remaining optimization is
+therefore multi-action turn handling, not more orientation suppression or
+weaker validation.
