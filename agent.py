@@ -615,6 +615,7 @@ def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
 
 
 NO_ACTION_TOOL_FORCE_THRESHOLD = 2
+FORCED_ACTION_MAX_TOKENS = 4096
 
 
 def _force_tool_call_after_no_action(no_action_turns: int, backend: str) -> bool:
@@ -1221,7 +1222,7 @@ You have this focused toolbelt: {offered_tool_names}.
                     # provider translation at this boundary rather than
                     # leaking a llama.cpp-specific choice into the agent.
                     chat_kwargs["tool_choice"] = "required"
-                    chat_kwargs["max_tokens"] = 2048
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
                 if (orientation_recovery_active and orientation_evidence_available
                         and contract.requires("MUTATE") and backend == "llama-cpp"):
                     # The FSM has reduced the legal registry to mutation
@@ -1239,6 +1240,7 @@ You have this focused toolbelt: {offered_tool_names}.
                         f"🧰 [no-action escalation] {no_action_turns} prose-only turns; "
                         "requiring an executable tool call"
                     )
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:

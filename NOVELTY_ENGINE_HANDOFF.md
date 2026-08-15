@@ -2203,3 +2203,14 @@ real tool call; it is independent of model name and task wording, and applies
 only at the provider boundary that supports this structured control. The
 deterministic suite and preflight pass 110 tests. The interrupted real_app run
 is retained as evidence of the failure, not counted as a product result.
+
+### 2026-08-15 — give forced tool turns enough generation headroom
+
+The next real_app attempt showed that `tool_choice: "required"` alone did not
+solve the no-action stall. Qwen's llama.cpp server log reported a truncated
+tool-call parse, and the actor repeatedly returned at the output limit without
+an executable call. Forced-action requests now use a 4096-token response
+reserve, while ordinary turns keep their existing budget. This changes only
+the transport envelope for recovery/action-first turns; it does not encode the
+Todo task or a model name. The deterministic suite and preflight remain green
+at 110 tests.
