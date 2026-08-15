@@ -3049,3 +3049,14 @@ now preserves the configured executable's own `bin` directory with
 even when its interpreter is symlinked. The same short run exercised stale
 worker cancellation (`worker_busy_drops=1`) and still produced the six-method
 partial candidate before the bounded timeout.
+
+### 2026-08-15 — short environment-contract verification
+
+A six-iteration real-model check after the symlink correction confirmed the
+runner starts the unchanged SymPy checkout normally and the independent grader
+still reports 19/20 selected tests on the partial six-method candidate. The
+actor issued one workspace inspection, then its second Qwen request exceeded
+the deliberately short 20-second turn limit before it could issue a Python
+dependency probe. This is a clean bounded timeout and does not invalidate the
+environment correction; the direct contract probe above confirms that the
+actor environment resolves the configured `python`, `pip`, and `mpmath`.
