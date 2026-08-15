@@ -18,7 +18,7 @@ READ_TOOLS = frozenset({
 # repair-inspection allowance; otherwise a harmless list_workspace call can
 # block the read_file needed to understand the reported failure.
 REPAIR_INSPECTION_TOOLS = frozenset({
-    "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
+    "read_file", "search_file", "list_symbols", "grep_dir",
 })
 # Once a behavioral failure is available, broad inventory is a poor next
 # action: the failure packet already gives the actor a target. Keep focused

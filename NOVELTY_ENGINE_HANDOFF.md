@@ -1857,3 +1857,15 @@ inspection tools because the missing fact may be environmental.
 The deterministic suite passes 89 tests. The next live run should show a
 targeted read on the first repair turn and reduce the turn count without
 weakening setup recovery.
+
+The next live run showed that `find_files` has the same distinction as
+inventory: it locates candidate paths but does not expose implementation
+contents. Counting it as the one inspection allowance again blocked the
+subsequent `read_file`, and the actor eventually patched only after recovery,
+leaving the second defect unresolved within the budget.
+
+`find_files` is now classified as localization rather than repair inspection.
+Only tools that return source evidence consume that allowance. The
+deterministic suite remains green at 89 tests. This is the third preflight
+edge case found through the test cycle: inventory, localization, and actual
+source inspection are separate control-plane events.

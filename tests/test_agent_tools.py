@@ -175,6 +175,7 @@ class KernelToolTests(unittest.TestCase):
     def test_inventory_does_not_consume_repair_inspection_budget(self):
         self.assertFalse(counts_as_repair_inspection("list_workspace"))
         self.assertFalse(counts_as_repair_inspection("list_dir"))
+        self.assertFalse(counts_as_repair_inspection("find_files"))
         self.assertTrue(counts_as_repair_inspection("read_file"))
         self.assertTrue(counts_as_repair_inspection("search_file"))
 
