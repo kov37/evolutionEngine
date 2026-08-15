@@ -3060,3 +3060,14 @@ the deliberately short 20-second turn limit before it could issue a Python
 dependency probe. This is a clean bounded timeout and does not invalidate the
 environment correction; the direct contract probe above confirms that the
 actor environment resolves the configured `python`, `pip`, and `mpmath`.
+
+### 2026-08-15 — cascade remains a strict real-model pass after runner fixes
+
+The frozen cascading repair benchmark was rerun with Qwen3.8-27B through
+llama.cpp, the asynchronous qwen3.5:4b worker, action critic, and action gate.
+It passed unchanged in 3 iterations and 37.1 seconds: one product mutation,
+two accepted validations including the deterministic automatic retest, an
+independent artifact pass, and a valid completion signal. The monitor is
+`state/benchmark/agentic/monitor-cascading_loop-novelty-1786822609902261000.jsonl`.
+The worker produced stale advisory observations on this short run, but the
+deterministic FSM and completion verifier remained authoritative.
