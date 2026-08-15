@@ -246,9 +246,9 @@ def is_inspection_command(command) -> bool:
     if not code:
         return False
     reads_file = any(marker in code for marker in {
-        "readfilesync", "readfile(", "read_text", "read_text(", "open(",
+        "readfilesync", "readfile(", "read_text", "read_text(",
         "fs.readfile", "fs.readfilesync",
-    })
+    }) or bool(re.search(r"(?<![a-z0-9_.])open\s*\(", code, re.I))
     prints_result = any(marker in code for marker in {
         "console.log", "console.error", "print(", "puts ", "p ",
     })

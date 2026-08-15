@@ -114,6 +114,17 @@ class AdversarialPreflightTests(unittest.TestCase):
             "OBSERVE",
         )
 
+    def test_http_urlopen_is_not_mistaken_for_file_open(self):
+        command = [
+            "python3", "-c",
+            "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8765'); print(r.read())",
+        ]
+        self.assertFalse(is_inspection_command(command))
+        self.assertEqual(
+            action_governor.classify("run_command", {"command": command}),
+            "VALIDATE",
+        )
+
     def test_dynamic_interpreter_writes_are_mutations(self):
         commands = [
             ["node", "-e", "fs.promises.writeFile('index.html','x')"],

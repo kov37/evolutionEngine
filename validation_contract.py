@@ -279,14 +279,6 @@ class ValidationContract:
                 None,
                 (),
             )
-        if tool_name in {"run_command", "run_shell"} and is_inspection_command(raw_command):
-            return (
-                False,
-                "the command only inspected files or reported environment metadata",
-                "run an executable behavioral assertion or client exchange instead of listing or printing source",
-                None,
-                (),
-            )
         command = raw_command
         if isinstance(command, list):
             command = " ".join(str(x) for x in command)
@@ -322,6 +314,18 @@ class ValidationContract:
                 False,
                 "the executable behavioral check reported a failure",
                 "inspect the failed check output and repair the implicated behavior, then rerun the check",
+                None,
+                (),
+            )
+        # Only classify a successful readback as weak evidence after checking
+        # for an explicit checker failure. A urllib/curl probe can read an
+        # artifact while also reporting failed behavioral assertions; the
+        # failure must win so the actor receives a repair packet.
+        if tool_name in {"run_command", "run_shell"} and is_inspection_command(raw_command):
+            return (
+                False,
+                "the command only inspected files or reported environment metadata",
+                "run an executable behavioral assertion or client exchange instead of listing or printing source",
                 None,
                 (),
             )

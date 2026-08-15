@@ -2502,3 +2502,15 @@ Validation now recognizes explicit checker-failure summaries (`AssertionError`,
 zero. Those results enter product repair; file readbacks and genuinely weak
 probes remain in validation recovery. The distinction is based on the observed
 failure shape, not on the task or model.
+
+### 2026-08-15 — avoid confusing HTTP `urlopen` with filesystem inspection
+
+The failed-check rerun also exposed a classifier false positive: the
+inspection heuristic looked for the substring `open(`, which appears inside
+`urllib.request.urlopen(`. A real HTTP probe could therefore be downgraded to
+file inspection before its response was assessed.
+
+The inline-reader rule now requires a function-boundary match for Python's
+filesystem `open`, while preserving `readFileSync`, `read_text`, and the other
+file-read forms. A standard-library HTTP `urlopen` probe is classified as
+validation. The adversarial suite now passes 123 tests.
