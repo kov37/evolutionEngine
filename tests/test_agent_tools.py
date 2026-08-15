@@ -213,11 +213,13 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(setup["success"])
         self.assertFalse(setup["evidence"])
         self.assertFalse(setup["setup_only"])
+        self.assertEqual(setup["plane"], "setup")
         observed = assertion_driven_tool_contract(
             "run_command", {"command": ["node", "probe.cjs"]},
             "Exit code: 0\nreceived pong; assertion passed\n",
         )
         self.assertTrue(observed["evidence"])
+        self.assertEqual(observed["plane"], "verification")
 
     def test_failure_feedback_is_bounded_and_actionable(self):
         contract = from_task("Repair the application and run its focused test.")

@@ -53,19 +53,20 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
     text = str(result_content or "")
     if text.startswith(("ERROR:", "REJECTED:")):
         return {"success": False, "evidence": False, "setup_only": False,
-                "reason": "tool execution failed"}
+                "plane": "non_evidence", "reason": "tool execution failed"}
     args = arguments or {}
     if tool_name == "run_tests":
         passed = text.startswith("(True,")
         return {"success": passed, "evidence": passed, "setup_only": False,
+                "plane": "verification" if passed else "non_evidence",
                 "reason": "test runner result" if passed else "test runner failed"}
     if tool_name in {"run_command", "run_shell"}:
         if args.get("background") is True or text.startswith("Started background process."):
             return {"success": True, "evidence": False, "setup_only": True,
-                    "reason": "background process setup is not behavioral evidence"}
+                    "plane": "setup", "reason": "background process setup is not behavioral evidence"}
         if "Exit code: 0" not in text:
             return {"success": False, "evidence": False, "setup_only": False,
-                    "reason": "command did not exit successfully"}
+                    "plane": "non_evidence", "reason": "command did not exit successfully"}
         command = args.get("command", "")
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
@@ -75,14 +76,17 @@ def assertion_driven_tool_contract(tool_name, arguments, result_content):
             f"{command} {text}", re.I,
         ) or re.search(r"\b(?:curl|wget|urllib)\b\s+[^\n]*[/]", str(command), re.I))
         return {"success": True, "evidence": evidence, "setup_only": False,
+                "plane": "verification" if evidence else "setup",
                 "reason": "behavioral evidence present" if evidence else
                           "zero exit code without a behavioral assertion"}
     if tool_name == "process_status":
         running = "RUNNING" in text
         return {"success": running, "evidence": False, "setup_only": True,
+                "plane": "setup",
                 "reason": "process readiness is setup, not behavioral evidence" if running else
                           "process is not running"}
     return {"success": False, "evidence": False, "setup_only": False,
+            "plane": "non_evidence",
             "reason": "tool does not provide executable behavioral evidence"}
 
 

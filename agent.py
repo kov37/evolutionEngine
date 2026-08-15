@@ -994,7 +994,11 @@ You have this focused toolbelt: {offered_tool_names}.
                 # still force an implementation mutation before probing again.
                 setup_failure = _is_validation_setup_failure(last_repair_packet)
                 if setup_failure:
-                    validation_tools.update({"run_tests", "run_command", "run_shell"})
+                    # Setup recovery may select a runner or install a declared
+                    # dependency, but it must not receive an unrestricted
+                    # shell escape. Inspection and validation remain explicit
+                    # argv commands through run_command.
+                    validation_tools.update({"run_tests", "run_command"})
                 elif repair_inspection_used:
                     # Give the actor one targeted look at the reported code,
                     # then remove read-only escape hatches until it mutates.

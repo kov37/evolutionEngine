@@ -1282,3 +1282,15 @@ the actor is directed toward the next real probe instead of editing product
 files. The deterministic suite passes 58 tests. The WebSocket benchmark remains
 open: its actor made a valid server mutation but timed out before completing
 the independent frontend and runtime checks.
+
+### 2026-08-15 — explicit validation-plane separation
+
+The validation contract now labels executable outcomes as `setup`,
+`verification`, or `non_evidence` in addition to its existing acceptance
+decision. Successful dependency installation, process startup, and zero-exit
+commands without assertions are setup/non-evidence; a passing test or an
+asserted request/round-trip is verification. During setup recovery the actor
+can still use explicit argv commands to select a runner or install a declared
+dependency, but unrestricted `run_shell` is withheld along with file mutation
+tools. This is an engine policy, not a model or benchmark rule. Added plane
+classification regression checks; the deterministic suite passes 58 tests.
