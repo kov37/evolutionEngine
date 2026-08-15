@@ -2666,3 +2666,20 @@ looking for positive failure markers. A positive error count still fails the
 contract. The focused suite now passes 127 tests and preflight is green. The
 cascading fixture remains unchanged and must be rerun from the new commit to
 verify the full two-repair/clean-exit workflow.
+
+### 2026-08-15 — cascading repair succeeds; strict iteration score remains open
+
+The unchanged cascading fixture was rerun from `354997e` with Qwen3.8-27B.
+The actor ran the broken test, inspected both supplied files, repaired the
+missing parenthesis, reran the test, repaired the string divisor, reran the
+test, and reached a clean `1 passed, 0 failed, 0 errors` result. The independent
+grader accepted the final artifact and `finish_task` was called. No supplied
+test file was changed.
+
+The run used 6 model iterations, 7 tool calls, 2 product mutations, and 3
+validations in 116 seconds. The benchmark record is intentionally marked
+`passed: false` because this fixture's strict workflow score requires raw
+iterations `<= 3`; the artifact and handoff themselves passed. Do not weaken or
+rewrite that fixture to make the metric green. The remaining engineering work
+is reducing turns for sequential failures through generic orchestration or
+better action batching, while preserving the visible cascading evidence.
