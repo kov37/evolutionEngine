@@ -157,10 +157,14 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
 
     Prefer this for tests and project commands. Unlike ``run_shell`` it does
     not invoke a shell, so quoting, pipes, redirects, and shell metacharacters
-    cannot change the command's meaning.
+    cannot change the command's meaning. Keep every argv token on one line;
+    use an escaped ``\\n`` or a short one-line interpreter command instead of
+    embedding a literal newline in a tool argument.
     """
     if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
         return "ERROR: command must be a non-empty list of strings."
+    if any("\n" in token or "\r" in token for token in command):
+        return "ERROR: command arguments must be single-line strings; use an escaped newline or a one-line probe."
     try:
         timeout = max(1, min(int(timeout), MAX_COMMAND_TIMEOUT_SECONDS))
         workdir = confine(cwd)

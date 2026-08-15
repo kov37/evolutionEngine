@@ -2024,3 +2024,22 @@ reset) once, with a one-second delay. Refused connections, DNS failures, and
 the second disconnect remain terminal, so a dead provider cannot create an
 overnight retry storm. The deterministic suite passes 97 tests. The next live
 run verifies whether this recovers the final smoke-test turn.
+
+### 2026-08-15 — prevent malformed multiline shell tool calls at the provider boundary
+
+The bounded retry correctly caught the transient disconnect, but the retry
+failed for the same underlying reason. The MLX server log showed that Qwen's
+tool parser received a `run_command` argument containing literal newlines in a
+multiline `node -e` smoke test. Its parser raised `SyntaxError: unterminated
+string literal` while converting the tool call, closed the HTTP connection,
+and left the model server healthy. This was a serialization failure, not a
+context-size failure.
+
+The command tool contract now rejects literal newline characters in argv
+tokens and explains that short probes must be one-line commands. Validation
+guidance carries the same rule, while retaining the option to create a proper
+helper during product mutation when that is actually part of the task. The
+deterministic suite adds coverage for the command boundary and passes 98
+tests. This is model/provider agnostic at the agent layer: any provider that
+cannot safely encode multiline tool arguments gets a bounded, explicit error
+instead of crashing its transport.

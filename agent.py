@@ -954,8 +954,9 @@ You have this focused toolbelt: {offered_tool_names}.
                     "diff the file. For APIs, send representative requests and assert status codes "
                     "and response structure; for CLIs, check exit status and output; for libraries, "
                     "run the focused regression test. If a temporary probe is needed, run it inline "
-                    "with run_command/run_shell (for example, node -e or python -c); do not create a "
-                    "new helper file during validation. Record failures and repair from their evidence."
+                    "with run_command/run_shell (for example, a single-line node -e or python -c "
+                    "command). Keep tool arguments single-line; do not create a new helper file during "
+                    "validation. Record failures and repair from their evidence."
                     + batch_instruction + " "
                     + validation_plan.render() + "\n"
                     + ("Required interfaces still without accepted evidence: " + ", ".join(uncovered) + "\n"
@@ -1328,8 +1329,9 @@ You have this focused toolbelt: {offered_tool_names}.
                 "content": (
                     "Do not return another explanation. Take one executable action now: use "
                     + next_action
-                    + "; for a temporary validation probe, use an inline run_command/run_shell "
-                    "rather than creating a helper file; call finish_task only after verification."
+                    + "; for a temporary validation probe, use a single-line inline run_command/run_shell "
+                    "rather than creating a helper file; keep tool arguments single-line; call finish_task "
+                    "only after verification."
                 ),
             })
             continue

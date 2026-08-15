@@ -176,7 +176,8 @@ def build_validation_policy(
                 "Validation phase tool restriction: only validation tools are available this turn. "
                 "Run a focused test or executable check and inspect its result. If the check needs "
                 "a temporary probe, execute it inline through run_command/run_shell (for example, "
-                "node -e or python -c); do not create a new helper file with a write tool." + batch_note
+                "a single-line node -e or python -c command). Keep every tool argument single-line; "
+                "do not create a new helper file with a write tool." + batch_note
             ),
         )
 
