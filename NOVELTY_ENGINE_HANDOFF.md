@@ -2753,3 +2753,19 @@ pytest collection is not currently a valid signal because the frozen SymPy
 collection on Python 3.14; the engine suite remains green when selected
 explicitly. The next step is a fresh real Todo run to measure whether the
 checkpoint produces a patch instead of another rejected read.
+
+### 2026-08-15 — checkpoint verified; preserve managed-service handles
+
+The fresh Todo rerun verified the stale-action fix: after the POST timeout,
+the actor made a targeted `patch_file` mutation on the next repair turn. The
+orchestrator automatically stopped the old server and relaunched it, but the
+restart allocated a new public process handle. The actor still had the old
+handle in its context and a later status call therefore observed the expected
+stopped predecessor, creating a false validation failure.
+
+Managed service restart now preserves the original handle identity while
+replacing the underlying process record. Existing actor context remains valid,
+and a status call after restart observes the refreshed process rather than a
+stale predecessor. This is a generic process-lifecycle invariant. The focused
+suite passes 107 tests and the modified modules compile cleanly; rerun the
+unchanged Todo task to verify the full repair-to-validation path.

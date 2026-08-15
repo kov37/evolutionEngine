@@ -8,6 +8,7 @@ from unittest.mock import patch
 from agent import FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _repair_checkpoint_messages, _retryable_provider_disconnect, _terminal_provider_error, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
+import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
 from kernel.io_tools import patch_file, validate_python_syntax
@@ -59,6 +60,31 @@ class KernelToolTests(unittest.TestCase):
         ))
         self.assertFalse(_is_blocked_repair_action("read_file", "ERROR: file not found"))
         self.assertFalse(_is_blocked_repair_action("run_command", "ERROR: tool unavailable"))
+
+    def test_managed_service_restart_preserves_handle_identity(self):
+        class RunningProcess:
+            def poll(self):
+                return None
+
+        item = {
+            "proc": RunningProcess(),
+            "log_path": "/tmp/old.log",
+            "command": ["python3", "server.py"],
+            "cwd": "/tmp/workspace",
+            "shell": False,
+        }
+        with patch.object(exec_tools, "_BACKGROUND", {"proc-stable": item}), \
+             patch.object(exec_tools, "stop_process", return_value="Stopped process proc-stable"), \
+             patch.object(
+                 exec_tools,
+                 "_start_background",
+                 return_value="Started background process.\nHandle: proc-stable\nPID: 7",
+             ) as start:
+            result = exec_tools.restart_background("proc-stable")
+        start.assert_called_once_with(
+            ["python3", "server.py"], "/tmp/workspace", False, handle="proc-stable"
+        )
+        self.assertIn("Handle: proc-stable", result)
 
     def test_repair_checkpoint_drops_stale_action_tail_and_keeps_last_mutation(self):
         mutation = {"role": "assistant", "content": "write implementation"}

@@ -35,7 +35,7 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]"
 
 
-def _start_background(command, cwd, shell):
+def _start_background(command, cwd, shell, handle=None):
     log = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix=".agent-process-", suffix=".log",
         dir=get_root(), delete=False,
@@ -46,7 +46,7 @@ def _start_background(command, cwd, shell):
         start_new_session=True,
     )
     log.close()
-    handle = "proc-" + uuid.uuid4().hex[:12]
+    handle = handle or ("proc-" + uuid.uuid4().hex[:12])
     with _BACKGROUND_LOCK:
         _BACKGROUND[handle] = {
             "proc": proc,
@@ -136,7 +136,11 @@ def restart_background(handle: str) -> str:
     if stopped.startswith("ERROR:"):
         return stopped
     try:
-        started = _start_background(command, cwd, shell)
+        # Preserve the public handle across a restart. The actor may already
+        # have the original handle in its context; changing it creates a
+        # false validation failure when the next status call inspects the
+        # intentionally stopped predecessor.
+        started = _start_background(command, cwd, shell, handle=handle)
     except OSError as exc:
         return f"ERROR: could not restart process {handle}: {exc}"
     return f"{stopped}\n{started}"
