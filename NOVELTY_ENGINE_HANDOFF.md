@@ -1475,3 +1475,19 @@ explicitly opt-in. This makes the planned ablation honest: novelty context can
 observe and record events without changing the actor's legal tools. Added
 coverage for both disabled and enabled gate behavior; the deterministic suite
 passes 68 tests.
+
+### 2026-08-15 — frozen cascade 4B ablation
+
+With the same Qwen3.8 actor, MLX server, frozen cascading fixture, and 18-turn
+budget, three conditions all repaired and independently verified the artifact
+in 9 actor turns: deterministic/no 4B **170.3s**, 4B observation-only
+**172.4s**, and 4B action gate **170.9s**. The observation and gated runs each
+made 3 worker calls and recorded 9 stale judgments. None met the historical
+three-actor-turn scorecard, but all reached lifecycle `COMPLETE` and passed the
+independent grader.
+
+This task provides no evidence that the 4B improves capability or speed. Keep
+the worker as optional telemetry/critic infrastructure for future tasks, but
+keep action authority disabled by default and out of the critical path. The
+deterministic FSM and validation policy are the production control plane until
+a frozen benchmark demonstrates a measurable worker benefit.
