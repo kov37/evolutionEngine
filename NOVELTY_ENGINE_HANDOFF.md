@@ -2859,3 +2859,23 @@ not produce a repeated-action signal; it did not add latency or authority.
 The earlier failed verifier result was environmental contamination from the
 scene preview occupying port 18765, not a product or engine failure. The next
 benchmark should use a fresh isolated port policy before testing another task.
+
+### 2026-08-15 — WebSocket recovery regression passes
+
+The unchanged WebSocket chat benchmark was rerun after the repair-checkpoint
+changes. The actor first inspected the two supplied files, created the server
+and browser fixes, installed the declared `ws` dependency, and wrote a smoke
+helper. Its first smoke invocation ran before the server was started; the
+resulting blocked start attempt exercised the new rejected-action checkpoint.
+The actor then rewrote the server, started it, inspected the managed process,
+and ran the complete smoke suite.
+
+All required checks passed: two clients connected, ping/pong worked, sender and
+peer received the shared payload, malformed input did not crash the server, and
+broadcast survived a peer disconnect. The benchmark passed independently in
+12 model iterations, 15 tool calls, 1 repair mutation, 6 accepted validations,
+455.7 seconds, with 3 asynchronous 4B calls and 7 stale-judgment observations.
+This is a capability pass, not a speed improvement over the earlier 11-turn /
+399-second run; the extra time came from the actor's setup-before-server-smoke
+mistake. The important evidence is that the generic checkpoint recovered it
+without altering the fixture or grader.
