@@ -3071,3 +3071,16 @@ independent artifact pass, and a valid completion signal. The monitor is
 `state/benchmark/agentic/monitor-cascading_loop-novelty-1786822609902261000.jsonl`.
 The worker produced stale advisory observations on this short run, but the
 deterministic FSM and completion verifier remained authoritative.
+### 2026-08-15 — bound independent grading of hanging candidates
+
+The 20-iteration SymPy run reached its budget with the same partial six-method
+candidate, but the independent grader then hung in `test_arcsin`: that is the
+known behavior being repaired, and the candidate had not implemented Arcsin's
+CDF. The runner previously allowed the grader subprocess 900 seconds, making a
+single failing/hanging test dominate the entire cycle.
+
+`swebench_runner.py` now gives grading its own configurable wall-clock budget
+(`--grade-timeout`, default 120 seconds), catches `TimeoutExpired`, and records
+`timed_out`, `timeout_seconds`, and return code 124 in the report. This keeps
+the agent and grader failure planes separate and is generic harness behavior,
+not a SymPy-specific verdict.

@@ -79,7 +79,7 @@ def _prepare_base() -> None:
     archive.unlink(missing_ok=True)
 
 
-def _run_tests(project: Path, test_patch: str) -> dict:
+def _run_tests(project: Path, test_patch: str, timeout: float = 120.0) -> dict:
     # This historical SymPy commit predates Python 3.10's collections ABC
     # move. Keep the compatibility shim isolated to the grader environment;
     # it is not part of the candidate workspace or the agent's task.
@@ -106,10 +106,22 @@ def _run_tests(project: Path, test_patch: str) -> dict:
     env["PYTHONPATH"] = str(project)
     command = [sys.executable, "-m", "pytest", "-q",
                "sympy/stats/tests/test_continuous_rv.py", "-k", tests]
-    result = subprocess.run(command, cwd=project, env=env, text=True,
-                            capture_output=True, timeout=900)
+    try:
+        result = subprocess.run(command, cwd=project, env=env, text=True,
+                                capture_output=True, timeout=max(1.0, float(timeout)))
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "patch_applied": True,
+            "returncode": 124,
+            "passed": False,
+            "timed_out": True,
+            "timeout_seconds": float(timeout),
+            "stdout": (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else "",
+            "stderr": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
+        }
     return {"patch_applied": True, "returncode": result.returncode,
-            "passed": result.returncode == 0, "stdout": result.stdout[-12000:],
+            "passed": result.returncode == 0, "timed_out": False,
+            "timeout_seconds": float(timeout), "stdout": result.stdout[-12000:],
             "stderr": result.stderr[-4000:]}
 
 
@@ -118,7 +130,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         chat_timeout: float | None = None, action_gate: bool = False,
         structured_summary: bool = False, backend: str = "ollama",
         base_url: str = "http://127.0.0.1:8080/v1",
-        action_first: bool = False) -> dict:
+        action_first: bool = False, grade_timeout: float = 120.0) -> dict:
     instance = _load_instance()
     _prepare_base()
     run_id = f"sympy-13878-{mode}-{int(time.time())}"
@@ -190,7 +202,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
 
     grade = Path(tempfile.mkdtemp(prefix=f"{run_id}-grade-")) / "candidate"
     shutil.copytree(candidate, grade)
-    grading = _run_tests(grade, instance["test_patch"])
+    grading = _run_tests(grade, instance["test_patch"], timeout=grade_timeout)
     report = {
         "run_id": run_id, "mode": mode, "primary_model": primary_model,
         "worker_model": worker_model, "base_commit": BASE_COMMIT,
@@ -201,6 +213,7 @@ def run(mode: str, iterations: int, primary_model: str | None = None,
         "backend": backend,
         "base_url": base_url,
         "action_first": action_first,
+        "grade_timeout": grade_timeout,
         "fail_to_pass": json.loads(instance["FAIL_TO_PASS"]),
         "pass_to_pass": json.loads(instance["PASS_TO_PASS"]),
         "elapsed_seconds": round(elapsed, 1), "agent_returncode": agent.returncode,
@@ -234,7 +247,9 @@ if __name__ == "__main__":
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--action-first", action="store_true",
                         help="Use the model-neutral initial action contract.")
+    parser.add_argument("--grade-timeout", type=float, default=120.0,
+                        help="Maximum seconds for the independent grader subprocess.")
     args = parser.parse_args()
     run(args.mode, args.iterations, args.primary_model, args.worker_model,
         args.action_critic, args.chat_timeout, args.action_gate, args.structured_summary,
-        args.backend, args.base_url, args.action_first)
+        args.backend, args.base_url, args.action_first, args.grade_timeout)
