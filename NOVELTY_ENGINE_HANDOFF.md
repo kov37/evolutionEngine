@@ -2370,3 +2370,16 @@ Inspection-only, output-only, zero-assertion, and setup-only results are now
 classified as probe-quality failures. They keep the FSM in validation, reopen
 an executable validation tool, and do not authorize product mutation. Actual
 assertion failures continue to enter repair.
+
+### 2026-08-15 — force a tool call at repair-recovery entry
+
+The latest real_app run localized the genuine POST timeout and reached the
+bounded repair-recovery state, but the actor spent its remaining turns in
+prose before emitting the targeted patch. Repair recovery already has a narrow
+mutation/finish registry, so waiting for the general no-action threshold adds
+no useful choice.
+
+When the FSM enters repair recovery under llama.cpp, the transport now requires
+an executable tool call immediately and gives it the same 4096-token reserve as
+the initial-action path. This is provider-boundary control, independent of task
+or model name; ordinary repair turns remain unchanged.

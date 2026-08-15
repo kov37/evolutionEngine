@@ -47,6 +47,9 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "ollama"))
         self.assertGreaterEqual(FORCED_ACTION_MAX_TOKENS, 2048)
 
+    def test_repair_recovery_has_a_direct_tool_call_path(self):
+        self.assertTrue(_force_tool_call_after_no_action(2, "llama-cpp"))
+
     def test_llama_adapter_sends_explicit_thinking_switch(self):
         captured = {}
 

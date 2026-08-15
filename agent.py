@@ -1251,6 +1251,14 @@ You have this focused toolbelt: {offered_tool_names}.
                         "requiring an executable tool call"
                     )
                     chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                if repair_recovery_mode and repair_required and backend == "llama-cpp":
+                    # Recovery has already exhausted the ordinary repair
+                    # turns and the registry contains only a targeted
+                    # mutation/finish surface. Do not spend two more prose
+                    # turns asking the actor to choose from that surface.
+                    chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                    print("🧰 [repair recovery escalation] requiring a targeted tool call")
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
