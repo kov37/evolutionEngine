@@ -352,10 +352,25 @@ class NoveltyContext:
         with self._lock:
             started = self._active_event is not None and self._active_event.event_id > before
             fallback = self.last_judgment
+            checkpoint_event = next(
+                (event for event in reversed(self.events)
+                 if event.tool == "repair_checkpoint" and event.event_id > before),
+                None,
+            )
+            deterministic = (
+                self._checkpoint_fallback(checkpoint_event, checkpoint_event.result)
+                if checkpoint_event is not None else fallback
+            )
         if started:
             judgment = self.collect(wait=True, timeout=max(0.1, timeout))
         else:
             judgment = fallback
+        # The model may refine a known setup failure, but it may not turn
+        # deterministic setup evidence into a product diagnosis. This avoids
+        # hallucinated requirements such as inventing a pytest decorator when
+        # the runner itself is unavailable.
+        if deterministic.failure_class == "setup" and judgment.failure_class != "setup":
+            judgment = deterministic
         with self._lock:
             self._gate_judgment = judgment
         return judgment

@@ -390,6 +390,22 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(context.consume_gate_restrictions(), set())
         context.close()
 
+    def test_synchronous_triage_cannot_override_deterministic_setup_class(self):
+        def hallucinating_chat(**kwargs):
+            return _FakeResponse(
+                '{"phase":"repair","recommended_action":"patch_file",'
+                '"failure_class":"progress","next_action":"patch_file",'
+                '"diagnosis":"add a pytest decorator","confidence":0.99}'
+            )
+        context = NoveltyContext(chat_fn=hallucinating_chat, worker_interval=100)
+        judgment = context.synchronous_triage(
+            4, "repair", "No module named pytest; no tests discovered",
+            legal_actions=("run_command", "patch_file"),
+        )
+        self.assertEqual(judgment.failure_class, "setup")
+        self.assertEqual(context.consume_gate_restrictions(), {"write_file", "patch_file"})
+        context.close()
+
     def test_structured_checkpoint_survives_newer_stale_event(self):
         context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
         context.last_judgment = WorkerJudgment(

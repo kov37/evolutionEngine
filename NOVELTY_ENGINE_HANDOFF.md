@@ -1259,3 +1259,12 @@ orchestrator completion through `RECOVER -> COMPLETE`; its benchmark scorecard
 still reports false only because the actor needed 10 iterations rather than
 the benchmark's under-3 target. This is progress in correctness and lifecycle
 safety, but convergence speed remains an open optimization target.
+### 2026-08-15 — deterministic precedence over 4B triage
+
+The first real synchronous-gate run proved the gate could remove mutation
+tools for a setup failure, but it also exposed a trust boundary: the 4B
+hallucinated that a pytest decorator was required and reclassified a missing
+runner as a progress problem. The gate now gives deterministic setup evidence
+precedence. The 4B may refine the command or target, but it cannot convert a
+known setup/runner mismatch into a product defect. Added a regression test with
+a deliberately hallucinating worker; the suite passes 57 tests.
