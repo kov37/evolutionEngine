@@ -1491,3 +1491,10 @@ the worker as optional telemetry/critic infrastructure for future tasks, but
 keep action authority disabled by default and out of the critical path. The
 deterministic FSM and validation policy are the production control plane until
 a frozen benchmark demonstrates a measurable worker benefit.
+
+To make that demotion real, synchronous 4B triage is now invoked only when
+`--novelty-action-critic` or `--novelty-action-gate` is explicitly enabled.
+Plain `--novelty-context` records asynchronous events without waiting for or
+injecting a worker judgment. This removes the worker from the default latency
+path while preserving an experimental path for future ablations. Deterministic
+tests and compilation remain green (68 tests).

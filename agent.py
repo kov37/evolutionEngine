@@ -535,6 +535,11 @@ def _consume_worker_gate(novelty_action_gate, novelty_context):
     return novelty_context.consume_gate_restrictions()
 
 
+def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
+    """Keep synchronous 4B inference off the path unless explicitly requested."""
+    return bool(novelty_action_critic or novelty_action_gate)
+
+
 def _completion_ready(messages, task_type, validation_plan=None, validation_evidence=None, validation_criteria_hits=None):
     """Require concrete evidence before honoring the model's finish request."""
     if task_type != "code_change":
@@ -1349,7 +1354,8 @@ You have this focused toolbelt: {offered_tool_names}.
             messages.append({"role": "system", "content": (
                 last_repair_packet or ("Validation feedback: " + "; ".join(dict.fromkeys(s for s in validation_suggestions if s)))
             )})
-            if novelty_context is not None and last_repair_packet:
+            if (novelty_context is not None and last_repair_packet
+                    and _worker_triage_enabled(novelty_action_critic, novelty_action_gate)):
                 gate_judgment = novelty_context.synchronous_triage(
                     iteration,
                     lifecycle.state.value,
