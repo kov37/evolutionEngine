@@ -797,6 +797,13 @@ class NoveltyContext:
                     previous.validation and latest.validation
                     and _call_key(previous.tool, previous.arguments)
                     == _call_key(latest.tool, latest.arguments)
+                    and not previous.mutation and not latest.mutation
+                )
+                repeated_validation = repeated_validation or (
+                    previous.result_fingerprint == latest.result_fingerprint
+                    and not previous.mutation and not latest.mutation
+                    and previous.tool not in {"actor_turn_no_action"}
+                    and latest.tool not in {"actor_turn_no_action"}
                 )
             if repeated_validation:
                 return True

@@ -3142,3 +3142,10 @@ The next verification showed why that boundary still did not fire: internal
 events, so adjacency over the raw ledger hid the duplicate validation. The
 detector now compares adjacent actor tool events while ignoring internal
 checkpoint records. The regression suite includes this interleaving case.
+
+The following live trace still reported the worker's deterministic
+`duplicate_action: true` signal while the stricter validation classification
+did not consistently match the full provider argument shape. The gate now also
+uses identical event fingerprints for adjacent non-mutating actor actions,
+while never treating a mutation as a duplicate-progress failure. This closes
+the provider-format loophole without inspecting model names or task text.
