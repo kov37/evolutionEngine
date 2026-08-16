@@ -3637,5 +3637,4 @@ The next generic validation improvement should come from the missing
 `validation_pipeline_spec.md` review and the research-backed grader plan,
 not from adding another SymPy exception.
 
-Source checkpoint: working-tree change pending commit (`rejected mutation
-replay guard`).
+Source checkpoint: `4143813` (`Reject replayed failed mutations`).

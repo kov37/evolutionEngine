@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: a4833f8 (source checkpoint; replay guard pending commit)
+head_commit: 4143813
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
