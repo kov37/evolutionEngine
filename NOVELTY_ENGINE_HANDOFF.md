@@ -3847,7 +3847,7 @@ python3 -m py_compile agentic_benchmark.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `185` tests. The targeted adversarial
+The full unittest discovery passes `186` tests. The targeted adversarial
 preflight includes new coverage that the shadow source is not embedded in the
 prompt, that a shadow failure is not converted into visible repair detail, and
 that a visible failure is not overwritten by a shadow failure.
@@ -3881,11 +3881,50 @@ python3 -m py_compile agentic_benchmark.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `185` tests. The adversarial preflight now
+The full unittest discovery passes `186` tests. The adversarial preflight now
 iterates every task with `strength_mutations` and verifies each mutation is
 rejected by at least one grader layer. The next generic step is extending this
 mutation corpus to additional frozen task shapes; do not feed mutation detail
 back to the actor.
+
+### 2026-08-15 — initial successful validation must not complete a code-change task
+
+The first real `feature` run exposed a generic FSM completion bug. With
+`--action-first`, the actor correctly selected `run_tests` first, and the
+existing pass-to-pass test passed. The validation loop treated that successful
+check as authoritative completion while the lifecycle was still `ACT`, then
+called `validation_passed` and crashed with `InvalidTransition`.
+
+The completion path now calls the existing `_completion_ready` predicate before
+transitioning to `validation_passed`. If the task requires a product edit but no
+accepted `write_file`/`patch_file` has occurred, the engine records the passing
+evidence and tells the actor to continue implementing the required behavior.
+Verification-only tasks still complete without a mutation. This is a generic
+code-change contract rule; it does not name a model, provider, or task.
+
+Deterministic evidence:
+
+```text
+python3 -m py_compile agent.py
+python3 -m unittest discover -s tests -v
+```
+
+The full unittest discovery passes `186` tests, including a new regression that
+`_completion_ready` rejects initial pass evidence for a task that asks to add a
+function.
+
+Real-model evidence with Qwen3.8-27B-4bit through the local MLX
+OpenAI-compatible server:
+
+- `feature` novelty: `PASS`, 6 iterations, 1 mutation, 3 validations,
+  `shadow_passed=true`.
+- `feature` baseline: `PASS`, 6 iterations, 1 mutation, 2 validations,
+  `shadow_passed=true`.
+
+Both runs reached `COMPLETE` and the new hidden shadow grader passed. The
+remaining feature-benchmark observation is that the actor spent four turns in
+orientation before the forced mutation; this is a convergence-efficiency
+signal, not an artifact failure.
 
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 

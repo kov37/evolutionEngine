@@ -1630,6 +1630,25 @@ class KernelToolTests(unittest.TestCase):
         edited.append({"role": "tool", "tool_name": "run_command", "content": "Exit code: 0\nSTDOUT:"})
         self.assertTrue(_completion_ready(edited, "code_change")[0])
 
+    def test_code_change_task_is_not_complete_from_initial_pass_evidence(self):
+        plan = from_task(
+            "Add a function app.inventory.low_stock and run the available tests.",
+            "code_change",
+        )
+        evidence = [{
+            "role": "tool",
+            "tool_name": "run_tests",
+            "content": "Exit code: 0\nRan 1 test\nOK",
+        }]
+        ready, reason = _completion_ready(
+            evidence,
+            "code_change",
+            plan,
+            validation_evidence={"run_tests|app.inventory.low_stock|Ran 1 test"},
+        )
+        self.assertFalse(ready)
+        self.assertIn("no successful write_file or patch_file", reason)
+
     def test_verification_only_task_can_finish_without_mutation(self):
         plan = from_task("Run the existing test suite and verify it passes.", "code_change")
         evidence = [{"role": "tool", "tool_name": "run_command", "content": "Exit code: 0\nOK"}]

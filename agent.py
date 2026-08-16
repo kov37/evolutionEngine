@@ -2803,22 +2803,46 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 validation_batch_remaining = 0
                 print("✅ [validation phase] probe succeeded; still required: " + ", ".join(uncovered))
             else:
-                lifecycle.transition("validation_passed")
-                validation_required = False
-                validation_failures = 0
-                validation_batch_remaining = 0
-                if transaction is not None and transaction.note_validation_passed():
-                    print("✅ [transaction buffer] authoritative validation passed; cleared transaction state")
-                # Independent validation is the authoritative completion
-                # signal. Waiting for one more model turn to call
-                # finish_task wastes tokens and can strand a correct artifact
-                # behind a slow actor/provider. The model's summary is useful,
-                # but it is not stronger evidence than the accepted check.
-                TASK_STATE["summary"] = (
-                    "Completed after independent validation; all required acceptance evidence passed."
+                completion_ready, completion_reason = _completion_ready(
+                    messages,
+                    task_type,
+                    validation_plan,
+                    validation_evidence,
+                    validation_criteria_hits,
                 )
-                approve_task()
-                print("✅ [orchestrator completion] independent validation succeeded; task is complete")
+                if completion_ready:
+                    lifecycle.transition("validation_passed")
+                    validation_required = False
+                    validation_failures = 0
+                    validation_batch_remaining = 0
+                    if transaction is not None and transaction.note_validation_passed():
+                        print("✅ [transaction buffer] authoritative validation passed; cleared transaction state")
+                    # Independent validation is the authoritative completion
+                    # signal. Waiting for one more model turn to call
+                    # finish_task wastes tokens and can strand a correct artifact
+                    # behind a slow actor/provider. The model's summary is useful,
+                    # but it is not stronger evidence than the accepted check.
+                    TASK_STATE["summary"] = (
+                        "Completed after independent validation; all required acceptance evidence passed."
+                    )
+                    approve_task()
+                    print("✅ [orchestrator completion] independent validation succeeded; task is complete")
+                else:
+                    validation_required = False
+                    validation_failures = 0
+                    validation_batch_remaining = 0
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"Validation evidence was accepted, but the task is not complete yet: "
+                            f"{completion_reason}. Continue implementing the required behavior, then "
+                            "run the relevant check again before attempting completion."
+                        ),
+                    })
+                    print(
+                        "🧩 [validation accepted] evidence is real but completion is not ready: "
+                        + completion_reason
+                    )
 
         if novelty_context is not None:
             for call, tmsg in zip(turn_calls, tool_messages):
