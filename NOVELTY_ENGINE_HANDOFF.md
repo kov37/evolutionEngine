@@ -3806,7 +3806,8 @@ Known incomplete work:
 - Rerun the final corrected deterministic test after resuming.
 - Rerun cascading and multi-file after the triage deferral.
 - Run a paired multi-file/WebSocket ablation with and without the 4B.
-- Add hidden/shadow acceptance checks outside actor visibility.
+- Add hidden/shadow acceptance checks to the remaining frozen task shapes
+  (the generic mechanism is now present and wired for the feature task).
 - Add mutation-guided grader-strength tests.
 - Decide whether the verifier-repair handoff should count as success in the
   primary score or as a separate recovery score.
@@ -3816,6 +3817,44 @@ The research summary is in
 agent should read this section first, run the pending deterministic test, then
 resume the paired ablation cycle. Do not add task-specific hints or let the
 4B regain tool authority.
+
+### 2026-08-15 — hidden/shadow acceptance layer
+
+The benchmark now has a model-agnostic hidden/shadow acceptance layer. A
+`Task` can carry a `shadow` checker that is separate from its visible
+`grade` and `pass_to_pass` evidence. The checker is written and executed by
+`independent_grader.py` outside the actor workspace, is not present in
+`task.prompt`, and is never included in the verifier-repair prompt. Its only
+effect is to reject a plausible artifact that satisfies the visible checks but
+fails a held-out behavioral assertion.
+
+`agentic_benchmark.py` runs the shadow layer after visible acceptance and any
+bounded verifier-repair pass. A failing shadow result sets `artifact_passed`
+to false and records `shadow_passed` plus `shadow_grader` telemetry, but the
+actor receives only the generic “hidden acceptance evidence failed” signal
+when the visible artifact had otherwise passed. If visible acceptance already
+failed, the shadow result is recorded but does not replace the visible
+failure detail.
+
+The frozen `feature` task now has a hidden shadow check with a different input
+set, so an implementation that hardcodes the visible example cannot pass.
+This is benchmark-owned evidence, not an engine hint.
+
+Deterministic evidence after this change:
+
+```text
+python3 -m py_compile agentic_benchmark.py
+python3 -m unittest discover -s tests -v
+```
+
+The full unittest discovery passes `184` tests. The targeted adversarial
+preflight includes new coverage that the shadow source is not embedded in the
+prompt, that a shadow failure is not converted into visible repair detail, and
+that a visible failure is not overwritten by a shadow failure.
+
+The next real-model check should run the frozen `feature` task with and
+without the novelty worker after the local actor is available. Do not feed
+shadow detail back to the actor and do not weaken the new hidden check.
 
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 

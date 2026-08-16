@@ -18,8 +18,10 @@ from agentic_benchmark import (
     _baseline_contract_valid,
     _post_task_evidence,
     _protected_task_paths,
+    _run_shadow_evidence,
     _scorecard_passed,
     _snapshot_protected_paths,
+    _apply_shadow_result,
     _write_setup,
     _verifier_repair_prompt,
 )
@@ -57,6 +59,54 @@ class AdversarialPreflightTests(unittest.TestCase):
             self.assertIn("pass_to_pass_before", evidence)
             self.assertTrue(_post_task_evidence(task, root, evidence))
             self.assertTrue(evidence["pass_to_pass_after"]["valid"])
+
+    def test_hidden_shadow_evidence_is_run_but_not_exposed_to_the_prompt(self):
+        shadow_source = (
+            "from app.inventory import low_stock\n"
+            "items = [{'name':'a','quantity':4},{'name':'b','quantity':2},{'name':'c','quantity':6}]\n"
+            "assert [x['name'] for x in low_stock(items, 6)] == ['b','a']\n"
+        )
+        task = type("Task", (), {
+            "prompt": "Add app.inventory.low_stock and run a focused check.",
+            "setup": {
+                "app/__init__.py": "",
+                "app/inventory.py": (
+                    "def low_stock(items, threshold):\n"
+                    "    return sorted((x for x in items if x['quantity'] < threshold),\n"
+                    "                  key=lambda x: x['quantity'])\n"
+                ),
+            },
+            "grade": "from app.inventory import low_stock\nassert True\n",
+            "baseline": None,
+            "pass_to_pass": None,
+            "shadow": shadow_source,
+        })()
+        self.assertNotIn(shadow_source, task.prompt)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_setup(root, task.setup)
+            result = _run_shadow_evidence(task, root)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["phase"], "shadow_acceptance")
+
+    def test_hidden_shadow_failure_is_not_converted_to_visible_detail(self):
+        task = type("Task", (), {"shadow": "raise AssertionError('shadow-specific detail')\n"})()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = _run_shadow_evidence(task, root)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["status"], "FAIL")
+        passed, detail = _apply_shadow_result(True, result)
+        self.assertFalse(passed)
+        self.assertEqual(detail, "hidden acceptance evidence failed")
+        self.assertNotIn("shadow-specific detail", detail)
+
+    def test_hidden_shadow_does_not_change_visible_acceptance_failure(self):
+        shadow_result = {"status": "FAIL", "detail": "hidden detail"}
+        passed, detail = _apply_shadow_result(False, shadow_result)
+        self.assertFalse(passed)
+        self.assertIsNone(detail)
 
     def test_supplied_test_integrity_is_detected_outside_agent_loop(self):
         task = type("Task", (), {

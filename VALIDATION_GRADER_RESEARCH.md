@@ -53,7 +53,7 @@ that it is finished is only a trace event.
 | Pass-to-pass | Unrelated behavior still works | Framework implemented; used by feature/data tasks |
 | Independent acceptance | A host-owned checker runs outside the actor workspace | Implemented with status, timeout, hash, and bounded detail |
 | Test integrity | The actor did not edit supplied tests | Implemented |
-| Hidden/shadow acceptance | Additional checks the actor cannot inspect or weaken | Next major addition |
+| Hidden/shadow acceptance | Additional checks the actor cannot inspect or weaken | Implemented generically and wired for the feature task |
 | Mutation strength | Deliberately weakens candidate behavior to test whether checks catch it | Planned after shadow checks |
 | Trajectory telemetry | Explain time, tool use, retries, unsafe edits, and repair convergence | Partially implemented |
 

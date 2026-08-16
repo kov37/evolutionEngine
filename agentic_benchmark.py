@@ -47,6 +47,7 @@ class Task:
     # both before and after the actor (unrelated behavior is protected).
     baseline: str | None = None
     pass_to_pass: str | None = None
+    shadow: str | None = None
     budget: int = 20
     max_success_iterations: int | None = None
 
@@ -149,6 +150,37 @@ def _post_task_evidence(task: Task, root: Path, evidence: dict[str, dict]) -> bo
         "valid": bool(result and result["status"] == "PASS"),
     }
     return bool(result and result["status"] == "PASS")
+
+
+def _run_shadow_evidence(task: Task, root: Path) -> dict | None:
+    """Run a host-owned hidden/shadow acceptance check.
+
+    Shadow checks are intentionally not part of ``task.prompt``, are never
+    written into the actor workspace, and are never included in verifier-repair
+    feedback.  Their only role is to reject plausible-but-wrong artifacts that
+    satisfy the visible acceptance check.  This function returns telemetry for
+    the benchmark record, not a message for the actor.
+    """
+    if not task.shadow:
+        return None
+    result = run_python_grader(
+        task.shadow,
+        root,
+        timeout_seconds=45.0,
+        phase="shadow_acceptance",
+    )
+    return result.as_dict()
+
+
+def _apply_shadow_result(artifact_passed: bool, shadow_result: dict | None) -> tuple[bool, str | None]:
+    """Apply a hidden acceptance result without exposing its detail to the actor."""
+    if shadow_result is None:
+        return artifact_passed, None
+    if shadow_result["status"] != "PASS":
+        if not artifact_passed:
+            return False, None
+        return False, "hidden acceptance evidence failed"
+    return artifact_passed, None
 
 
 def _metrics(output: str) -> dict:
@@ -824,6 +856,13 @@ TASKS = {
             "from app.inventory import total_value\n"
             "assert total_value([{'quantity': 2, 'price': 3}]) == 6\n"
         ),
+        shadow=(
+            "from app.inventory import low_stock\n"
+            "items = [{'name':'a','quantity':4},{'name':'b','quantity':2},{'name':'c','quantity':6}]\n"
+            "out = low_stock(items, 6)\n"
+            "assert [x['name'] for x in out] == ['b','a']\n"
+            "assert items == [{'name':'a','quantity':4},{'name':'b','quantity':2},{'name':'c','quantity':6}]\n"
+        ),
         budget=20,
     ),
     "data_report": Task(
@@ -1011,6 +1050,19 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             "done_signal": _metrics(repair_stdout or "")["done_signal"],
         }
         metrics = _metrics(stdout or "")
+
+    # Hidden/shadow acceptance is the final grader layer. It must not be fed
+    # back into the actor or used to start a visible verifier-repair pass; it
+    # only controls whether the already-inspected artifact can be reported as
+    # correct. This keeps the shadow check outside the agent's information set.
+    visible_artifact_passed = artifact_passed
+    shadow_result = _run_shadow_evidence(task, work)
+    artifact_passed, shadow_detail = _apply_shadow_result(
+        visible_artifact_passed, shadow_result
+    )
+    if shadow_detail and visible_artifact_passed:
+        detail = shadow_detail
+
     handoff_reconciled = bool(
         verifier_repair is not None
         and artifact_passed
@@ -1025,6 +1077,9 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         ),
         "run_completed": _run_completed(timed_out, returncode),
         "handoff_reconciled": handoff_reconciled,
+        "shadow_passed": (
+            shadow_result["status"] == "PASS" if shadow_result is not None else None
+        ),
     }
     # A correct partial artifact is useful evidence, but it is not a complete
     # agent run. Require the actor's explicit finish signal so a model that
@@ -1062,6 +1117,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "test_integrity": integrity_ok,
         "monitor_log": str(monitor_path),
     }
+    if shadow_result is not None:
+        record["shadow_grader"] = shadow_result
     if verifier_repair is not None:
         record["verifier_repair"] = verifier_repair
     record["elapsed_seconds"] = round(time.monotonic() - started, 1)
