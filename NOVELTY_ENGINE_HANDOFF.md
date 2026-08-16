@@ -3402,3 +3402,21 @@ iterations** against the strict target of 6. Metrics: 2 product mutations, 3
 validations, 3 worker calls, 5 stale judgments, 95.6 seconds. The transaction
 buffer ended inactive with an empty file set. This is a full workflow pass,
 not merely an artifact pass.
+
+### 2026-08-15 — progress-gate regression run after `f13d82a`
+
+After restoring the local MLX server, the frozen cascading benchmark reached a
+different and informative path. On repair iteration 2 the actor replayed a
+stale `read_file` call; the dispatcher rejected it because the current
+contract was mutation-only. The host then entered bounded repair recovery, and
+the llama.cpp provider-level `tool_choice=required` boundary forced a legal
+`patch_file` call on the next turn. The actor corrected both defects and the
+independent artifact grader passed.
+
+The run used 4 iterations and therefore missed the strict 3-iteration
+workflow target; `finish_task` was not reached before the budget ended. This is
+an artifact pass and workflow miss, not a benchmark pass. Metrics were 2
+mutations, 2 validations, 7 novelty events, 2 worker calls, 4 stale
+judgments, 1 worker-busy drop, and 66.7 seconds. The result confirms the new
+boundary prevents stale inspection from executing, but it does not yet reduce
+the model's repair latency enough to guarantee the tight cascade budget.

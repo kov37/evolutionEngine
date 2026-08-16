@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: 65bc175
+head_commit: f13d82a
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
@@ -16,13 +16,13 @@ goal: >-
 primary_unresolved_target: SymPy issue 13878
 ```
 
-## Latest generic control-plane checkpoint
+## Latest generic control-plane checkpoint (the engine's traffic-controller rules)
 
 ```json
 {
   "source": {
     "branch": "noveltyEngine",
-    "base_commit": "6faa955",
+    "base_commit": "f13d82a",
     "working_tree_source_changes": [
       "agent.py: require one provider tool when the host progress gate is active",
       "kernel/sandbox.py: accept only /workspace as the virtual active-root alias",
@@ -39,7 +39,24 @@ primary_unresolved_target: SymPy issue 13878
     "actor": "Qwen3.8-27B-4bit via the local MLX OpenAI-compatible server",
     "worker": "qwen3.5:4b asynchronous advisory worker",
     "multi_file_attempt": {
-      "status": "interrupted by wrapper during repair; no benchmark grade",
+      "status": "previous authoritative pass remains valid; a later wrapper-interrupted attempt has no grade",
+      "fixture_changed": false,
+      "authoritative_passed": true,
+      "iterations": 5,
+      "mutations": 2,
+      "validations": 3,
+      "elapsed_seconds": 95.6
+    },
+    "cascading_regression": {
+      "status": "artifact passed; workflow missed strict 3-iteration target",
+      "iterations": 4,
+      "mutations": 2,
+      "validations": 2,
+      "novelty_events": 7,
+      "worker_calls": 2,
+      "stale_judgments": 4,
+      "worker_busy_drops": 1,
+      "elapsed_seconds": 66.7,
       "fixture_changed": false
     },
     "authoritative_previous_pass": {
