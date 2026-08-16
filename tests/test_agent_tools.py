@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -17,6 +17,7 @@ from risk_layer import RiskLayer
 from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
+from kernel.sandbox import confine, get_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
     _failure_diagnostic, _looks_like_file_listing, assertion_driven_tool_contract, from_task,
@@ -56,6 +57,13 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "llama-cpp"))
         self.assertFalse(_force_tool_call_after_no_action(NO_ACTION_TOOL_FORCE_THRESHOLD, "ollama"))
         self.assertGreaterEqual(FORCED_ACTION_MAX_TOKENS, 2048)
+
+    def test_progress_gate_requires_provider_tool_call(self):
+        context = NoveltyContext(action_after_events=1)
+        context.observe_no_action(1, "I will inspect the files", legal_actions=("patch_file",))
+        self.assertTrue(_progress_tool_call_required(context, True, "llama-cpp", [object()]))
+        self.assertFalse(_progress_tool_call_required(context, False, "llama-cpp", [object()]))
+        self.assertFalse(_progress_tool_call_required(context, True, "ollama", [object()]))
 
     def test_repair_recovery_has_a_direct_tool_call_path(self):
         self.assertTrue(_force_tool_call_after_no_action(2, "llama-cpp"))
@@ -1425,6 +1433,15 @@ class KernelToolTests(unittest.TestCase):
             self.assertTrue(rejected.startswith("ERROR:"))
             self.assertIn("cwd='.'", rejected)
         self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
+
+    def test_virtual_workspace_cwd_alias_resolves_to_project_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            self.assertEqual(confine("/workspace"), get_root())
+            self.assertEqual(confine("/workspace/src"), str(Path(tmp).resolve() / "src"))
+            result = run_command(["python3", "-c", "print('alias-ok')"], cwd="/workspace")
+            self.assertIn("Exit code: 0", result)
+            self.assertIn("alias-ok", result)
 
     def test_run_command_accepts_literal_newline_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:

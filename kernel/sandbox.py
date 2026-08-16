@@ -39,7 +39,19 @@ def confine(path: str) -> str:
     """Resolve `path` against the current root; raise ValueError if it
     escapes. Subdirectories are allowed — only genuine escapes are rejected."""
     root = _state["root"]
-    resolved = os.path.realpath(path) if os.path.isabs(path) else os.path.realpath(os.path.join(root, path))
+    candidate = str(path)
+    # Models frequently use the conventional virtual sandbox name
+    # ``/workspace`` even when the host has mounted the project elsewhere
+    # (for example, a temporary benchmark checkout). Treat only that exact
+    # virtual prefix as an alias for the trusted root. Do not generalize this
+    # to arbitrary absolute paths: the confinement boundary must remain real.
+    virtual_root = os.path.normpath("/workspace")
+    normalized_candidate = os.path.normpath(candidate) if os.path.isabs(candidate) else ""
+    if normalized_candidate == virtual_root:
+        candidate = "."
+    elif normalized_candidate.startswith(virtual_root + os.sep):
+        candidate = normalized_candidate[len(virtual_root) + 1:]
+    resolved = os.path.realpath(candidate) if os.path.isabs(candidate) else os.path.realpath(os.path.join(root, candidate))
     if resolved != root and not resolved.startswith(root + os.sep):
         raise ValueError(f"path escapes the sandbox root ({root}): {path}")
     return resolved

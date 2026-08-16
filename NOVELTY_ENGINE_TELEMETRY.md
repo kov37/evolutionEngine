@@ -16,6 +16,51 @@ goal: >-
 primary_unresolved_target: SymPy issue 13878
 ```
 
+## Latest generic control-plane checkpoint
+
+```json
+{
+  "source": {
+    "branch": "noveltyEngine",
+    "base_commit": "6faa955",
+    "working_tree_source_changes": [
+      "agent.py: require one provider tool when the host progress gate is active",
+      "kernel/sandbox.py: accept only /workspace as the virtual active-root alias",
+      "tests/test_agent_tools.py: add deterministic coverage for both boundaries"
+    ]
+  },
+  "deterministic": {
+    "command": ".venv-swebench/bin/python -m pytest -q tests",
+    "passed": 159,
+    "subtests": 35,
+    "duration_seconds": 1.12
+  },
+  "real_model": {
+    "actor": "Qwen3.8-27B-4bit via the local MLX OpenAI-compatible server",
+    "worker": "qwen3.5:4b asynchronous advisory worker",
+    "multi_file_attempt": {
+      "status": "interrupted by wrapper during repair; no benchmark grade",
+      "fixture_changed": false
+    },
+    "authoritative_previous_pass": {
+      "passed": true,
+      "iterations": 5,
+      "mutations": 2,
+      "validations": 3,
+      "worker_calls": 3,
+      "stale_judgments": 5,
+      "elapsed_seconds": 95.6
+    }
+  },
+  "design_review": {
+    "transaction_buffer": "approve with bounded host-owned file tracking",
+    "automatic_broad_git_rollback": "reject; preserve unrelated user changes",
+    "4b_failure_compaction": "advisory only with deterministic local fallback",
+    "model_specific_logic_added": false
+  }
+}
+```
+
 ## Claude instruction
 
 Produce a high-density telemetry report from this file. Preserve the distinction

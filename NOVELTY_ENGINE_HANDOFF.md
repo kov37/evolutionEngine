@@ -141,6 +141,37 @@ The working directory is `/Users/digitialchameleon/noveltyEngine` on branch
 3ee9d3a Add task-derived validation and repair loop
 ```
 
+### 2026-08-15 — harden generic command and progress boundaries
+
+The next SymPy run exposed two reusable harness problems before the actor made
+any product mutation: Qwen issued `/workspace` as if it were the virtual
+project root, and stale inspection calls could still be replayed from an older
+conversation turn after the novelty progress gate had narrowed the legal tool
+surface. The first caused a false sandbox escape error; the second consumed
+repair time without producing a mutation.
+
+The kernel now maps only the exact `/workspace` prefix to the already-trusted
+active project root. Other absolute paths remain rejected. When the host
+novelty gate says progress is required, llama.cpp is also required to emit one
+tool from the final current tool contract. This is a transport-level guard,
+not a prompt hint; the dispatcher still rejects any stale tool name that slips
+through.
+
+The transaction proposal remains sound with three refinements. The buffer must
+stay host-owned and path-normalized, it should preserve only transaction-owned
+files through a bounded bridge, and expiry should enter targeted recovery
+rather than run a broad `git checkout` that could erase unrelated user work.
+The 4B should remain advisory for failure compaction; deterministic local
+compaction is the safe fallback and should never delay the actor.
+
+Deterministic evidence after this change: `159 passed, 35 subtests passed`.
+The subsequent real multi-file attempt was interrupted by the execution
+wrapper while the actor was still in its repair path, so it is not a pass or
+failure against the benchmark. The prior authoritative clean multi-file pass
+remains the valid real-model result. The next real run should verify that the
+virtual-root alias and required-tool boundary reduce the orientation/path
+contract stall without changing the fixture or scorecard.
+
 The worktree is intentionally dirty. Existing uncommitted work includes the
 watchdog, repair metrics, response-shape validation, 4B event coalescing, and
 tests under `tests/test_novelty_context.py`. Do not discard or reset these

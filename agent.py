@@ -851,6 +851,22 @@ def _novelty_progress_tool_names(novelty_context, *, helper_mutation_blocked=Fal
     return names
 
 
+def _progress_tool_call_required(novelty_context, novelty_action_gate, backend, tools):
+    """Return whether the provider must emit one currently legal progress tool.
+
+    Tool schemas are not enough when an actor can remember a tool from an
+    earlier turn.  Once the host progress gate has narrowed the registry, a
+    provider-level required-tool boundary prevents another prose or stale
+    inspection turn.  The condition is based only on lifecycle evidence and
+    the active tool surface, never on a task or model name.
+    """
+    if not (novelty_action_gate and novelty_context is not None and backend == "llama-cpp"):
+        return False
+    if not novelty_context.requires_progress() or not tools:
+        return False
+    return True
+
+
 def patch_product_file(path: str, search: str, replace: str) -> str:
     """Patch a product source file during novelty recovery.
 
@@ -1677,6 +1693,16 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     chat_kwargs["tool_choice"] = "required"
                     chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
                     print("🧰 [source-backed repair] requiring a targeted tool call")
+                if _progress_tool_call_required(
+                    novelty_context, novelty_action_gate, backend, tools_for_call
+                ):
+                    # The final tool list has already been narrowed by the
+                    # deterministic gate. Enforce that the actor selects
+                    # from that list instead of replaying a stale call from
+                    # an earlier prompt turn.
+                    chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                    print("🧰 [progress gate] requiring one legal progress tool")
                 response = _chat_with_timeout(**chat_kwargs)
                 break
             except ChatTimeoutError as e:
