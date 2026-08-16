@@ -3926,6 +3926,11 @@ remaining feature-benchmark observation is that the actor spent four turns in
 orientation before the forced mutation; this is a convergence-efficiency
 signal, not an artifact failure.
 
+The frozen `cascading_loop` novelty regression also passed after the
+completion guard: `PASS`, exact 3/3 iteration target, 2 mutations, 3
+validations, 2 validation failures, and clean completion. This confirms the
+new completion predicate does not regress the sequential-repair workflow.
+
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 
 This is the operating manual for the next frontier model. The implementation
