@@ -3421,6 +3421,15 @@ judgments, 1 worker-busy drop, and 66.7 seconds. The result confirms the new
 boundary prevents stale inspection from executing, but it does not yet reduce
 the model's repair latency enough to guarantee the tight cascade budget.
 
+The subsequent run after the bounded-recovery counter fix produced the same
+artifact-pass/workflow-miss pattern: 4 iterations, 2 mutations, 2
+validations, 4 stale worker judgments, 1 worker-busy drop, and 67.4 seconds.
+The new counter is correct for orientation recovery, but this cascade's stale
+read occurs in the source-backed repair phase, so it remains a separate
+repair-turn economy problem. The actor corrected the syntax and type defects;
+it simply reached the iteration limit before the final check and completion
+handoff.
+
 The clean multi-file rerun after the server was restored passed end to end in
 5 iterations and 97.3 seconds. It used 2 product mutations, 3 validations,
 and 3 worker calls; the worker produced 5 stale judgments but no busy drop.

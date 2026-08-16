@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -64,6 +64,11 @@ class KernelToolTests(unittest.TestCase):
         self.assertTrue(_progress_tool_call_required(context, True, "llama-cpp", [object()]))
         self.assertFalse(_progress_tool_call_required(context, False, "llama-cpp", [object()]))
         self.assertFalse(_progress_tool_call_required(context, True, "ollama", [object()]))
+
+    def test_blocked_orientation_inspection_consumes_recovery_read(self):
+        self.assertTrue(_consume_orientation_recovery_read(True, True, False, {"stale-call"}))
+        self.assertFalse(_consume_orientation_recovery_read(True, False, False, {"stale-call"}))
+        self.assertTrue(_consume_orientation_recovery_read(True, True, True, set()))
 
     def test_repair_recovery_has_a_direct_tool_call_path(self):
         self.assertTrue(_force_tool_call_after_no_action(2, "llama-cpp"))

@@ -81,6 +81,31 @@ primary_unresolved_target: SymPy issue 13878
 }
 ```
 
+## Latest recovery-counter change (bounded read means one attempted read)
+
+```json
+{
+  "source_change": [
+    "count a rejected orientation inspection as the one allowed recovery read",
+    "require a legal provider tool after orientation recovery closes inspection"
+  ],
+  "deterministic": "160 passed, 35 subtests passed",
+  "real_model_cascading": {
+    "artifact_passed": true,
+    "workflow_passed": false,
+    "iterations": 4,
+    "target_iterations": 3,
+    "mutations": 2,
+    "validations": 2,
+    "stale_judgments": 4,
+    "worker_busy_drops": 1,
+    "elapsed_seconds": 67.4,
+    "interpretation": "correct repair, one extra source-backed repair turn"
+  },
+  "model_runtime": "MLX actor uses Apple GPU when the local server is alive; this run's server remained alive through the benchmark"
+}
+```
+
 ## Claude instruction
 
 Produce a high-density telemetry report from this file. Preserve the distinction

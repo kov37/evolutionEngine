@@ -867,6 +867,23 @@ def _progress_tool_call_required(novelty_context, novelty_action_gate, backend, 
     return True
 
 
+def _consume_orientation_recovery_read(
+    recovery_active: bool,
+    evidence_available: bool,
+    recovery_read_used: bool,
+    blocked_command_calls,
+) -> bool:
+    """Count a rejected inspection as the bounded recovery attempt.
+
+    A blocked read is still an attempted recovery action. Leaving the counter
+    unchanged lets a model replay the same inspection forever because the
+    host never receives a successful read to mark as consumed.
+    """
+    if recovery_read_used:
+        return True
+    return bool(recovery_active and evidence_available and blocked_command_calls)
+
+
 def patch_product_file(path: str, search: str, replace: str) -> str:
     """Patch a product source file during novelty recovery.
 
@@ -1665,6 +1682,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     # well, so a plain explanation cannot consume another
                     # recovery turn.
                     chat_kwargs["tool_choice"] = "required"
+                if (orientation_recovery_active and orientation_evidence_available
+                        and orientation_recovery_read_used and backend == "llama-cpp"
+                        and tools_for_call):
+                    # Recovery has consumed its one read opportunity. Require
+                    # a tool from the mutation/progress surface even when the
+                    # novelty worker has not yet reached its event interval.
+                    chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                    print("🧭 [orientation recovery] requiring one legal progress tool")
                 if _force_tool_call_after_no_action(no_action_turns, backend):
                     # Repeated prose-only turns are a transport/control-plane
                     # failure, not a reasoning opportunity. llama.cpp can
@@ -1923,6 +1949,12 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             blocked_command_calls=blocked_command_calls,
             blocked_command_reasons=blocked_command_reasons,
             blocked_mutation_reasons=blocked_mutation_reasons,
+        )
+        orientation_recovery_read_used = _consume_orientation_recovery_read(
+            orientation_recovery_active,
+            orientation_evidence_available,
+            orientation_recovery_read_used,
+            blocked_command_calls,
         )
         for call, tmsg in zip(turn_calls, tool_messages):
             path = (call.function.arguments or {}).get("path", "")
