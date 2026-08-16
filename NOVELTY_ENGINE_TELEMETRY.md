@@ -584,3 +584,38 @@ remaining_grader_work:
 model_specific_logic_added: false
 source_checkpoint: "78c757c"
 ```
+
+## 2026-08-16 — supplied-test integrity guard
+
+```yaml
+source_change: >-
+  Snapshot supplied test hashes before the actor run and reject any deleted or
+  changed supplied test as UNSAFE_WORKSPACE_CHANGE before acceptance grading.
+deterministic_tests: "179 passed, 35 subtests passed"
+integrity_contract:
+  protected_paths: "supplied tests only"
+  new_actor_tests_allowed: true
+  verifier_repair_after_integrity_failure: false
+real_model_regressions:
+  cascading_loop:
+    passed: true
+    grader_status: PASS
+    iterations: 3
+    iteration_target: 3
+    mutations: 2
+    validations: 3
+    test_integrity: true
+  multi_file_transaction:
+    passed: true
+    grader_status: PASS
+    iterations: 5
+    iteration_target: 6
+    mutations: 3
+    validations: 4
+    test_integrity: true
+remaining_grader_work:
+  - baseline and fail_to_pass evidence
+  - pass_to_pass regression evidence
+  - hidden/shadow acceptance checks outside actor visibility
+source_checkpoint: "pending commit"
+```

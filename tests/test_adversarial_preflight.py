@@ -12,7 +12,13 @@ from pathlib import Path
 from independent_grader import run_python_grader
 
 import action_governor
-from agentic_benchmark import _scorecard_passed, _verifier_repair_prompt
+from agentic_benchmark import (
+    _check_protected_paths,
+    _protected_task_paths,
+    _scorecard_passed,
+    _snapshot_protected_paths,
+    _verifier_repair_prompt,
+)
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import is_inspection_command, is_output_only_command
 from risk_layer import RiskLayer
@@ -22,6 +28,26 @@ from workspace.run_tests_tool import run_tests
 
 
 class AdversarialPreflightTests(unittest.TestCase):
+    def test_supplied_test_integrity_is_detected_outside_agent_loop(self):
+        task = type("Task", (), {
+            "setup": {
+                "test_app.py": "assert True\n",
+                "src/app.py": "value = 1\n",
+                "docs/README.md": "notes\n",
+            }
+        })()
+        self.assertEqual(_protected_task_paths(task), ("test_app.py",))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            test_path = root / "test_app.py"
+            test_path.write_text("assert True\n", encoding="utf-8")
+            snapshot = _snapshot_protected_paths(root, ("test_app.py",))
+            self.assertEqual(_check_protected_paths(root, snapshot)[0], True)
+            test_path.write_text("assert True\nassert False\n", encoding="utf-8")
+            ok, detail = _check_protected_paths(root, snapshot)
+            self.assertFalse(ok)
+            self.assertIn("test_app.py", detail)
+
     def test_independent_grader_source_stays_outside_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -3670,3 +3670,30 @@ check for supplied tests. The missing `validation_pipeline_spec.md` must be
 reviewed before claiming those requirements are complete.
 
 Source checkpoint: `78c757c` (`Isolate independent benchmark graders`).
+
+### 2026-08-16 — enforce supplied-test integrity at the grader boundary
+
+The benchmark now snapshots hashes of supplied test artifacts before the actor
+starts and compares them after the actor and any verifier-repair pass. If a
+supplied test is deleted or changed, the result is
+`UNSAFE_WORKSPACE_CHANGE`, the independent product grader is not allowed to
+turn that run into a pass, and verifier repair is skipped. New actor-authored
+tests are not blocked; only tests supplied by the benchmark are protected.
+
+Deterministic evidence: `179 passed, 35 subtests passed`.
+
+Post-change frozen real-model regressions:
+
+- Cascading: `PASS`, exact `3/3` iteration target, 2 mutations, 3
+  validations, `test_metrics.py` unchanged.
+- Multi-file transaction: `PASS`, 5 iterations against a target of 6, 3
+  mutations, 4 validations, `test_solver.py` unchanged, intermediate edits
+  preserved.
+
+The grader is now independent in two concrete ways: its source is outside the
+actor workspace, and the supplied acceptance tests are integrity-checked. The
+remaining production-grade grader work is baseline/fail-to-pass evidence,
+pass-to-pass regression evidence, and a separate hidden/shadow acceptance
+layer. These must remain benchmark-owned and unavailable to the actor.
+
+Source checkpoint: pending commit (`enforce supplied-test integrity`).

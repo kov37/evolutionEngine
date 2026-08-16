@@ -13,6 +13,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -50,6 +51,48 @@ def _write_setup(root: Path, setup: dict[str, str]) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+def _protected_task_paths(task: Task) -> tuple[str, ...]:
+    """Return supplied test artifacts that the actor must not rewrite."""
+    protected = []
+    for relative in task.setup:
+        path = Path(relative)
+        lower_parts = {part.lower() for part in path.parts}
+        name = path.name.lower()
+        if (
+            "tests" in lower_parts
+            or name.startswith("test_")
+            or name.endswith(("_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts"))
+        ):
+            protected.append(relative)
+    return tuple(sorted(protected))
+
+
+def _snapshot_protected_paths(root: Path, paths: tuple[str, ...]) -> dict[str, str | None]:
+    """Hash supplied test files before the actor gets workspace access."""
+    snapshot = {}
+    for relative in paths:
+        path = root / relative
+        content = path.read_bytes() if path.exists() else None
+        snapshot[relative] = hashlib.sha256(content).hexdigest() if content is not None else None
+    return snapshot
+
+
+def _check_protected_paths(
+    root: Path, snapshot: dict[str, str | None]
+) -> tuple[bool, str]:
+    """Detect deleted or rewritten supplied tests after an agent run."""
+    changed = []
+    for relative, before in snapshot.items():
+        path = root / relative
+        after_content = path.read_bytes() if path.exists() else None
+        after = hashlib.sha256(after_content).hexdigest() if after_content is not None else None
+        if after != before:
+            changed.append(relative + (" (deleted)" if after is None else " (changed)"))
+    if changed:
+        return False, "supplied test integrity violation: " + ", ".join(changed)
+    return True, "supplied test artifacts unchanged"
 
 
 def _grade(task: Task, root: Path) -> GradeResult:
@@ -776,6 +819,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             run_timeout: float, keep_workspace: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
+    protected_paths = _protected_task_paths(task)
+    protected_snapshot = _snapshot_protected_paths(work, protected_paths)
     # Unbuffered child output is required for true event-level monitoring;
     # otherwise Python holds agent logs until the entire run exits.
     cmd = [sys.executable, "-u", str(ROOT / "agent.py"), "--project", str(work),
@@ -801,7 +846,19 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     if timed_out:
         stdout += f"\nBENCHMARK WATCHDOG: exceeded {run_timeout:.1f}s and was terminated.\n"
     elapsed = time.monotonic() - started
-    grade_result = _grade(task, work)
+    integrity_ok, integrity_detail = _check_protected_paths(work, protected_snapshot)
+    if integrity_ok:
+        grade_result = _grade(task, work)
+    else:
+        grade_result = GradeResult(
+            status="UNSAFE_WORKSPACE_CHANGE",
+            passed=False,
+            detail=integrity_detail,
+            returncode=None,
+            elapsed_seconds=0.0,
+            checker_sha256="",
+            phase="integrity",
+        )
     artifact_passed, detail = grade_result.passed, grade_result.detail
     metrics = _metrics(stdout or "")
     initial_metrics = metrics
@@ -811,7 +868,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     # verifier's exact evidence. This is a generic external-validation loop:
     # the harness does not interpret the task or synthesize a WebSocket-specific
     # fix, and it never runs more than one feedback pass per benchmark attempt.
-    if not artifact_passed and _run_completed(timed_out, returncode):
+    if not artifact_passed and integrity_ok and _run_completed(timed_out, returncode):
         print("🔁 Independent verifier rejected the artifact; starting one bounded repair pass.")
         repair_monitor_path = RUNS / f"monitor-{task.name}-{condition}-{time.time_ns()}-repair.jsonl"
         repair_cmd = [
@@ -839,7 +896,19 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         stdout += "\n" + repair_stdout
         timed_out = timed_out or repair_timed_out
         returncode = repair_returncode
-        grade_result = _grade(task, work)
+        integrity_ok, integrity_detail = _check_protected_paths(work, protected_snapshot)
+        if integrity_ok:
+            grade_result = _grade(task, work)
+        else:
+            grade_result = GradeResult(
+                status="UNSAFE_WORKSPACE_CHANGE",
+                passed=False,
+                detail=integrity_detail,
+                returncode=None,
+                elapsed_seconds=0.0,
+                checker_sha256="",
+                phase="integrity",
+            )
         artifact_passed, detail = grade_result.passed, grade_result.detail
         verifier_repair = {
             "monitor_log": str(repair_monitor_path),
@@ -896,6 +965,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "elapsed_seconds": round(elapsed, 1), "metrics": metrics,
         "scorecard": scorecard,
         "grader": grade_result.as_dict(),
+        "protected_test_paths": list(protected_paths),
+        "test_integrity": integrity_ok,
         "monitor_log": str(monitor_path),
     }
     if verifier_repair is not None:
