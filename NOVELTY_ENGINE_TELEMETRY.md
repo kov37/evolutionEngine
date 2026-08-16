@@ -45,7 +45,10 @@ primary_unresolved_target: SymPy issue 13878
       "iterations": 5,
       "mutations": 2,
       "validations": 3,
-      "elapsed_seconds": 95.6
+      "elapsed_seconds": 97.3,
+      "worker_calls": 3,
+      "stale_judgments": 5,
+      "worker_busy_drops": 0
     },
     "cascading_regression": {
       "status": "artifact passed; workflow missed strict 3-iteration target",

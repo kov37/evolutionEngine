@@ -3420,3 +3420,12 @@ mutations, 2 validations, 7 novelty events, 2 worker calls, 4 stale
 judgments, 1 worker-busy drop, and 66.7 seconds. The result confirms the new
 boundary prevents stale inspection from executing, but it does not yet reduce
 the model's repair latency enough to guarantee the tight cascade budget.
+
+The clean multi-file rerun after the server was restored passed end to end in
+5 iterations and 97.3 seconds. It used 2 product mutations, 3 validations,
+and 3 worker calls; the worker produced 5 stale judgments but no busy drop.
+The actor preserved `core_math.py` through the intermediate failure, changed
+`matrix_solver.py`, and the host immediately replayed the known failed test.
+The independent grader passed, the engine reached its own `DONE` state, and
+the transaction buffer ended inactive with no tracked files. This is the
+authoritative real-model evidence for the transaction design after `f13d82a`.
