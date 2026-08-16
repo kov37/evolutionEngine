@@ -3696,4 +3696,4 @@ remaining production-grade grader work is baseline/fail-to-pass evidence,
 pass-to-pass regression evidence, and a separate hidden/shadow acceptance
 layer. These must remain benchmark-owned and unavailable to the actor.
 
-Source checkpoint: pending commit (`enforce supplied-test integrity`).
+Source checkpoint: `820b4bf` (`Protect supplied tests during grading`).

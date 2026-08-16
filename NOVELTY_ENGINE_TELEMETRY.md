@@ -617,5 +617,5 @@ remaining_grader_work:
   - baseline and fail_to_pass evidence
   - pass_to_pass regression evidence
   - hidden/shadow acceptance checks outside actor visibility
-source_checkpoint: "pending commit"
+source_checkpoint: "820b4bf"
 ```
