@@ -547,3 +547,40 @@ next_verification:
   - rerun bounded SymPy unchanged
   - review validation_pipeline_spec.md when supplied
 ```
+
+## 2026-08-16 — independent grader isolation
+
+```yaml
+source_change: >-
+  Run acceptance checker source from a host-owned temporary directory rather
+  than writing .agentic_grader.py into the actor workspace.
+deterministic_tests: "178 passed, 35 subtests passed"
+grader_contract:
+  statuses: [PASS, FAIL, TIMEOUT, ENVIRONMENT_INVALID]
+  checker_source_in_actor_workspace: false
+  checker_hash_recorded: true
+  bounded_detail_chars: 4000
+  optional_preflight: supported
+real_model_regressions:
+  cascading_loop:
+    passed: true
+    grader_status: PASS
+    iterations: 3
+    iteration_target: 3
+    mutations: 2
+    validations: 3
+  multi_file_transaction:
+    passed: true
+    grader_status: PASS
+    iterations: 5
+    iteration_target: 6
+    mutations: 2
+    validations: 3
+remaining_grader_work:
+  - wire immutable baseline checks into task contracts
+  - add fail_to_pass and pass_to_pass evidence
+  - add hidden/shadow acceptance checks outside actor visibility
+  - add supplied-test integrity and diff checks
+model_specific_logic_added: false
+source_checkpoint: "pending commit"
+```

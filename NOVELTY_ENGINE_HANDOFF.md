@@ -3638,3 +3638,35 @@ The next generic validation improvement should come from the missing
 not from adding another SymPy exception.
 
 Source checkpoint: `4143813` (`Reject replayed failed mutations`).
+
+### 2026-08-16 — move independent grading outside the actor workspace
+
+The benchmark grader previously wrote `.agentic_grader.py` into the same
+workspace the actor could inspect. A prompt told the actor not to read or edit
+that file, but that was only a convention, not an enforcement boundary.
+
+`independent_grader.py` now writes checker source into a host-owned temporary
+directory outside the actor workspace, runs it as a subprocess with the
+candidate workspace as its current directory, and records a SHA-256 checker
+hash plus bounded output. It distinguishes `PASS`, `FAIL`, `TIMEOUT`, and
+`ENVIRONMENT_INVALID`. Optional preflight checks run before acceptance checks;
+failed preflight is not misclassified as a product defect.
+
+Deterministic evidence: `178 passed, 35 subtests passed`.
+
+Frozen real-model evidence with Qwen3.8-27B actor, qwen3.5:4b worker, and
+MLX/llama.cpp:
+
+- Cascading: grader `PASS`, exact `3/3` iteration target, 2 mutations, 3
+  validations.
+- Multi-file transaction: grader `PASS`, 5 iterations against a target of 6,
+  2 mutations, 3 validations; the first file remained intact until the second
+  file was aligned.
+
+This is a grader foundation, not the complete production-grade pipeline yet.
+The next generic additions are immutable baseline checks, fail-to-pass and
+pass-to-pass evidence, protected hidden/shadow tests, and a tamper/integrity
+check for supplied tests. The missing `validation_pipeline_spec.md` must be
+reviewed before claiming those requirements are complete.
+
+Source checkpoint: pending commit (`independent grader isolation`).

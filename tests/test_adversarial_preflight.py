@@ -9,6 +9,8 @@ import unittest
 import tempfile
 from pathlib import Path
 
+from independent_grader import run_python_grader
+
 import action_governor
 from agentic_benchmark import _scorecard_passed, _verifier_repair_prompt
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
@@ -20,6 +22,41 @@ from workspace.run_tests_tool import run_tests
 
 
 class AdversarialPreflightTests(unittest.TestCase):
+    def test_independent_grader_source_stays_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "target.py").write_text("value = 41\n", encoding="utf-8")
+            result = run_python_grader(
+                "from target import value\nassert value + 1 == 42\n",
+                root,
+            )
+            self.assertTrue(result.passed)
+            self.assertEqual(result.status, "PASS")
+            self.assertFalse((root / ".agentic_grader.py").exists())
+            self.assertEqual(len(result.checker_sha256), 64)
+
+    def test_independent_grader_distinguishes_failure_and_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            failed = run_python_grader("raise AssertionError('wrong behavior')\n", root)
+            self.assertFalse(failed.passed)
+            self.assertEqual(failed.status, "FAIL")
+            timed_out = run_python_grader("import time; time.sleep(2)\n", root, timeout_seconds=0.05)
+            self.assertFalse(timed_out.passed)
+            self.assertEqual(timed_out.status, "TIMEOUT")
+
+    def test_independent_grader_reports_invalid_environment_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_python_grader(
+                "raise AssertionError('acceptance must not run')\n",
+                root,
+                preflight_source="raise RuntimeError('missing dependency')\n",
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.status, "ENVIRONMENT_INVALID")
+            self.assertIn("preflight failed", result.detail)
+
     def test_external_verifier_feedback_is_preserved_for_one_repair_pass(self):
         task = type("Task", (), {"prompt": "Repair the application."})()
         prompt = _verifier_repair_prompt(task, "AssertionError: required artifact is stale")

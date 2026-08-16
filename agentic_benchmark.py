@@ -28,6 +28,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from independent_grader import GradeResult, run_python_grader
+
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "state" / "benchmark" / "agentic"
@@ -50,16 +52,9 @@ def _write_setup(root: Path, setup: dict[str, str]) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def _grade(task: Task, root: Path) -> tuple[bool, str]:
-    """Run a task-specific independent grader in a subprocess."""
-    grader = root / ".agentic_grader.py"
-    grader.write_text(task.grade, encoding="utf-8")
-    proc = subprocess.run(
-        [sys.executable, str(grader)], cwd=root, text=True,
-        capture_output=True, timeout=45,
-    )
-    detail = (proc.stdout + proc.stderr).strip()[-3000:]
-    return proc.returncode == 0, detail
+def _grade(task: Task, root: Path) -> GradeResult:
+    """Run the task grader outside the actor's workspace."""
+    return run_python_grader(task.grade, root, timeout_seconds=45.0)
 
 
 def _metrics(output: str) -> dict:
@@ -806,7 +801,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     if timed_out:
         stdout += f"\nBENCHMARK WATCHDOG: exceeded {run_timeout:.1f}s and was terminated.\n"
     elapsed = time.monotonic() - started
-    artifact_passed, detail = _grade(task, work)
+    grade_result = _grade(task, work)
+    artifact_passed, detail = grade_result.passed, grade_result.detail
     metrics = _metrics(stdout or "")
     initial_metrics = metrics
     verifier_repair = None
@@ -843,7 +839,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         stdout += "\n" + repair_stdout
         timed_out = timed_out or repair_timed_out
         returncode = repair_returncode
-        artifact_passed, detail = _grade(task, work)
+        grade_result = _grade(task, work)
+        artifact_passed, detail = grade_result.passed, grade_result.detail
         verifier_repair = {
             "monitor_log": str(repair_monitor_path),
             "timed_out": repair_timed_out,
@@ -898,6 +895,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "detail": detail, "timed_out": timed_out, "returncode": returncode,
         "elapsed_seconds": round(elapsed, 1), "metrics": metrics,
         "scorecard": scorecard,
+        "grader": grade_result.as_dict(),
         "monitor_log": str(monitor_path),
     }
     if verifier_repair is not None:
