@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: 79958b6
+head_commit: ffb8ebb
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
@@ -483,4 +483,36 @@ next_cycle:
   - unchanged cascading regression
   - unchanged multi-file transaction regression
   - bounded SymPy rerun
+```
+
+## Rejected mutation recovery checkpoint
+
+```yaml
+head_commit: ffb8ebb
+deterministic_tests: "172 passed, 35 subtests passed"
+rejected_mutation_contract:
+  trigger: "product mutation returns ERROR or REJECTED"
+  next_turn_tools: [read_file, search_file, list_symbols, grep_dir]
+  read_budget: 1 attempted focused inspection
+  following_turn: "fresh product mutation or recovery"
+  broad_browse: false
+  validation_during_inspection: false
+frozen_regressions:
+  cascading_loop:
+    passed: true
+    iterations: 3
+    mutations: 2
+    validations: 3
+  multi_file_transaction:
+    passed: true
+    iterations: 5
+    mutations: 2
+    validations: 3
+sympy_replay:
+  run_status: incomplete_manual_stop
+  reached_iteration: 6
+  rejected_patch_observed: true
+  recovery_state_entered: true
+  capability_result: "not measured; provider timeout had not completed"
+next_action: "full-duration unchanged SymPy replay"
 ```

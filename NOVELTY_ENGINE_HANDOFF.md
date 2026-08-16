@@ -3579,3 +3579,33 @@ recovery contract before adopting Plan 2. Plan 3 remains benchmark-only. The
 next test cycle is: deterministic rejected-patch tests, unchanged cascading
 and multi-file regression runs, then a bounded SymPy rerun. No benchmark
 fixture, hidden test, model name, or SymPy formula may be added to the engine.
+
+### 2026-08-16 — rejected mutation recovery checkpoint
+
+The generic repair loop now treats a failed product mutation as a possible
+source-synchronization problem (the actor's copied source does not match the
+file currently on disk). The host opens a read-only surface containing only
+focused readers (`read_file`, `search_file`, `list_symbols`, and `grep_dir`)
+for one turn. After that attempted inspection, the read surface closes and
+the next turn must make a fresh mutation or enter recovery. The actor is not
+allowed to validate, browse broadly, finish, or replay the rejected patch in
+the inspection turn. The novelty progress gate also preserves this temporary
+read surface instead of removing it.
+
+Deterministic evidence: `172 passed, 35 subtests passed`.
+
+The unchanged Qwen3.8-27B/4B frozen regressions both passed after the change:
+
+- Cascading task: `3` iterations, `2` mutations, `3` validations.
+- Multi-file transaction task: `5` iterations, `2` mutations, `3` validations;
+  the transaction preserved the first file until the second file was aligned.
+
+The first post-change SymPy replay reached iteration 5, produced the expected
+rejected `patch_file` search in `sympy/stats/crv_types.py`, and entered the
+new recovery state at iteration 6. It was manually stopped before the
+configured provider timeout completed, so it is explicitly incomplete and is
+not a SymPy capability result. A full-duration replay is required before
+attributing any improvement to this change.
+
+Source checkpoint: `ffb8ebb` (`Recover from rejected mutations with one
+focused read`).
