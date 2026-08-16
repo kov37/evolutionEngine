@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: ffb8ebb
+head_commit: a4833f8 (source checkpoint; replay guard pending commit)
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
@@ -515,4 +515,35 @@ sympy_replay:
   recovery_state_entered: true
   capability_result: "not measured; provider timeout had not completed"
 next_action: "full-duration unchanged SymPy replay"
+```
+
+## 2026-08-16 — rejected mutation replay guard
+
+```yaml
+source_change: >-
+  Record exact rejected product mutation signatures during a run and reject
+  an identical replay before dispatch; helper writes below .agentic/ remain
+  exempt.
+deterministic_tests: "175 passed, 35 subtests passed"
+real_model_cascading:
+  status: incomplete_stopped_before_final_score
+  reached_iteration: 3
+  mutations: 1
+  validations: 1
+  reason: "grader review took priority; no pass claimed"
+sympy_replay:
+  status: incomplete_stopped_after_repeated_stale_patch
+  reached_iteration: 8
+  mutations: 2
+  validations: 2
+  repeated_rejected_patch: true
+  interpretation: >-
+    The host detected the stale patch and supplied recovery evidence, but the
+    actor replayed the same mutation. This motivated the generic replay guard.
+model_specific_logic_added: false
+next_verification:
+  - rerun cascading to completion
+  - rerun multi-file transaction to completion
+  - rerun bounded SymPy unchanged
+  - review validation_pipeline_spec.md when supplied
 ```

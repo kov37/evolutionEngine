@@ -3609,3 +3609,33 @@ attributing any improvement to this change.
 
 Source checkpoint: `ffb8ebb` (`Recover from rejected mutations with one
 focused read`).
+
+### 2026-08-16 — reject exact replay of a failed product mutation
+
+The next unchanged SymPy replay reached two product mutations and then
+repeated the same stale `patch_file` request after the bounded reread. The
+host had detected the failed patch, but the actor could still issue the same
+request after recovery. That is a generic convergence failure (the loop keeps
+trying an action that has already failed), not a SymPy-specific behavior.
+
+The engine now records rejected product-mutation signatures for the duration
+of a run. If the actor emits the exact same mutation again, dispatch rejects
+it before touching the workspace and requires a different targeted mutation or
+recovery. Temporary `.agentic/` helper mutations remain exempt because they
+are controlled validation artifacts rather than product edits.
+
+Deterministic evidence: `175 passed, 35 subtests passed`.
+
+The frozen cascading regression was started after this change but was stopped
+before its final score while the grader design review took priority. It
+reached a real product mutation and validation, so it is incomplete evidence;
+the guard is not declared regression-free until the cascading and multi-file
+regressions are rerun to completion.
+
+This change does not add model-, repository-, or formula-specific behavior.
+The next generic validation improvement should come from the missing
+`validation_pipeline_spec.md` review and the research-backed grader plan,
+not from adding another SymPy exception.
+
+Source checkpoint: working-tree change pending commit (`rejected mutation
+replay guard`).

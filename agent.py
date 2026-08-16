@@ -460,6 +460,27 @@ def _duplicate_product_mutation_reason(tool_name, arguments, successful_signatur
     )
 
 
+def _replayed_rejected_mutation_reason(tool_name, arguments, rejected_signatures):
+    """Reject an exact product mutation that already failed in this run.
+
+    A failed patch means the actor's source snapshot and the file on disk
+    disagree. Replaying the same request cannot resolve that mismatch, so the
+    host forces a new search/replace decision without judging the product.
+    """
+    if tool_name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
+        return None
+    args = arguments or {}
+    if lifecycle_policy.is_validation_helper_path(args.get("path", "")):
+        return None
+    if _call_key(tool_name, args) not in (rejected_signatures or set()):
+        return None
+    return (
+        "REJECTED: this exact product mutation already failed in the current run. "
+        "Do not replay the same search/replace request. Use the current source "
+        "evidence to construct a different targeted mutation, or recover."
+    )
+
+
 def _repair_checkpoint_messages(
     messages, *, last_repair_packet, mutation_checkpoint=None, state_text=""
 ):
@@ -552,7 +573,8 @@ def _rejected_mutation_inspection_messages(
             "[rejected mutation recovery] The previous product patch was rejected because its exact "
             f"search text did not match the file on disk{target}. Use this one turn to read the current "
             "source with a focused inspection tool. Do not patch, validate, finish, browse broadly, or "
-            "repeat the rejected search. The next turn will require a fresh mutation or recovery."
+            "repeat the rejected search. The host will reject the exact failed mutation again. The next "
+            "turn will require a fresh mutation or recovery."
         ),
     }]
     if state_text:
@@ -1202,6 +1224,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     blocked_mutation_paths = set()
     blocked_progress_helper_paths = set()
     successful_mutation_signatures = set()
+    rejected_mutation_signatures = set()
     protected_edit_recovery_pending = False
     repair_turns_used = 0
     repair_recovery_mode = False
@@ -2042,6 +2065,13 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         blocked_command_reasons = {}
         blocked_mutation_reasons = {}
         for call in turn_calls:
+            reason = _replayed_rejected_mutation_reason(
+                call.function.name,
+                call.function.arguments or {},
+                rejected_mutation_signatures,
+            )
+            if reason:
+                blocked_mutation_reasons[_call_key(call.function.name, call.function.arguments or {})] = reason
             reason = _duplicate_product_mutation_reason(
                 call.function.name,
                 call.function.arguments or {},
@@ -2332,6 +2362,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     last_repair_inspection_checkpoint = last_repair_inspection_checkpoint[-4:]
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 last_mutation_rejected = True
+                if (
+                    not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                    and "protected test" not in result.lower()
+                ):
+                    rejected_mutation_signatures.add(_call_key(tool_name, args))
                 # A fresh recovery checkpoint intentionally drops the old
                 # action tail. Preserve the rejection itself so a malformed
                 # patch is not replayed without its syntax/error evidence.

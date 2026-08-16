@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _call_key, _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -528,6 +528,21 @@ class KernelToolTests(unittest.TestCase):
             "patch_file", arguments, set()
         ))
         self.assertIsNone(_duplicate_product_mutation_reason(
+            "patch_file", {**arguments, "path": ".agentic/probe.py"}, {signature}
+        ))
+
+    def test_identical_rejected_product_mutation_is_rejected_again(self):
+        arguments = {"path": "src/module.py", "search": "stale", "replace": "new"}
+        signature = _call_key("patch_file", arguments)
+        reason = _replayed_rejected_mutation_reason(
+            "patch_file", arguments, {signature}
+        )
+        self.assertIn("already failed", reason)
+        self.assertIn("different targeted mutation", reason)
+        self.assertIsNone(_replayed_rejected_mutation_reason(
+            "patch_file", arguments, set()
+        ))
+        self.assertIsNone(_replayed_rejected_mutation_reason(
             "patch_file", {**arguments, "path": ".agentic/probe.py"}, {signature}
         ))
 
