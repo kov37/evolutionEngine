@@ -3461,3 +3461,87 @@ is an artifact and clean-exit pass but a workflow-budget miss. Metrics: 2
 mutations, 3 validations, 4 stale worker judgments, 2 worker calls, 86.8
 seconds. The next optimization target is the remaining repair/validation turn,
 not the transaction semantics.
+
+### 2026-08-15 — validation-gap review after SymPy runs
+
+The host now runs one nearby conventional Python test target after a product
+mutation and preserves both the beginning and end of pytest output. The 4B
+fallback no longer treats the word `pytest` by itself as a setup failure; an
+executed pytest assertion failure is classified as a behavior failure.
+
+Deterministic evidence after these changes: `161 passed, 35 subtests passed`.
+The real run `sympy-13878-novelty-1786844158` delivered the actual
+`ArcsinDistribution`/`_cdf` traceback to the actor. It still failed the
+independent grader, made 3 mutations and 5 validations, and timed out on the
+eighth actor turn. One mutation touched unrelated
+`sympy/polys/agca/modules.py` before the actor returned to
+`sympy/stats/crv_types.py`; this is evidence of a failure-attribution problem,
+not a transaction-buffer failure.
+
+The current validation gap is therefore narrower and more precise:
+
+1. The host can produce behavioral evidence, but noisy suites can contain
+   unrelated failures and the actor may repair the wrong file.
+2. Automatic validation currently may run both a prior failed target and a
+   nearby target, which can duplicate evidence and increase context noise.
+3. Hidden benchmark tests remain invisible by design, so visible tests cannot
+   guarantee the final fix.
+
+Research-backed options considered:
+
+1. Evidence bundle and failure provenance: one authoritative test target per
+   mutation, bounded first-failure plus summary output, changed-file/source
+   overlap, and explicit setup/behavior/unknown classification. This is the
+   recommended next implementation because it strengthens every task without
+   naming a model or benchmark.
+2. Reproduction-test gate: require a temporary host-owned reproducer to fail
+   before the repair and pass after it, then run regression tests. This follows
+   SWT-Bench's test-generation approach, but needs safeguards against weak or
+   overfit generated tests.
+3. Shadow-grader feedback: after each candidate mutation, run an isolated
+   holdout grader and return only a sanitized failure location/summary. This
+   most directly closes the hidden-test gap, but is an evaluation-harness
+   feature rather than a universal agent capability.
+
+Do not implement the next change by adding SymPy formulas, exposing the hidden
+test patch, or allowing the 4B to decide lifecycle state. The preferred order
+is evidence provenance first, reproducer fallback second, and shadow-grader
+feedback only for benchmark experiments.
+
+### 2026-08-15 — evidence provenance and test-only context checkpoint
+
+The validation plane now emits a bounded `FailureProvenance` record containing
+the executed tool/command, plane classification, failed test identifiers,
+source and test paths, changed paths, direct path overlap, and a compact
+diagnostic. Test-only context is included separately and explicitly marked
+`do not edit`, so imports and assertions can guide localization without
+turning the supplied test into a mutation target.
+
+Automatic validation now runs at most one test target per mutation turn. A
+previous failed test takes precedence over nearby-test discovery; nearby
+discovery is only used when no automatic test was already scheduled. Helper
+file writes do not count as product mutations for this hook.
+
+One regression was caught and fixed during the cycle: labeling test context as
+"dependency context" caused the deterministic setup classifier to freeze
+product edits on ordinary assertion failures. The label is now neutral and a
+test locks this boundary.
+
+Deterministic evidence: `165 passed, 35 subtests passed`.
+
+Real-model evidence with Qwen3.8-27B-4bit actor, qwen3.5:4b asynchronous
+worker, MLX/llama.cpp backend, action critic and gate enabled:
+
+- Frozen cascading task: full pass, strict 3/3 iterations, 2 product
+  mutations, 3 validations, clean completion.
+- Frozen multi-file transaction task: full pass, 5 iterations against a
+  strict target of 6, 3 product mutations, 4 validations, clean completion;
+  the transaction preserved `core_math.py` through the intermediate failure
+  and cleared after final validation.
+- Two earlier multi-file attempts reached the correct artifact but missed the
+  workflow target; one was invalidated by the setup-label bug and was not
+  treated as evidence against the corrected implementation.
+
+The next hard-task run is SymPy 13878. Do not add SymPy-specific repair logic;
+use it only to measure whether the generic evidence bundle reduces unrelated
+mutations and improves source attribution.

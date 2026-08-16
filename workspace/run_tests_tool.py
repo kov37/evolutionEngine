@@ -91,7 +91,11 @@ def _pytest_fallback(path: str, absolute_path: str) -> tuple[bool, str] | None:
         return None
 
     output = "\n".join(part.strip() for part in (probe.stdout, probe.stderr) if part.strip())
-    output = output[-1800:]
+    # Keep both the first failure (usually the actionable assertion) and the
+    # final summary. Taking only the tail can discard the actual traceback and
+    # leave the repair agent with warnings or unrelated later failures.
+    if len(output) > 3600:
+        output = output[:1800] + "\n... [pytest output truncated by host] ...\n" + output[-1800:]
     if probe.returncode == 0:
         return True, f"pytest passed: {output or 'tests passed'}"
     if probe.returncode == 5 and re.search(r"no tests? ran|no tests? collected", output, re.I):

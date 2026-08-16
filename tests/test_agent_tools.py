@@ -3,11 +3,12 @@ import time
 import urllib.error
 import unittest
 import json
+import os
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -21,9 +22,9 @@ from kernel.sandbox import set_root
 from kernel.sandbox import confine, get_root
 from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
 from validation_contract import (
-    _failure_diagnostic, _looks_like_file_listing, assertion_driven_tool_contract, from_task,
-    is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
-    source_context_from_failure,
+    _failure_diagnostic, _looks_like_file_listing, assertion_driven_tool_contract, build_failure_provenance,
+    from_task, is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
+    source_context_from_failure, failed_test_context,
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
@@ -495,9 +496,12 @@ class KernelToolTests(unittest.TestCase):
     def test_orientation_recovery_closes_reads_after_bounded_read(self):
         tools = orientation_action_tools(evidence_available=True, recovery_read_used=True)
         self.assertNotIn("read_file", tools)
-        self.assertNotIn("search_file", tools)
         self.assertIn("patch_file", tools)
-        self.assertIn("run_command", tools)
+        self.assertNotIn("search_file", tools)
+        self.assertNotIn("list_symbols", tools)
+        self.assertNotIn("grep_dir", tools)
+        self.assertNotIn("run_command", tools)
+        self.assertNotIn("run_tests", tools)
 
     def test_orientation_evidence_ignores_empty_and_error_reads(self):
         self.assertFalse(_has_orientation_evidence([
@@ -545,6 +549,71 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(_auto_validation_command(".agentic/check.sh"), ["bash", ".agentic/check.sh"])
         self.assertIsNone(_auto_validation_command("src/check.py"))
         self.assertIsNone(_auto_validation_command(".agentic/check.txt"))
+
+    def test_nearby_python_test_target_prefers_local_test_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "pkg", "tests"))
+            Path(os.path.join(root, "pkg", "module.py")).write_text("value = 1\n")
+            Path(os.path.join(root, "pkg", "tests", "test_module.py")).write_text(
+                "def test_value():\n    assert True\n"
+            )
+            self.assertEqual(
+                _nearby_python_test_target("pkg/module.py", root),
+                "pkg/tests",
+            )
+
+    def test_nearby_python_test_target_does_not_guess_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "src"))
+            Path(os.path.join(root, "src", "module.py")).write_text("value = 1\n")
+            Path(os.path.join(root, "README.py")).write_text("text = 1\n")
+            self.assertIsNone(_nearby_python_test_target("src/module.py", root))
+
+    def test_failure_provenance_links_traceback_to_changed_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(os.path.join(root, "src.py")).write_text("raise RuntimeError\n")
+            Path(os.path.join(root, "test_src.py")).write_text("def test_src(): pass\n")
+            result = (
+                "FAILED test_src.py::test_src - AssertionError\n"
+                f'File "{os.path.join(root, "src.py")}", line 1, in <module>\n'
+                "AssertionError: expected 2, got 1"
+            )
+            provenance = build_failure_provenance(
+                "run_tests", {"path": "."}, result, root, changed_paths=("src.py",)
+            )
+            self.assertEqual(provenance.plane, "behavior")
+            self.assertEqual(provenance.source_paths, ("src.py",))
+            self.assertEqual(provenance.test_paths, ("test_src.py",))
+            self.assertEqual(provenance.implicated_changed_paths, ("src.py",))
+            self.assertIn("changed_path_overlap=src.py", provenance.render())
+
+    def test_failure_provenance_distinguishes_missing_test_setup(self):
+        with tempfile.TemporaryDirectory() as root:
+            provenance = build_failure_provenance(
+                "run_tests", {"path": "."}, "(False, 'Ran 0 tests: no tests discovered')",
+                root,
+            )
+            self.assertEqual(provenance.plane, "setup")
+
+    def test_test_only_context_exposes_imports_without_becoming_source_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(os.path.join(root, "test_solver.py")).write_text(
+                "from core_math import Symbol\n"
+                "from matrix_solver import solve\n"
+                "def test_contract():\n"
+                "    assert not hasattr(Symbol(), 'is_real')\n"
+            )
+            context = failed_test_context(
+                "FAILED test_solver.py::test_contract - AssertionError", root
+            )
+            self.assertIn("from core_math import Symbol", context)
+            self.assertIn("do not edit", context)
+
+    def test_test_only_context_label_does_not_look_like_setup_evidence(self):
+        self.assertFalse(_is_validation_setup_failure(
+            "AssertionError: expected True\nTest-only context (do not edit):\n"
+            "from core_math import Symbol"
+        ))
 
     def test_tool_plane_failure_does_not_implicate_product_code(self):
         self.assertTrue(is_tool_plane_failure(
@@ -1131,6 +1200,17 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("Failure class: setup", rendered)
         self.assertIn("run_command", rendered)
         self.assertIn("Preserve", rendered)
+
+    def test_repair_checkpoint_keeps_executed_pytest_failure_in_behavior_plane(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), worker_interval=100)
+        context.request_repair_checkpoint(
+            3, "repair", "pytest failed (exit 1): AssertionError: expected 2, got 1",
+            legal_actions=("patch_file", "run_tests"),
+        )
+        judgment = context.last_judgment
+        self.assertEqual(judgment.failure_class, "behavior")
+        self.assertEqual(judgment.next_action, "patch_file")
+        context.close()
 
     def test_synchronous_triage_gate_returns_bounded_restrictions(self):
         def fake_chat(**kwargs):

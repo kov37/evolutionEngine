@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: f13d82a
+head_commit: 96b63ee
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
@@ -402,4 +402,57 @@ multi-file run is caused primarily by transaction semantics, repair-tool
 selection, stale 4B advice, or the actor model. Propose one minimal generic
 change. Do not modify benchmark fixtures to make the score pass. Specify the
 deterministic test and one real-model run required to validate the proposal.
+```
+
+## 2026-08-15 validation-gap review checkpoint
+
+```yaml
+deterministic_tests: "161 passed, 35 subtests passed"
+latest_sympy_run: sympy-13878-novelty-1786844158
+latest_sympy_result:
+  grader_passed: false
+  actor_returncode: 0
+  mutations: 3
+  validations: 5
+  iterations: 8
+  first_behavioral_traceback_reached_actor: true
+  failure: "ArcsinDistribution is missing _cdf"
+  unrelated_mutation_observed: "sympy/polys/agca/modules.py"
+  interpretation: "validation evidence now arrives; failure attribution remains weak"
+pipeline_changes:
+  - "run one nearby conventional Python test target after a product mutation"
+  - "preserve pytest failure head and tail instead of only the tail"
+  - "classify executed pytest failures as behavior, not setup"
+recommended_architecture:
+  next: "evidence bundle plus failure provenance"
+  later: "host-owned reproducer test fallback"
+  benchmark_only: "sanitized shadow-grader feedback"
+```
+
+## Verified generic checkpoint after provenance implementation
+
+```yaml
+deterministic_tests: "165 passed, 35 subtests passed"
+cascading_loop:
+  passed: true
+  iterations: 3
+  iteration_target: 3
+  mutations: 2
+  validations: 3
+  worker_busy_drops: 0
+multi_file_transaction:
+  passed: true
+  iterations: 5
+  iteration_target: 6
+  mutations: 3
+  validations: 4
+  transaction_preserved_intermediate_edit: true
+  transaction_cleared_after_success: true
+validation_provenance:
+  records: [tool, command, cwd, plane, failed_tests, source_paths, test_paths,
+            changed_paths, changed_path_overlap, diagnostic]
+  test_context: "bounded, explicitly read-only evidence"
+  duplicate_auto_validation: "at most one automatic test target per mutation turn"
+  setup_label_regression: "fixed; test-only context no longer contains setup marker wording"
+next_hard_diagnostic: "SymPy issue 13878"
 ```

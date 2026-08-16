@@ -274,7 +274,7 @@ class NoveltyContext:
         """Classify a repair packet without a model when timing is critical."""
         lower = packet.lower()
         setup = any(marker in lower for marker in (
-            "no tests", "ran 0 tests", "zero tests", "no test evidence", "pytest", "module not found",
+            "no tests", "ran 0 tests", "zero tests", "no test evidence", "module not found",
             "dependency", "could not start", "permission denied",
             # Package-manager success is preparation, not product evidence.
             # Treat it as setup even when the surrounding repair packet calls

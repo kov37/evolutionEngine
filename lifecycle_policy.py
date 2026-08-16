@@ -45,8 +45,12 @@ ORIENTATION_TOOLS = frozenset({
     "finish_task", "recall",
 })
 ORIENTATION_PROGRESS_TOOLS = frozenset({
-    "patch_file", "write_file", "run_tests", "run_command", "run_shell",
-    "finish_task", "recall", "diff_files", "git_diff",
+    # The focused lookup is available through
+    # ``ORIENTATION_RECOVERY_READ_TOOLS`` until the host marks it consumed.
+    # Once consumed, recovery must be a real state transition: mutate the
+    # product or explicitly finish. Re-offering search tools here silently
+    # turns the one-read allowance into an unbounded orientation loop.
+    "patch_file", "write_file", "finish_task", "recall",
 })
 # RECOVER may need one last focused source read when an earlier read was
 # incomplete or covered the wrong file. Keep that escape hatch bounded.

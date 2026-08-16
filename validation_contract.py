@@ -14,12 +14,157 @@ import shlex
 from lifecycle_policy import is_inspection_command, is_output_only_command
 
 
+@dataclass(frozen=True)
+class FailureProvenance:
+    """Compact host evidence about where a validation failure came from."""
+
+    tool: str
+    command: str
+    cwd: str
+    plane: str
+    source_paths: tuple[str, ...] = ()
+    test_paths: tuple[str, ...] = ()
+    failed_tests: tuple[str, ...] = ()
+    changed_paths: tuple[str, ...] = ()
+    implicated_changed_paths: tuple[str, ...] = ()
+    diagnostic: str = ""
+
+    def render(self) -> str:
+        """Render bounded facts for the actor without copying the full log."""
+        fields = [f"tool={self.tool}", f"plane={self.plane}"]
+        if self.command:
+            fields.append(f"command={self.command[:240]}")
+        if self.cwd:
+            fields.append(f"cwd={self.cwd[:120]}")
+        if self.failed_tests:
+            fields.append("failed_tests=" + ",".join(self.failed_tests[:4]))
+        if self.source_paths:
+            fields.append("source_paths=" + ",".join(self.source_paths[:6]))
+        if self.test_paths:
+            fields.append("test_paths=" + ",".join(self.test_paths[:4]))
+        if self.changed_paths:
+            fields.append("changed_paths=" + ",".join(self.changed_paths[:6]))
+        if self.implicated_changed_paths:
+            fields.append(
+                "changed_path_overlap=" + ",".join(self.implicated_changed_paths[:6])
+            )
+        if self.diagnostic:
+            fields.append(f"diagnostic={self.diagnostic[:800]}")
+        return "Validation provenance: " + "; ".join(fields)
+
+
+_FAILURE_PATH_PATTERNS = (
+    re.compile(r"File [\"']([^\"']+)[\"'], line (\d+)"),
+    re.compile(r"(?:\(|\s)([^()\s]+\.(?:py|js|jsx|ts|tsx|java|go|rb|rs|php|c|cpp|h)):(\d+)\b"),
+)
+
+
+def _failure_paths(result_content: str, project_root) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Extract root-confined source/test paths from common traceback formats."""
+    root = Path(project_root).resolve()
+    source: list[str] = []
+    tests: list[str] = []
+    candidates = [
+        match.group(1)
+        for match in re.finditer(r"(?:FAILED|ERROR)\s+([^\s:]+)::", str(result_content or ""), re.I)
+    ]
+    for pattern in _FAILURE_PATH_PATTERNS:
+        candidates.extend(match.group(1) for match in pattern.finditer(str(result_content or "")))
+    for raw_path in candidates:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            if resolved == root or root not in resolved.parents or not resolved.is_file():
+                continue
+            relative = resolved.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+        name = resolved.name.lower()
+        target = tests if name.startswith(("test_", "test-", "tests.")) or name.endswith(("_test.py", ".test.js", ".spec.js")) else source
+        if relative not in target:
+            target.append(relative)
+    return tuple(source), tuple(tests)
+
+
+def build_failure_provenance(
+    tool_name: str,
+    arguments,
+    result_content: str,
+    project_root,
+    changed_paths=(),
+) -> FailureProvenance:
+    """Build a model-agnostic failure record from one executed validation."""
+    args = arguments or {}
+    raw_command = args.get("command", "")
+    if isinstance(raw_command, (list, tuple)):
+        command = " ".join(str(part) for part in raw_command)
+    else:
+        command = str(raw_command or "")
+    source_paths, test_paths = _failure_paths(result_content, project_root)
+    changed = tuple(dict.fromkeys(
+        str(path).replace("\\", "/").lstrip("./")
+        for path in changed_paths if str(path or "").strip()
+    ))
+    overlap = tuple(path for path in changed if path in source_paths)
+    lower = str(result_content or "").lower()
+    if is_tool_plane_failure(tool_name, result_content):
+        plane = "command"
+    elif any(marker in lower for marker in (
+        "no tests", "ran 0 tests", "zero tests", "no test evidence",
+        "module not found", "modulenotfounderror", "dependency", "could not start",
+        "permission denied", "connection refused",
+    )):
+        plane = "setup"
+    elif tool_name == "run_tests" or any(marker in lower for marker in (
+        "assertionerror", "attributeerror", "typeerror", "valueerror", "syntaxerror",
+        "tests failed", "failed:", "did not raise",
+    )):
+        plane = "behavior"
+    else:
+        plane = "unknown"
+    failed_tests = tuple(dict.fromkeys(
+        match.group(1) for match in re.finditer(
+            r"(?:FAILED|ERROR)\s+([^\s]+::[^\s]+)", str(result_content or ""), re.I
+        )
+    ))
+    return FailureProvenance(
+        tool=tool_name,
+        command=command,
+        cwd=str(args.get("cwd", ".")),
+        plane=plane,
+        source_paths=source_paths,
+        test_paths=test_paths,
+        failed_tests=failed_tests,
+        changed_paths=changed,
+        implicated_changed_paths=overlap,
+        diagnostic=_failure_diagnostic(result_content),
+    )
+
+
+def failed_test_context(result_content: str, project_root, max_chars: int = 1400) -> str:
+    """Return bounded test-only context without treating it as patch evidence."""
+    root = Path(project_root).resolve()
+    _, test_paths = _failure_paths(result_content, root)
+    excerpts = []
+    for relative in test_paths[:2]:
+        path = root / relative
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        except OSError:
+            continue
+        excerpts.append(f"{relative} (test-only context; do not edit):\n{text}")
+    return "\n\n".join(excerpts)[:max_chars]
+
+
 def _failure_diagnostic(text: str) -> str:
     """Extract compact exception and assertion-diff evidence."""
     raw = str(text or "")
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     useful = [line for line in lines if re.search(
-        r"(?:SyntaxError|TypeError|ValueError|KeyError|ImportError|ModuleNotFoundError):", line
+        r"(?:SyntaxError|IndentationError|TypeError|ValueError|KeyError|ImportError|"
+        r"ModuleNotFoundError|AssertionError|AttributeError|NameError|RuntimeError):", line
     )]
     minus = [line[1:].strip() for line in lines if line.startswith("-") and not line.startswith("---")]
     plus = [line[1:].strip() for line in lines if line.startswith("+") and not line.startswith("+++")]

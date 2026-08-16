@@ -9,6 +9,7 @@ any real directory — see kernel/sandbox.py for how that confinement works.
 
 import argparse
 import json
+import os
 import re
 import signal
 import time
@@ -768,6 +769,61 @@ def _has_test_artifacts(workspace_listing: str) -> bool:
         )):
             return True
     return False
+
+
+def _nearby_python_test_target(path: str, root: str | None = None) -> str | None:
+    """Find the nearest conventional Python test target for a changed file.
+
+    This is a structural host check, not task knowledge: it looks only at
+    sibling/ancestor names such as ``tests`` and ``test_*.py``. Returning a
+    narrow target avoids launching an entire repository suite after every
+    edit, while still giving the actor authoritative behavioral evidence
+    before it invents version or import probes.
+    """
+    workspace_root = os.path.realpath(root or get_root())
+    raw_path = str(path or "")
+    candidate = os.path.realpath(
+        raw_path if os.path.isabs(raw_path) else os.path.join(workspace_root, raw_path)
+    )
+    try:
+        if os.path.commonpath((workspace_root, candidate)) != workspace_root:
+            return None
+    except ValueError:
+        return None
+    current = candidate if os.path.isdir(candidate) else os.path.dirname(candidate)
+    while True:
+        try:
+            entries = sorted(os.listdir(current))
+        except OSError:
+            entries = []
+        # Prefer a test directory because run_tests can discover its suite
+        # without guessing one particular test module.
+        for entry in entries:
+            full = os.path.join(current, entry)
+            if not os.path.isdir(full) or entry.lower() not in {"test", "tests", "spec", "specs"}:
+                continue
+            try:
+                has_python_test = any(
+                    name.endswith(".py") and name.lower().startswith(("test", "spec"))
+                    for name in os.listdir(full)
+                )
+            except OSError:
+                has_python_test = False
+            if has_python_test:
+                return os.path.relpath(full, workspace_root)
+        # A colocated module is even narrower than a test directory.
+        for entry in entries:
+            lower = entry.lower()
+            if (lower.endswith(".py") and
+                    (lower.startswith("test_") or lower.startswith("test") or
+                     lower.endswith("_test.py"))):
+                return os.path.relpath(os.path.join(current, entry), workspace_root)
+        if current == workspace_root:
+            return None
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def _has_orientation_evidence(messages) -> bool:
@@ -2023,6 +2079,9 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         auto_messages = []
         product_mutation_landed = any(
             action_governor.classify(call.function.name, call.function.arguments or {}) == "MUTATE"
+            and not lifecycle_policy.is_validation_helper_path(
+                (call.function.arguments or {}).get("path", "")
+            )
             and not tmsg.get("content", "").startswith(("ERROR:", "REJECTED:"))
             for call, tmsg in zip(turn_calls, tool_messages)
         )
@@ -2072,6 +2131,46 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 blocked_command_reasons=blocked_command_reasons,
             ))
             print("⚡ [proactive test validation] reran the last failed test after mutation")
+        if (
+            product_mutation_landed
+            and "run_tests" in tool_map
+            and not auto_calls
+            and not any(call.function.name in {
+                "run_tests", "run_command", "run_shell"
+            } for call in turn_calls)
+        ):
+            # The actor may be repairing a task whose external grader is not
+            # visible in the workspace. If a conventional nearby Python test
+            # target is visible, run it deterministically after the edit.
+            # This is structural and bounded to one target per mutation turn;
+            # it does not infer a task-specific command or expected result.
+            # A failing intermediate result remains inside the host
+            # transaction window rather than triggering rollback.
+            test_target = None
+            for call, tmsg in zip(turn_calls, tool_messages):
+                if action_governor.classify(call.function.name, call.function.arguments or {}) != "MUTATE":
+                    continue
+                if tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
+                    continue
+                test_target = _nearby_python_test_target(
+                    (call.function.arguments or {}).get("path", "")
+                )
+                if test_target:
+                    break
+            if test_target:
+                auto_call = SimpleNamespace(function=SimpleNamespace(
+                    name="run_tests", arguments={"path": test_target}
+                ))
+                auto_calls.append(auto_call)
+                auto_messages.extend(dispatch_tool_calls(
+                    [auto_call], tool_map,
+                    allowed_names=allowed_names | {"run_tests"},
+                    blocked_calls=blocked_calls,
+                    blocked_mutation_paths=blocked_mutation_paths,
+                    blocked_command_calls=blocked_command_calls,
+                    blocked_command_reasons=blocked_command_reasons,
+                ))
+                print(f"⚡ [nearby test validation] ran {test_target} after product mutation")
         if validation_required and not transaction_window_open and "run_command" in allowed_names:
             for call, tmsg in zip(turn_calls, tool_messages):
                 if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
@@ -2402,6 +2501,22 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         name, args, result_content,
                         source_context=source_context,
                     )
+                    provenance = validation_contract.build_failure_provenance(
+                        name,
+                        args,
+                        result_content,
+                        get_root(),
+                        changed_paths=(
+                            tuple(sorted(transaction.files))
+                            if transaction is not None else tuple(sorted(pending_product_paths))
+                        ),
+                    )
+                    packet = packet + "\n" + provenance.render()
+                    test_context = validation_contract.failed_test_context(
+                        result_content, get_root()
+                    )
+                    if test_context:
+                        packet += "\nTest-only context (do not edit):\n" + test_context
                     failed_packets.append(packet)
                     if name == "run_tests":
                         last_failed_test_request = {
