@@ -54,7 +54,7 @@ that it is finished is only a trace event.
 | Independent acceptance | A host-owned checker runs outside the actor workspace | Implemented with status, timeout, hash, and bounded detail |
 | Test integrity | The actor did not edit supplied tests | Implemented |
 | Hidden/shadow acceptance | Additional checks the actor cannot inspect or weaken | Implemented generically and wired for the feature task |
-| Mutation strength | Deliberately weakens candidate behavior to test whether checks catch it | Planned after shadow checks |
+| Mutation strength | Deliberately weakens candidate behavior to test whether checks catch it | Implemented generically and wired for the feature task |
 | Trajectory telemetry | Explain time, tool use, retries, unsafe edits, and repair convergence | Partially implemented |
 
 ## Metrics that matter for a small coding model

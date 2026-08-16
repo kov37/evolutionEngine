@@ -16,6 +16,7 @@ from agentic_benchmark import (
     TASKS,
     _check_protected_paths,
     _baseline_contract_valid,
+    _grader_strength_valid,
     _post_task_evidence,
     _protected_task_paths,
     _run_shadow_evidence,
@@ -107,6 +108,19 @@ class AdversarialPreflightTests(unittest.TestCase):
         passed, detail = _apply_shadow_result(False, shadow_result)
         self.assertFalse(passed)
         self.assertIsNone(detail)
+
+    def test_grader_strength_mutations_reject_plausible_wrong_behavior(self):
+        for name, task in TASKS.items():
+            if not task.strength_mutations:
+                continue
+            with self.subTest(task=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _write_setup(root, task.setup)
+                valid, evidence = _grader_strength_valid(task, root)
+                self.assertTrue(valid, evidence)
+                for mutation in task.strength_mutations:
+                    self.assertIn(mutation.name, evidence)
+                    self.assertTrue(evidence[mutation.name]["valid"], evidence)
 
     def test_supplied_test_integrity_is_detected_outside_agent_loop(self):
         task = type("Task", (), {

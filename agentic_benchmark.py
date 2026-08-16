@@ -37,6 +37,22 @@ RUNS = ROOT / "state" / "benchmark" / "agentic"
 
 
 @dataclass(frozen=True)
+class GraderMutation:
+    """A benchmark-owned mutation used to prove a checker is not too weak.
+
+    The mutation script runs in a private copy of the workspace, never in the
+    actor's workspace, and its existence is not part of the task prompt.  The
+    expected statuses describe what the visible grader and hidden shadow
+    checker must observe for the mutation to be a valid strength test.
+    """
+
+    name: str
+    script: str
+    expect_visible: str | None = "FAIL"
+    expect_shadow: str | None = None
+
+
+@dataclass(frozen=True)
 class Task:
     name: str
     prompt: str
@@ -50,6 +66,7 @@ class Task:
     shadow: str | None = None
     budget: int = 20
     max_success_iterations: int | None = None
+    strength_mutations: tuple[GraderMutation, ...] = ()
 
 
 def _write_setup(root: Path, setup: dict[str, str]) -> None:
@@ -181,6 +198,91 @@ def _apply_shadow_result(artifact_passed: bool, shadow_result: dict | None) -> t
             return False, None
         return False, "hidden acceptance evidence failed"
     return artifact_passed, None
+
+
+def _run_grader_mutation(
+    task: Task,
+    root: Path,
+    mutation: GraderMutation,
+) -> dict:
+    """Apply one benchmark-owned mutation in an isolated copy and grade it."""
+    with tempfile.TemporaryDirectory(prefix="novelty-grader-mutation-") as tmp:
+        mutated = Path(tmp)
+        shutil.copytree(root, mutated, dirs_exist_ok=True)
+        applied = subprocess.run(
+            [sys.executable, "-c", mutation.script],
+            cwd=str(mutated),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        if applied.returncode != 0:
+            return {
+                "name": mutation.name,
+                "valid": False,
+                "reason": "mutation script failed: " + _bounded_grader_detail(
+                    applied.stdout, applied.stderr
+                ),
+                "visible": None,
+                "shadow": None,
+            }
+
+        visible = _grade(task, mutated).as_dict()
+        shadow = _run_shadow_evidence(task, mutated)
+        expected_visible = mutation.expect_visible
+        expected_shadow = mutation.expect_shadow
+        visible_ok = (
+            expected_visible is None
+            or (
+                expected_visible == "PASS"
+                and visible["status"] == "PASS"
+            )
+            or (
+                expected_visible == "FAIL"
+                and visible["status"] != "PASS"
+            )
+        )
+        shadow_ok = (
+            expected_shadow is None
+            or (
+                expected_shadow == "PASS"
+                and shadow is not None
+                and shadow["status"] == "PASS"
+            )
+            or (
+                expected_shadow == "FAIL"
+                and shadow is not None
+                and shadow["status"] != "PASS"
+            )
+        )
+        rejected = bool(
+            (expected_visible == "FAIL" and visible["status"] != "PASS")
+            or (expected_shadow == "FAIL" and shadow is not None and shadow["status"] != "PASS")
+        )
+        return {
+            "name": mutation.name,
+            "valid": visible_ok and shadow_ok and rejected,
+            "visible": visible,
+            "shadow": shadow,
+        }
+
+
+def _bounded_grader_detail(stdout: str, stderr: str) -> str:
+    """Return a bounded diagnostic for mutation-script failures."""
+    return ((stdout or "") + (stderr or "")).strip()[-2000:]
+
+
+def _grader_strength_valid(task: Task, root: Path) -> tuple[bool, dict[str, dict]]:
+    """Verify each benchmark-owned mutation is rejected by at least one layer."""
+    evidence: dict[str, dict] = {}
+    if not task.strength_mutations:
+        return True, evidence
+    for mutation in task.strength_mutations:
+        result = _run_grader_mutation(task, root, mutation)
+        evidence[mutation.name] = result
+        if not result["valid"]:
+            return False, evidence
+    return True, evidence
 
 
 def _metrics(output: str) -> dict:
@@ -862,6 +964,20 @@ TASKS = {
             "out = low_stock(items, 6)\n"
             "assert [x['name'] for x in out] == ['b','a']\n"
             "assert items == [{'name':'a','quantity':4},{'name':'b','quantity':2},{'name':'c','quantity':6}]\n"
+        ),
+        strength_mutations=(
+            GraderMutation(
+                name="hardcoded_visible_example",
+                script=(
+                    "from pathlib import Path\n"
+                    "Path('app/inventory.py').write_text(\n"
+                    "    \"def low_stock(items, threshold):\\n\"\n"
+                    "    \"    return [{'name':'b','quantity':1},{'name':'c','quantity':3}]\\n\"\n"
+                    ")\n"
+                ),
+                expect_visible="PASS",
+                expect_shadow="FAIL",
+            ),
         ),
         budget=20,
     ),

@@ -3847,7 +3847,7 @@ python3 -m py_compile agentic_benchmark.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `184` tests. The targeted adversarial
+The full unittest discovery passes `185` tests. The targeted adversarial
 preflight includes new coverage that the shadow source is not embedded in the
 prompt, that a shadow failure is not converted into visible repair detail, and
 that a visible failure is not overwritten by a shadow failure.
@@ -3855,6 +3855,37 @@ that a visible failure is not overwritten by a shadow failure.
 The next real-model check should run the frozen `feature` task with and
 without the novelty worker after the local actor is available. Do not feed
 shadow detail back to the actor and do not weaken the new hidden check.
+
+### 2026-08-15 — mutation-guided grader-strength tests
+
+The benchmark can now prove that a checker is strong enough to reject a
+plausible-but-wrong implementation before spending a model call. A `Task`
+optionally declares `strength_mutations`, each a host-owned Python script plus
+the expected visible/shadow statuses. `agentic_benchmark.py` applies each
+mutation to a private copy of the workspace, never to the actor workspace,
+then runs the visible grader and hidden shadow checker against that copy.
+
+A mutation is valid only when its expected statuses match and at least one
+grading layer rejects it. The frozen `feature` task now includes a
+`hardcoded_visible_example` mutation that passes the visible check but fails
+the new shadow check, proving the shadow layer catches an implementation that
+merely memorizes the visible example.
+
+This is benchmark-owned evaluator hardening, not an actor hint. The mutation
+scripts and expected outcomes are not part of `task.prompt`.
+
+Deterministic evidence:
+
+```text
+python3 -m py_compile agentic_benchmark.py
+python3 -m unittest discover -s tests -v
+```
+
+The full unittest discovery passes `185` tests. The adversarial preflight now
+iterates every task with `strength_mutations` and verifies each mutation is
+rejected by at least one grader layer. The next generic step is extending this
+mutation corpus to additional frozen task shapes; do not feed mutation detail
+back to the actor.
 
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 
