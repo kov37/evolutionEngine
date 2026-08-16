@@ -28,6 +28,11 @@ REPAIR_INSPECTION_TOOLS = frozenset({
 # instead of repairing. Setup recovery deliberately uses the full READ_TOOLS
 # set because its missing target may be the environment itself.
 BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS - frozenset({"list_workspace", "list_dir"})
+# A rejected patch usually means the actor's copied source is stale. Give it
+# one focused inspection turn, then close the read surface again.
+REJECTED_MUTATION_READ_TOOLS = frozenset({
+    "read_file", "search_file", "list_symbols", "grep_dir",
+})
 MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
 DEPENDENCY_MANIFEST_NAMES = frozenset({
     "package.json", "package-lock.json", "npm-shrinkwrap.json",
@@ -294,6 +299,7 @@ def build_validation_policy(
     validation_failures: int,
     protected_edit_recovery_pending: bool,
     repair_recovery_mode: bool,
+    rejected_mutation_read_pending: bool = False,
     mutation_batch_remaining: int = 0,
     accepted_validation_evidence: bool = False,
     background_process_active: bool = False,
@@ -387,6 +393,20 @@ def build_validation_policy(
         prompt = (
             "A validation check failed. Inspect this failure and make one targeted repair now; "
             "do not run another check or finish until the defective artifact has changed."
+        )
+
+    if rejected_mutation_read_pending and not setup_failure:
+        return ValidationActionPolicy(
+            tools=REJECTED_MUTATION_READ_TOOLS,
+            setup_recovery=False,
+            requires_mutation=False,
+            prompt=(
+                "The previous product mutation was rejected because its exact source text did not "
+                "match the file on disk. This is the one bounded source-synchronization turn: use "
+                "read_file or a focused symbol/search tool on the implicated product file now. Do "
+                "not patch, validate, finish, browse broadly, or repeat the rejected search. The "
+                "next turn will require a fresh mutation or recovery decision."
+            ),
         )
 
     if last_mutation_rejected:

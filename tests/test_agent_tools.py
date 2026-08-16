@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
 from dispatch import _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -173,6 +173,19 @@ class KernelToolTests(unittest.TestCase):
         rendered = "\n".join(str(message) for message in checkpoint)
         self.assertIn("return value.is_real", rendered)
         self.assertIn("do not reread these files", rendered)
+
+    def test_rejected_mutation_checkpoint_requires_one_fresh_read(self):
+        checkpoint = _rejected_mutation_inspection_messages(
+            [{"role": "system", "content": "foundation"}, {"role": "user", "content": "task"},
+             {"role": "assistant", "content": "stale patch"}],
+            last_repair_packet="search text was not found",
+            target_path="src/module.py",
+        )
+        rendered = "\n".join(str(message) for message in checkpoint)
+        self.assertIn("one turn to read the current source", rendered)
+        self.assertIn("src/module.py", rendered)
+        self.assertIn("Do not patch", rendered)
+        self.assertNotIn("stale patch", rendered)
 
     def test_transaction_deferral_does_not_disable_single_file_fast_validation(self):
         transaction = TransactionBuffer("/tmp/novelty-test", followup_turns=1)
@@ -367,6 +380,27 @@ class KernelToolTests(unittest.TestCase):
         self.assertNotIn("git_diff", policy.tools)
         self.assertIn("patch_file", policy.tools)
 
+    def test_validation_policy_opens_only_focused_read_after_rejected_mutation(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=False,
+            repair_inspection_used=True, last_mutation_rejected=True,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, rejected_mutation_read_pending=True,
+        )
+        self.assertEqual(policy.tools, {"read_file", "search_file", "list_symbols", "grep_dir"})
+        self.assertFalse(policy.requires_mutation)
+        self.assertIn("one bounded source-synchronization turn", policy.prompt)
+
+    def test_validation_policy_closes_read_after_rejected_mutation_inspection(self):
+        policy = build_validation_policy(
+            validation_required=True, repair_required=True, setup_failure=False,
+            repair_inspection_used=True, last_mutation_rejected=True,
+            validation_failures=1, protected_edit_recovery_pending=False,
+            repair_recovery_mode=False, rejected_mutation_read_pending=False,
+        )
+        self.assertNotIn("read_file", policy.tools)
+        self.assertIn("patch_file", policy.tools)
+
     def test_repair_policy_preserves_failure_authority(self):
         policy = build_validation_policy(
             validation_required=True, repair_required=True, setup_failure=False,
@@ -472,6 +506,16 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("patch_file", policy.tools)
         self.assertNotIn("write_file", policy.tools)
         self.assertIn("write_file was rejected earlier", policy.prompt)
+
+    def test_rejected_mutation_read_surface_overrides_novelty_progress_gate(self):
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
+        for iteration in range(1, 4):
+            context.observe(iteration, "run_tests", {}, "failed")
+        self.assertEqual(
+            _novelty_progress_tool_names(context, rejected_mutation_read_pending=True),
+            {"read_file", "search_file", "list_symbols", "grep_dir"},
+        )
+        context.close()
 
     def test_inventory_does_not_consume_repair_inspection_budget(self):
         self.assertFalse(counts_as_repair_inspection("list_workspace"))

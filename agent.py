@@ -525,6 +525,29 @@ def _source_backed_repair_messages(
     return checkpoint
 
 
+def _rejected_mutation_inspection_messages(
+    messages, *, last_repair_packet, target_path="", state_text=""
+):
+    """Build the one-turn inspection checkpoint after a rejected mutation."""
+    target = f" on `{target_path}`" if target_path else " on the implicated product file"
+    checkpoint = list(messages[:2]) + [{
+        "role": "system",
+        "content": (
+            "[rejected mutation recovery] The previous product patch was rejected because its exact "
+            f"search text did not match the file on disk{target}. Use this one turn to read the current "
+            "source with a focused inspection tool. Do not patch, validate, finish, browse broadly, or "
+            "repeat the rejected search. The next turn will require a fresh mutation or recovery."
+        ),
+    }]
+    if state_text:
+        checkpoint.append({"role": "system", "content": state_text})
+    checkpoint.append({
+        "role": "system",
+        "content": "Latest rejected-mutation evidence:\n" + str(last_repair_packet or "(not available)")[:3000],
+    })
+    return checkpoint
+
+
 # How many prunable entries must accumulate before a prune batch actually
 # runs. Found live: with this at "prune immediately, one at a time" (the
 # original design), pruning fired on nearly every single iteration once
@@ -879,7 +902,10 @@ def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
     return bool(novelty_action_critic or novelty_action_gate)
 
 
-def _novelty_progress_tool_names(novelty_context, *, helper_mutation_blocked=False):
+def _novelty_progress_tool_names(
+    novelty_context, *, helper_mutation_blocked=False,
+    rejected_mutation_read_pending=False,
+):
     """Return the final tool surface when the context ledger requires progress.
 
     This policy is intentionally computed again at the end of turn assembly.
@@ -892,6 +918,8 @@ def _novelty_progress_tool_names(novelty_context, *, helper_mutation_blocked=Fal
     """
     if novelty_context is None or not novelty_context.requires_progress():
         return None
+    if rejected_mutation_read_pending:
+        return {"read_file", "search_file", "list_symbols", "grep_dir"}
     names = {"patch_file", "write_file", "finish_task"}
     repeated_action = novelty_context.repeated_validation_loop()
     if novelty_context.recovery_reads_allowed() and not repeated_action:
@@ -1160,6 +1188,8 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     protected_edit_recovery_pending = False
     repair_turns_used = 0
     repair_recovery_mode = False
+    rejected_mutation_read_pending = False
+    last_rejected_mutation_path = ""
     process_status_used = False
     tool_plane_recovery_attempts = 0
     repair_recovery_entries = 0
@@ -1556,6 +1586,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 validation_failures=validation_failures,
                 protected_edit_recovery_pending=protected_edit_recovery_pending,
                 repair_recovery_mode=repair_recovery_mode,
+                rejected_mutation_read_pending=rejected_mutation_read_pending,
                 mutation_batch_remaining=validation_batch_remaining,
                 accepted_validation_evidence=bool(validation_evidence),
                 background_process_active=bool(active_background_handles()),
@@ -1599,7 +1630,20 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 "content": validation_prompt,
             }]
 
-        if _force_repair_recovery(repair_recovery_mode, repair_required, setup_failure):
+        if rejected_mutation_read_pending and repair_required and not setup_failure:
+            if structured_summary_enabled and state is not None:
+                checkpoint_state = state.render()
+            elif working_state_enabled and ws is not None and ws.revision > 0:
+                checkpoint_state = working_state.render(ws)
+            else:
+                checkpoint_state = ""
+            messages_for_call = _rejected_mutation_inspection_messages(
+                messages,
+                last_repair_packet=last_repair_packet,
+                target_path=last_rejected_mutation_path,
+                state_text=checkpoint_state,
+            )
+        elif _force_repair_recovery(repair_recovery_mode, repair_required, setup_failure):
             # Keep the stable task foundation and recent evidence, then force
             # a concrete mutation. This is a compact repair checkpoint, not a
             # second unbounded transcript.
@@ -1639,6 +1683,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             _novelty_progress_tool_names(
                 novelty_context,
                 helper_mutation_blocked=bool(blocked_progress_helper_paths),
+                rejected_mutation_read_pending=rejected_mutation_read_pending,
             )
             if novelty_action_gate else None
         )
@@ -1768,7 +1813,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         "requiring an executable tool call"
                     )
                     chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
-                if repair_recovery_mode and repair_required and backend == "llama-cpp":
+                if rejected_mutation_read_pending and backend == "llama-cpp":
+                    chat_kwargs["tool_choice"] = "required"
+                    chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
+                    print("🧰 [rejected mutation recovery] requiring one focused inspection tool")
+                elif repair_recovery_mode and repair_required and backend == "llama-cpp":
                     # Recovery has already exhausted the ordinary repair
                     # turns and the registry contains only a targeted
                     # mutation/finish surface. Do not spend two more prose
@@ -1979,6 +2028,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 and _novelty_progress_tool_names(
                     novelty_context,
                     helper_mutation_blocked=bool(blocked_progress_helper_paths),
+                    rejected_mutation_read_pending=rejected_mutation_read_pending,
                 ) is not None):
             # A progress gate is asking for product state change, not another
             # temporary verifier. Keep helper creation legal during ordinary
@@ -2063,6 +2113,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 and _novelty_progress_tool_names(
                     novelty_context,
                     helper_mutation_blocked=bool(blocked_progress_helper_paths),
+                    rejected_mutation_read_pending=rejected_mutation_read_pending,
                 ) is not None
                 and
                 lifecycle_policy.is_validation_helper_path(path)
@@ -2241,6 +2292,12 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     print(f"🛡️ [risk layer] {result}")
             if repair_required and lifecycle_policy.counts_as_repair_inspection(tool_name):
                 repair_inspection_used = True
+                if rejected_mutation_read_pending:
+                    # The inspection allowance is consumed by an attempted
+                    # focused read, even if the read itself fails. This keeps
+                    # the recovery surface bounded.
+                    rejected_mutation_read_pending = False
+                    print("🔎 [rejected mutation recovery] bounded inspection consumed")
                 if not result.startswith(("ERROR:", "REJECTED:")):
                     last_repair_inspection_checkpoint.append({
                         "role": "tool",
@@ -2257,6 +2314,16 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     f"Previous {tool_name} mutation was rejected; change the patch rather than "
                     f"repeating it.\n{result}"
                 )[-3000:]
+                if (
+                    not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                    and "protected test" not in result.lower()
+                ):
+                    rejected_mutation_read_pending = True
+                    last_rejected_mutation_path = str(args.get("path", ""))
+                    print(
+                        "🔎 [rejected mutation recovery] scheduling one fresh source inspection "
+                        f"for {last_rejected_mutation_path or 'the implicated product file'}"
+                    )
             success = action_governor.infer_success(capability, tool_name, result)
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 # A governor heuristic must never turn a failed mutation into
@@ -2269,6 +2336,8 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             if capability == "MUTATE" and success is True and not helper_mutation:
                 turn_mutated = True
                 last_mutation_rejected = False
+                rejected_mutation_read_pending = False
+                last_rejected_mutation_path = ""
                 if first_mutation_elapsed is None:
                     first_mutation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first mutation] {first_mutation_elapsed:.3f}s")
