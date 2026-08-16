@@ -3438,3 +3438,26 @@ The actor preserved `core_math.py` through the intermediate failure, changed
 The independent grader passed, the engine reached its own `DONE` state, and
 the transaction buffer ended inactive with no tracked files. This is the
 authoritative real-model evidence for the transaction design after `f13d82a`.
+
+### 2026-08-15 — retry stale tool calls inside the same turn
+
+The MLX server accepts a required-tool request but does not enforce the tool
+name. The actor therefore sometimes emitted a remembered `read_file` even
+when the host contract (the currently allowed tool list) contained only
+mutation tools. The dispatcher correctly rejected it, but waiting for the next
+iteration wasted a full model decision cycle.
+
+The agent now performs one bounded in-turn contract retry: it tells the actor
+which emitted name was unavailable and asks for exactly one name from the
+current host list. The invalid call is neither executed nor added to the
+conversation history. This is provider- and task-agnostic; it is a host
+recovery mechanism, not a prompt hint or a task answer.
+
+Deterministic evidence: `161 passed, 35 subtests passed`. In the real frozen
+cascading run, the stale `read_file` was retried inside iteration 2, the actor
+made both product fixes, the artifact grader passed, and `finish_task` was
+called. The run still used 4 iterations against the strict target of 3, so it
+is an artifact and clean-exit pass but a workflow-budget miss. Metrics: 2
+mutations, 3 validations, 4 stale worker judgments, 2 worker calls, 86.8
+seconds. The next optimization target is the remaining repair/validation turn,
+not the transaction semantics.

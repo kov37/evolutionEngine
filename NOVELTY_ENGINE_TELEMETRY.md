@@ -89,7 +89,7 @@ primary_unresolved_target: SymPy issue 13878
     "count a rejected orientation inspection as the one allowed recovery read",
     "require a legal provider tool after orientation recovery closes inspection"
   ],
-  "deterministic": "160 passed, 35 subtests passed",
+  "deterministic": "161 passed, 35 subtests passed",
   "real_model_cascading": {
     "artifact_passed": true,
     "workflow_passed": false,
@@ -99,10 +99,18 @@ primary_unresolved_target: SymPy issue 13878
     "validations": 2,
     "stale_judgments": 4,
     "worker_busy_drops": 1,
-    "elapsed_seconds": 67.4,
-    "interpretation": "correct repair, one extra source-backed repair turn"
+    "elapsed_seconds": 86.8,
+    "worker_calls": 2,
+    "stale_judgments": 4,
+    "interpretation": "correct repair and clean exit, but one extra repair/validation iteration"
   },
-  "model_runtime": "MLX actor uses Apple GPU when the local server is alive; this run's server remained alive through the benchmark"
+  "model_runtime": "MLX actor uses Apple GPU when the local server is alive; this run's server remained alive through the benchmark",
+  "tool_contract_retry": {
+    "status": "implemented in working tree; one invalid tool call is retried inside the same logical turn",
+    "plain_english": "when the model asks for a forbidden tool, the host immediately asks it to choose from the allowed list instead of wasting a full turn",
+    "real_model_observation": "read_file was rejected and patch_file followed in the same iteration",
+    "fixture_changed": false
+  }
 }
 ```
 

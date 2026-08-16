@@ -867,6 +867,15 @@ def _progress_tool_call_required(novelty_context, novelty_action_gate, backend, 
     return True
 
 
+def _stale_tool_names(tool_calls, allowed_names) -> tuple[str, ...]:
+    """Return tool names emitted outside the host's current contract."""
+    allowed = set(allowed_names or ())
+    return tuple(sorted({
+        call.function.name for call in (tool_calls or [])
+        if call.function.name not in allowed
+    }))
+
+
 def _consume_orientation_recovery_read(
     recovery_active: bool,
     evidence_available: bool,
@@ -1660,6 +1669,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
 
         response = None
         last_error = None
+        contract_retry_used = False
         for attempt in range(1, MAX_CHAT_RETRIES + 1):
             try:
                 chat_kwargs = dict(
@@ -1730,6 +1740,39 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     chat_kwargs["max_tokens"] = FORCED_ACTION_MAX_TOKENS
                     print("🧰 [progress gate] requiring one legal progress tool")
                 response = _chat_with_timeout(**chat_kwargs)
+                stale_tools = _stale_tool_names(
+                    getattr(getattr(response, "message", None), "tool_calls", None),
+                    {tool.__name__ for tool in tools_for_call},
+                )
+                if (
+                    stale_tools
+                    and not contract_retry_used
+                    and tools_for_call
+                    and len({tool.__name__ for tool in tools_for_call}) < len(tool_map)
+                ):
+                    # Some OpenAI-compatible local servers accept
+                    # tool_choice=required but do not enforce the selected
+                    # name. Retry once inside the same logical turn so a
+                    # remembered tool cannot consume an iteration or enter
+                    # the repair transcript. The host still chooses no
+                    # mutation and reveals no task-specific answer.
+                    contract_retry_used = True
+                    current_names = ", ".join(sorted({tool.__name__ for tool in tools_for_call}))
+                    messages_for_call = messages_for_call + [{
+                        "role": "system",
+                        "content": (
+                            "The previous response named unavailable tool(s): "
+                            + ", ".join(stale_tools)
+                            + ". That call was not executed. Retry this same turn using exactly one "
+                            "currently available tool: " + current_names + ". Do not mention or call "
+                            "the unavailable tool again."
+                        ),
+                    }]
+                    print(
+                        f"🔁 [tool contract retry] unavailable tool(s) {list(stale_tools)}; "
+                        f"requesting one of {current_names}"
+                    )
+                    continue
                 break
             except ChatTimeoutError as e:
                 last_error = e
