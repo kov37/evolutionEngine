@@ -3971,6 +3971,26 @@ OpenAI-compatible server:
 The manifest-root guard is now covered by the deterministic path checks and
 is independent of model or task wording.
 
+### 2026-08-15 — non-web data-pipeline validation fix
+
+The live `data_report` run exposed an over-broad task-category inference: any
+prompt mentioning `json` was classified as `web`, so a successful data-pipeline
+check was rejected as “no interaction evidence.” `from_task()` no longer treats
+the word `json` by itself as web/API evidence, and the generic executable
+evidence vocabulary now recognizes explicit `validation` success markers.
+
+These are generic validation-plane corrections, not task- or model-specific
+hints. Deterministic coverage was added for a JSON data-pipeline prompt and
+successful `VALIDATION OK` output.
+
+Real-model results with Qwen3.8-27B-4bit:
+
+- `bug_repair` novelty: `PASS`, baseline: `PASS`.
+- `recovery` novelty: `PASS`, baseline: `PASS`.
+- `data_report` novelty: `PASS`, baseline: `PASS`.
+
+The full deterministic suite remains `189 tests OK`.
+
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 
 This is the operating manual for the next frontier model. The implementation

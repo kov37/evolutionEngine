@@ -654,7 +654,7 @@ class ValidationContract:
         )
         if tool_name != "run_tests" and not health_evidence and not re.search(
             r"\b(assert(?:ion)?|check|verify|test(?:ing|ed)?|pytest|unittest|curl|wget|http|urllib|health|status|"
-            r"received|connected|response|message|pong|websocket|passed)\b|"
+            r"received|connected|response|message|pong|websocket|passed|validation)\b|"
             r"\btest[_-][A-Za-z0-9_-]+",
             probe,
             re.I,
@@ -873,7 +873,7 @@ def from_task(task, task_type="code_change"):
             endpoints.append(match)
     lower = text.lower()
     categories = set()
-    if endpoints or any(w in lower for w in ("api", "http", "json", "endpoint", "server")):
+    if endpoints or any(w in lower for w in ("api", "http", "endpoint", "server")):
         categories.update(("api", "web"))
     if any(w in lower for w in ("command line", "cli", "command", "exit code", "stdout")):
         categories.add("cli")

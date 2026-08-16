@@ -403,6 +403,29 @@ class AdversarialPreflightTests(unittest.TestCase):
         )
         self.assertTrue(accepted)
 
+    def test_data_report_json_success_is_not_web_only_evidence(self):
+        contract = from_task(
+            "Read sales.csv and write report.json containing total_sales, "
+            "sales_by_region, and top_product. Use the Python standard library. "
+            "Run a check against the supplied data before finishing."
+        )
+        self.assertFalse(contract.categories.intersection({"api", "web"}))
+        output = (
+            "Exit code: 0\n"
+            "STDOUT:\n"
+            '{"total_sales": 28.0, "sales_by_region": {"North": 16.0, "South": 12.0}, '
+            '"top_product": "Book"}\n'
+            "VALIDATION OK: {'total_sales': 28.0, 'sales_by_region': {'North': 16.0, "
+            "'South': 12.0}, 'top_product': 'Book'}\n"
+            "STDERR:\n"
+        )
+        accepted, reason, *_ = contract.assess(
+            "run_command",
+            {"command": ["python3", "report.py"]},
+            output,
+        )
+        self.assertTrue(accepted, reason)
+
     def test_cascading_function_tests_report_the_current_failure(self):
         """A repair must reveal the next defect, not collapse into zero tests."""
         with tempfile.TemporaryDirectory() as tmp:
