@@ -582,5 +582,5 @@ remaining_grader_work:
   - add hidden/shadow acceptance checks outside actor visibility
   - add supplied-test integrity and diff checks
 model_specific_logic_added: false
-source_checkpoint: "pending commit"
+source_checkpoint: "78c757c"
 ```

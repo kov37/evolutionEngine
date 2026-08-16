@@ -3669,4 +3669,4 @@ pass-to-pass evidence, protected hidden/shadow tests, and a tamper/integrity
 check for supplied tests. The missing `validation_pipeline_spec.md` must be
 reviewed before claiming those requirements are complete.
 
-Source checkpoint: pending commit (`independent grader isolation`).
+Source checkpoint: `78c757c` (`Isolate independent benchmark graders`).
