@@ -14,7 +14,7 @@ import action_governor
 import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
-from kernel.io_tools import patch_file, validate_python_syntax
+from kernel.io_tools import _find_closest_match_hint, patch_file, validate_python_syntax
 from risk_layer import RiskLayer
 from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
@@ -530,6 +530,19 @@ class KernelToolTests(unittest.TestCase):
         self.assertIsNone(_duplicate_product_mutation_reason(
             "patch_file", {**arguments, "path": ".agentic/probe.py"}, {signature}
         ))
+
+    def test_large_file_patch_hint_shows_current_anchor(self):
+        lines = [f"filler_{index} = {index}" for index in range(4001)]
+        lines[2000] = "class TargetDistribution(Base):"
+        lines[2001] = "    def pdf(self, x):"
+        content = "\n".join(lines)
+        hint = _find_closest_match_hint(
+            content,
+            "class TargetDistribution(Base):\n    def pdf(self, x):\n        return stale_value",
+        )
+        self.assertIn("actual current file content", hint)
+        self.assertIn("class·TargetDistribution(Base):", hint)
+        self.assertIn("Use this current excerpt", hint)
 
     def test_inventory_does_not_consume_repair_inspection_budget(self):
         self.assertFalse(counts_as_repair_inspection("list_workspace"))

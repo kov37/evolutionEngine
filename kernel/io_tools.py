@@ -185,8 +185,38 @@ def _find_closest_match_hint(content: str, search: str, max_lines_scanned: int =
     cheaply or nothing found is close enough to be useful noise-free."""
     content_lines = content.splitlines()
     search_lines = search.splitlines()
-    if not search_lines or len(content_lines) > max_lines_scanned:
+    if not search_lines:
         return ""
+
+    if len(content_lines) > max_lines_scanned:
+        # Full fuzzy matching is intentionally bounded for large source
+        # files, but returning no location makes the next model turn guess
+        # again. Find one distinctive exact line from the requested block and
+        # show a small current-file neighborhood around it. This is a tool
+        # feedback improvement, not a language- or task-specific repair rule.
+        normalized = [line.rstrip() for line in content_lines]
+        candidates = []
+        for search_index, search_line in enumerate(search_lines):
+            needle = search_line.rstrip()
+            if len(needle.strip()) < 12:
+                continue
+            matches = [index for index, line in enumerate(normalized) if line == needle]
+            if len(matches) == 1:
+                candidates.append((len(needle), search_index, matches[0]))
+        if not candidates:
+            return ""
+        _, search_index, match_index = max(candidates)
+        radius = min(8, max(3, len(search_lines) // 2))
+        start = max(0, match_index - radius)
+        end = min(len(content_lines), match_index + radius + 1)
+        snippet = "\n".join(content_lines[start:end])
+        return (
+            f"\n\nA distinctive line from your search exists, but the full block is stale. "
+            f"Current file excerpt at lines {start + 1}-{end} (the matching search line was "
+            f"line {search_index + 1} of your request):\n"
+            f"--- actual current file content ---\n{_visible_whitespace(snippet)}\n"
+            "Use this current excerpt to construct a new patch; do not replay the old block."
+        )
 
     window = len(search_lines)
     best_ratio = 0.0
