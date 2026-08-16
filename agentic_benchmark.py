@@ -353,8 +353,23 @@ def _scorecard_passed(artifact_passed: bool, finish_called: bool, run_completed:
     return bool(artifact_passed and run_completed and (finish_called or handoff_reconciled))
 
 
+def _handoff_reconciled(artifact_passed: bool, run_completed: bool, output: str) -> bool:
+    """Return true only for a clean artifact plus an explicit provider-loss stop."""
+    return bool(artifact_passed and run_completed and _provider_interrupted(output or ""))
+
+
 def _verifier_repair_prompt(task: Task, detail: str) -> str:
     """Turn independent-grader evidence into one generic bounded repair pass."""
+    manifest_hint = _missing_dependency_manifest_hint(detail)
+    manifest_block = ""
+    if manifest_hint:
+        manifest_block = (
+            "\n\n## Missing dependency declaration\n"
+            "The independent verifier reported a missing dependency declaration. "
+            "Create or update the conventional manifest for this project "
+            f"({manifest_hint}) before running the behavioral check. Do not skip "
+            "the manifest or rely on an ad hoc runtime probe to satisfy the verifier."
+        )
     return (
         task.prompt
         + "\n\n## Independent verifier feedback\n"
@@ -365,7 +380,25 @@ def _verifier_repair_prompt(task: Task, detail: str) -> str:
           "independent verifier after handoff; do not invoke or rewrite its generated grader, and "
           "do not rewrite supplied task files.\n"
         + detail[-3000:]
+        + manifest_block
     )
+
+
+def _missing_dependency_manifest_hint(detail: str) -> str:
+    """Return a generic manifest hint when a verifier reports a missing manifest."""
+    lowered = str(detail or "").lower()
+    manifest_names = {
+        "package.json": "package.json",
+        "requirements.txt": "requirements.txt",
+        "pyproject.toml": "pyproject.toml",
+        "cargo.toml": "Cargo.toml",
+        "go.mod": "go.mod",
+        "pom.xml": "pom.xml",
+    }
+    for marker, display in manifest_names.items():
+        if marker in lowered:
+            return display
+    return ""
 
 
 def _provider_interrupted(output: str) -> bool:
@@ -1179,11 +1212,16 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     if shadow_detail and visible_artifact_passed:
         detail = shadow_detail
 
-    handoff_reconciled = bool(
-        verifier_repair is not None
-        and artifact_passed
-        and _run_completed(timed_out, returncode)
-        and _provider_interrupted(repair_stdout or "")
+    # A provider can terminate cleanly after the artifact is already correct,
+    # either during the initial actor run or during the bounded verifier-repair
+    # pass. Reconcile that narrow handoff only when the independent artifact
+    # check passed, the actor process exited cleanly, and the trace has the
+    # explicit provider-loss signature. This does not make a timeout, nonzero
+    # exit, or ordinary model stall a pass.
+    handoff_reconciled = _handoff_reconciled(
+        artifact_passed,
+        _run_completed(timed_out, returncode),
+        (repair_stdout or "") if verifier_repair is not None else (stdout or ""),
     )
     scorecard = {
         "artifact_passed": artifact_passed,

@@ -2152,6 +2152,25 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # setup recovery and ordinary validation must not rewrite the
             # artifact or supplied evidence.
             command_mutation_blocked = not repair_required or setup_failure
+            # A dependency manifest is a project contract, not an ephemeral
+            # validation helper. Reject manifest writes below .agentic/ in
+            # every validation plane; the actor must create it at the project
+            # root before dependency installation can succeed.
+            for call in turn_calls:
+                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
+                    continue
+                args = call.function.arguments or {}
+                path = args.get("path", "")
+                if (
+                    lifecycle_policy.is_validation_helper_path(path)
+                    and lifecycle_policy.is_dependency_manifest_name(path)
+                ):
+                    key = _call_key(call.function.name, args)
+                    blocked_mutation_reasons[key] = (
+                        "REJECTED: a dependency manifest must be written at the project root, "
+                        "not below .agentic/. Use the root manifest path (for example "
+                        "package.json, pyproject.toml, or requirements.txt)."
+                    )
             if setup_failure:
                 for call in turn_calls:
                     if call.function.name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:

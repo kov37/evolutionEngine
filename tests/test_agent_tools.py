@@ -14,7 +14,7 @@ import action_governor
 import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
-from kernel.io_tools import _find_closest_match_hint, patch_file, validate_python_syntax
+from kernel.io_tools import _find_closest_match_hint, patch_file, read_file, validate_python_syntax
 from risk_layer import RiskLayer
 from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
@@ -35,7 +35,16 @@ from lifecycle_policy import (
 )
 from workspace import run_tests_tool
 from workspace.run_tests_tool import run_tests
-from agentic_benchmark import TASKS, _profile_limits, _provider_interrupted, _run_completed, _scorecard_passed
+from agentic_benchmark import (
+    TASKS,
+    _handoff_reconciled,
+    _missing_dependency_manifest_hint,
+    _profile_limits,
+    _provider_interrupted,
+    _run_completed,
+    _scorecard_passed,
+    _verifier_repair_prompt,
+)
 
 
 class _FakeMessage:
@@ -380,6 +389,8 @@ class KernelToolTests(unittest.TestCase):
             self.assertTrue(is_dependency_manifest_path(path))
         for path in ("server.js", "index.html", "tests/test_app.py", "package.json.bak"):
             self.assertFalse(is_dependency_manifest_path(path))
+        self.assertFalse(is_dependency_manifest_path(".agentic/package.json"))
+        self.assertFalse(is_dependency_manifest_path(".agentic/requirements.txt"))
         self.assertTrue(is_validation_helper_path(".agentic/smoke.cjs"))
         self.assertFalse(is_validation_helper_path("smoke.cjs"))
 
@@ -811,6 +822,13 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_provider_interrupted("validation failed; repair required"))
         self.assertFalse(_scorecard_passed(True, True, False))
         self.assertTrue(_scorecard_passed(True, True, True))
+
+    def test_initial_provider_loss_can_reconcile_a_passing_artifact(self):
+        self.assertTrue(_handoff_reconciled(True, True, "acting-model turn failed"))
+        self.assertTrue(_handoff_reconciled(True, True, "provider unavailable; ending run cleanly"))
+        self.assertFalse(_handoff_reconciled(True, True, "validation failed; repair required"))
+        self.assertFalse(_handoff_reconciled(True, False, "acting-model turn failed"))
+        self.assertFalse(_handoff_reconciled(False, True, "acting-model turn failed"))
 
 
     def test_risk_layer_rolls_back_destructive_repair_rewrite(self):
@@ -1680,6 +1698,27 @@ class KernelToolTests(unittest.TestCase):
             self.assertTrue(rejected.startswith("ERROR:"))
             self.assertIn("cwd='.'", rejected)
         self.assertTrue(run_command(["python3", "-c", "print('ok')"], cwd="..").startswith("ERROR:"))
+
+    def test_read_file_normalizes_nonpositive_limit_to_full_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            (Path(tmp) / "app.py").write_text("a\nb\nc\n", encoding="utf-8")
+            result = read_file("app.py", limit=0)
+            self.assertIn("a", result)
+            self.assertIn("b", result)
+            self.assertIn("c", result)
+            self.assertNotIn("[lines 1-0", result)
+
+    def test_verifier_repair_prompt_adds_missing_manifest_hint(self):
+        task = type("Task", (), {"prompt": "Repair the application."})()
+        prompt = _verifier_repair_prompt(
+            task,
+            "AssertionError: package.json must declare the runtime dependency",
+        )
+        self.assertIn("Missing dependency declaration", prompt)
+        self.assertIn("package.json", prompt)
+        self.assertIn("Create or update the conventional manifest", prompt)
+        self.assertEqual(_missing_dependency_manifest_hint("assertion mismatch"), "")
 
     def test_virtual_workspace_cwd_alias_resolves_to_project_root(self):
         with tempfile.TemporaryDirectory() as tmp:

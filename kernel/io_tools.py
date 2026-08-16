@@ -122,6 +122,11 @@ def read_file(path: str, offset: int = 1, limit: int = None) -> str:
     start_idx = offset - 1
     if total_lines and start_idx >= total_lines:
         return f"ERROR: offset {offset} is past the end of '{path}' ({total_lines} lines total)."
+    if limit is not None and limit <= 0:
+        # A small model sometimes emits ``limit: 0`` as if it meant "read the
+        # whole file". Returning an empty window wastes a turn; normalize that
+        # unambiguous zero/negative bound to the existing full-file behavior.
+        limit = None
     end_idx = total_lines if limit is None else min(total_lines, start_idx + limit)
     content = "".join(lines[start_idx:end_idx])
 

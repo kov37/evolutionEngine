@@ -175,13 +175,23 @@ def counts_as_repair_inspection(tool_name: str) -> bool:
     return tool_name in REPAIR_INSPECTION_TOOLS
 
 
-def is_dependency_manifest_path(path: str) -> bool:
-    """Return true only for a conventional dependency/config manifest path."""
+def is_dependency_manifest_name(path: str) -> bool:
+    """Return true when the basename is a conventional dependency manifest."""
     normalized = str(path or "").replace("\\", "/").rstrip("/")
     name = normalized.rsplit("/", 1)[-1].lower()
     return name in DEPENDENCY_MANIFEST_NAMES or (
         name.startswith("requirements") and name.endswith(".txt")
     )
+
+
+def is_dependency_manifest_path(path: str) -> bool:
+    """Return true only for a non-helper dependency manifest path."""
+    normalized = str(path or "").replace("\\", "/").rstrip("/")
+    if is_validation_helper_path(normalized):
+        # A dependency manifest is a project contract and must live at the
+        # project root, not under the ephemeral .agentic/ validation lane.
+        return False
+    return is_dependency_manifest_name(normalized)
 
 
 def is_validation_helper_path(path: str) -> bool:

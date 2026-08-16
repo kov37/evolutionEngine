@@ -3847,7 +3847,7 @@ python3 -m py_compile agentic_benchmark.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `186` tests. The targeted adversarial
+The full unittest discovery passes `189` tests. The targeted adversarial
 preflight includes new coverage that the shadow source is not embedded in the
 prompt, that a shadow failure is not converted into visible repair detail, and
 that a visible failure is not overwritten by a shadow failure.
@@ -3881,7 +3881,7 @@ python3 -m py_compile agentic_benchmark.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `186` tests. The adversarial preflight now
+The full unittest discovery passes `189` tests. The adversarial preflight now
 iterates every task with `strength_mutations` and verifies each mutation is
 rejected by at least one grader layer. The next generic step is extending this
 mutation corpus to additional frozen task shapes; do not feed mutation detail
@@ -3909,7 +3909,7 @@ python3 -m py_compile agent.py
 python3 -m unittest discover -s tests -v
 ```
 
-The full unittest discovery passes `186` tests, including a new regression that
+The full unittest discovery passes `189` tests, including a new regression that
 `_completion_ready` rejects initial pass evidence for a task that asks to add a
 function.
 
@@ -3930,6 +3930,46 @@ The frozen `cascading_loop` novelty regression also passed after the
 completion guard: `PASS`, exact 3/3 iteration target, 2 mutations, 3
 validations, 2 validation failures, and clean completion. This confirms the
 new completion predicate does not regress the sequential-repair workflow.
+
+### 2026-08-15 — WebSocket manifest-root invariant and clean-provider-loss reconciliation
+
+The live WebSocket cycle exposed two generic control-plane defects:
+
+1. The actor wrote a dependency manifest below `.agentic/`, which is a
+   temporary validation lane. A dependency manifest is a project-root
+   contract, not a probe. `lifecycle_policy` now distinguishes the manifest
+   basename from its path: manifest names under `.agentic/` are rejected, and
+   dispatch tells the actor to write the root manifest instead.
+2. A clean actor run could produce a correct artifact but end on a provider
+   disconnect before calling `finish_task`. `agentic_benchmark.py` now
+   reconciles that narrow case when the independent artifact passes, the actor
+   process exits cleanly, and the trace has the explicit provider-loss
+   signature. This does not turn timeouts, nonzero exits, or ordinary stalls
+   into passes.
+
+The `read_file` tool now normalizes `limit <= 0` to “read the whole file.”
+This is a generic tool-contract normalization; a zero-length read window
+produced no useful evidence and wasted orientation turns.
+
+Deterministic evidence:
+
+```text
+python3 -m py_compile agent.py agentic_benchmark.py kernel/io_tools.py lifecycle_policy.py
+python3 -m unittest discover -s tests -v
+```
+
+The full unittest discovery passes `189` tests.
+
+Real-model evidence with Qwen3.8-27B-4bit through the local MLX
+OpenAI-compatible server:
+
+- `websocket_chat` novelty: `PASS`, 9 iterations, 3 mutations, 2 validations,
+  artifact passed, clean provider-loss handoff reconciled.
+- `websocket_chat` baseline: `PASS`, 7 iterations, 3 mutations, 1 validation,
+  artifact passed, clean provider-loss handoff reconciled.
+
+The manifest-root guard is now covered by the deterministic path checks and
+is independent of model or task wording.
 
 ## 2026-08-15 — reproducible handoff and phased implementation plan
 
