@@ -5,7 +5,7 @@ schema: novelty-engine-telemetry/v1
 generated_at: 2026-08-15
 repository: /Users/digitialchameleon/noveltyEngine
 branch: noveltyEngine
-head_commit: 3c7ac37
+head_commit: 79958b6
 remote: https://github.com/kov37/evolutionEngine.git
 active_agent_runs: 0
 active_model_servers: 2
@@ -455,4 +455,32 @@ validation_provenance:
   duplicate_auto_validation: "at most one automatic test target per mutation turn"
   setup_label_regression: "fixed; test-only context no longer contains setup marker wording"
 next_hard_diagnostic: "SymPy issue 13878"
+```
+
+## Latest hard-task review
+
+```yaml
+sympy_run: sympy-13878-novelty-1786845580
+actor_returncode: 0
+grader_passed: false
+grader_timed_out: true
+grader_timeout_seconds: 120
+mutations: 2
+validations: 2
+first_validation_reached_actor: true
+rejected_patch_recovery: "missing; actor repeated patch searches without a fresh read"
+transaction_expired: true
+interpretation: >-
+  Validation evidence is reaching the actor. The remaining generic gap is
+  converting a rejected mutation into a bounded inspect-then-repair or
+  recover action.
+review_plans:
+  recommended: evidence_provenance_plus_rejected_mutation_recovery
+  second: host_owned_reproducer_gate
+  benchmark_only: sanitized_shadow_grader
+next_cycle:
+  - deterministic rejected-patch recovery tests
+  - unchanged cascading regression
+  - unchanged multi-file transaction regression
+  - bounded SymPy rerun
 ```

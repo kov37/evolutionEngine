@@ -3545,3 +3545,37 @@ worker, MLX/llama.cpp backend, action critic and gate enabled:
 The next hard-task run is SymPy 13878. Do not add SymPy-specific repair logic;
 use it only to measure whether the generic evidence bundle reduces unrelated
 mutations and improves source attribution.
+
+### 2026-08-15 — review of the validation gap and latest SymPy evidence
+
+The latest unchanged SymPy run was `sympy-13878-novelty-1786845580`. The
+actor exited cleanly, but the independent grader timed out after 120 seconds
+with no passing result. The actor did receive a real behavior failure and made
+two product mutations, but it did not complete a repair. It issued a first
+`patch_file` against `sympy/stats/crv_types.py` whose search text was not
+present, then issued two more failed searches; the final duplicate was
+detected as stagnation. The transaction expired after two validation
+failures. This means the validation signal is now reaching the actor, but the
+generic repair loop still needs a deterministic response to a rejected patch:
+inspect the current file once, then produce a fresh mutation or recover.
+
+The review considered three model-agnostic plans:
+
+1. Evidence bundle and failure provenance: keep host-owned records for the
+   command, test IDs, source/test paths, changed paths, overlap, and compact
+   diagnostics; after a rejected mutation, require a fresh bounded inspection
+   before another mutation. This is the recommended plan.
+2. Host-owned reproduction gate: generate or select a minimal reproducer,
+   require it to fail before mutation and pass afterward, then run regression
+   tests. This gives stronger causal evidence but can create weak or overfit
+   tests and adds another execution phase.
+3. Sanitized shadow-grader feedback: run an isolated holdout grader after a
+   candidate patch and return only a bounded failure summary. This is useful
+   for benchmark experiments, but it gives the general engine access to
+   evaluation infrastructure that normal coding tasks do not have.
+
+The decision is to continue with Plan 1, adding a generic rejected-mutation
+recovery contract before adopting Plan 2. Plan 3 remains benchmark-only. The
+next test cycle is: deterministic rejected-patch tests, unchanged cascading
+and multi-file regression runs, then a bounded SymPy rerun. No benchmark
+fixture, hidden test, model name, or SymPy formula may be added to the engine.
