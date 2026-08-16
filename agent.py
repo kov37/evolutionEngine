@@ -444,6 +444,22 @@ def _is_blocked_repair_action(tool_name, result_content):
     ))
 
 
+def _duplicate_product_mutation_reason(tool_name, arguments, successful_signatures):
+    """Return a rejection when an identical product mutation already landed."""
+    if tool_name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
+        return None
+    args = arguments or {}
+    if lifecycle_policy.is_validation_helper_path(args.get("path", "")):
+        return None
+    if _call_key(tool_name, args) not in (successful_signatures or set()):
+        return None
+    return (
+        "REJECTED: this identical product mutation already succeeded in the current run. "
+        "Do not apply it again; inspect the current file and make a different targeted "
+        "change or recover."
+    )
+
+
 def _repair_checkpoint_messages(
     messages, *, last_repair_packet, mutation_checkpoint=None, state_text=""
 ):
@@ -1185,6 +1201,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     last_mutation_rejected = False
     blocked_mutation_paths = set()
     blocked_progress_helper_paths = set()
+    successful_mutation_signatures = set()
     protected_edit_recovery_pending = False
     repair_turns_used = 0
     repair_recovery_mode = False
@@ -2024,6 +2041,14 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         blocked_command_calls = set()
         blocked_command_reasons = {}
         blocked_mutation_reasons = {}
+        for call in turn_calls:
+            reason = _duplicate_product_mutation_reason(
+                call.function.name,
+                call.function.arguments or {},
+                successful_mutation_signatures,
+            )
+            if reason:
+                blocked_mutation_reasons[_call_key(call.function.name, call.function.arguments or {})] = reason
         if (novelty_action_gate and novelty_context is not None
                 and _novelty_progress_tool_names(
                     novelty_context,
@@ -2338,6 +2363,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 last_mutation_rejected = False
                 rejected_mutation_read_pending = False
                 last_rejected_mutation_path = ""
+                successful_mutation_signatures.add(_call_key(tool_name, args))
                 if first_mutation_elapsed is None:
                     first_mutation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first mutation] {first_mutation_elapsed:.3f}s")
