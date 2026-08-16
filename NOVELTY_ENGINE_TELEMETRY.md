@@ -619,3 +619,174 @@ remaining_grader_work:
   - hidden/shadow acceptance checks outside actor visibility
 source_checkpoint: "820b4bf"
 ```
+
+## 2026-08-15 — validation packet, preconditions, and advisory worker
+
+```yaml
+source_change:
+  - host-owned bounded first-failure validation packet
+  - fail_to_pass baseline evidence and optional pass_to_pass evidence
+  - 4B Ollama JSON Schema with deterministic sampling settings
+  - 4B suggestions no longer alter host tool legality or FSM state
+deterministic_tests: "185 passed, 37 subtests passed"
+worker_request:
+  guided_json_schema: true
+  think: false
+  temperature: 0
+  seed: 0
+  repeat_penalty: 1.0
+  live_schema_call: PASS
+grader_evidence:
+  baseline_statuses: "FAIL for cascading_loop and multi_file_transaction"
+  baseline_failure_types_are_checked: true
+  timeout_or_invalid_environment_counts_as_valid_baseline: false
+  checker_outside_actor_workspace: true
+  supplied_test_integrity: true
+real_model_regressions_before_latest_worker_change:
+  cascading_loop:
+    passed: true
+    iterations: 3
+    grader_status: PASS
+    fail_to_pass: true
+  multi_file_transaction:
+    passed: true
+    iterations: 5
+    grader_status: PASS
+    fail_to_pass: true
+  websocket_chat:
+    independent_grader_status: PASS
+    actor_finish_called: false
+    handoff_reconciled: true
+    interpretation: >-
+      A bounded verifier repair completed the artifact, but the actor's setup
+      recovery and 4B gating behavior remained inefficient. Rerun required
+      after making the worker advisory-only.
+next_grader_work:
+  - hidden/shadow acceptance checks outside actor visibility
+  - mutation-guided checker strength tests
+  - advice_followed and stale_advice telemetry
+model_specific_logic_added: false
+source_checkpoint: pending
+```
+
+## 2026-08-15 — pause checkpoint and worker ablation
+
+```yaml
+implementation_loop: paused_by_user
+benchmark_child_running: false
+model_servers: left_running
+worker_authority:
+  tool_restrictions_from_4b_applied: false
+  fsm_transitions_from_4b: false
+  context_advice_visible_to_actor: true
+  host_dispatch_authority: true
+worker_generation:
+  guided_json_schema: true
+  live_ollama_schema_call: PASS
+  think: false
+  temperature: 0
+  seed: 0
+  repeat_penalty: 1.0
+advice_telemetry:
+  fields:
+    - advice_issued
+    - advice_followed
+    - advice_successful
+    - advice_failed
+    - advice_regression_signals
+  interpretation: >-
+    Diagnostic only. A net-positive claim requires a paired run with the 4B
+    disabled; advice counters cannot prove causality by themselves.
+paired_cascading_ablation:
+  novelty:
+    passed: true
+    elapsed_seconds: 64.7
+    iterations: 3
+    mutations: 2
+    advice_issued: 2
+    advice_followed: 1
+    advice_successful: 1
+    advice_failed: 0
+    advice_regression_signals: 0
+  baseline_without_4b:
+    passed: true
+    elapsed_seconds: 49.0
+    iterations: 3
+    mutations: 2
+  result: >-
+    Same outcome and iteration count; novelty was approximately 15.7 seconds
+    slower in this single pair. This motivates deferred triage for simple
+    first failures, but is not a statistically strong universal result.
+latest_confirmed_deterministic_tests: "187 passed, 37 subtests, 1 warning"
+latest_confirmed_real_runs:
+  cascading_novelty:
+    grader: PASS
+    fail_to_pass: true
+    iterations: 3
+  websocket_after_advisory_only:
+    grader: PASS
+    actor_finish_called: false
+    handoff_reconciled: true
+    verifier_repair: true
+verification_pending_after_pause:
+  - rerun corrected triage-deferral test
+  - rerun cascading and multi-file after final optimization
+  - paired WebSocket ablation
+  - hidden/shadow grader
+  - mutation-guided grader-strength tests
+reproducibility:
+  implementation_loop: "stopped_for_documentation"
+  documentation_only_after_pause: true
+  benchmark_child_running: false
+  model_servers: "left running; no benchmark process should be assumed active"
+  repository_root: "/Users/digitialchameleon/noveltyEngine"
+  branch: "noveltyEngine"
+  benchmark_definition: "agentic_benchmark.py"
+  independent_grader: "independent_grader.py"
+  actor: "agent.py"
+  worker: "novelty_context.py"
+  lifecycle_policy: "lifecycle_policy.py"
+  validation_packet: "validation_packet.py"
+  deterministic_tests: "tests/"
+  result_history: "state/benchmark/agentic/results.jsonl"
+  monitor_history: "state/benchmark/agentic/monitor-<task>-<condition>-*.jsonl"
+  handoff: "NOVELTY_ENGINE_HANDOFF.md"
+  research: "VALIDATION_GRADER_RESEARCH.md"
+  authority_order:
+    - "host evidence and dispatch"
+    - "deterministic FSM/lifecycle policy"
+    - "independent grader"
+    - "actor proposal"
+    - "4B suggestion"
+  benchmark_tasks:
+    - cascading_loop
+    - multi_file_transaction
+    - websocket_chat
+    - 3d_scene
+    - real_app
+    - wifi_simulator
+  method:
+    - "state one generic failure mode"
+    - "change one model-agnostic host mechanism"
+    - "add deterministic regression coverage"
+    - "run preflight before model calls"
+    - "run frozen task and paired component-disabled baseline"
+    - "compare useful progress per second and recovery cost"
+    - "repeat on another task shape"
+    - "document verified and pending evidence"
+    - "commit only coherent source/docs"
+  phases:
+    0: "resume safely and verify the pending deterministic test"
+    1: "rerun frozen tasks and paired WebSocket ablation"
+    2: "add hidden/shadow, pass-to-pass, and mutation-strength grader checks"
+    3: "make multi-file transactions explicit and bounded"
+    4: "measure percentage-based context pruning/compaction"
+    5: "ablate worker-on/off/delayed while keeping 4B advisory-only"
+    6: "run unchanged SymPy 13878 after short regressions are green"
+  pending_verification:
+    - "corrected triage-deferral unit test"
+    - "cascading and multi-file after final triage deferral"
+    - "paired WebSocket worker ablation"
+    - "hidden/shadow grader"
+    - "mutation-guided grader-strength tests"
+```

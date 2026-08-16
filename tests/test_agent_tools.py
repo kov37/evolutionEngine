@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled, _should_run_worker_triage
 from dispatch import _call_key, _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
 import kernel.exec_tools as exec_tools
@@ -20,12 +20,13 @@ from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
 from kernel.sandbox import set_root
 from kernel.sandbox import confine, get_root
-from novelty_context import NoveltyContext, WorkerJudgment, _parse_judgment
+from novelty_context import NoveltyContext, WorkerJudgment, WORKER_OUTPUT_SCHEMA, _parse_judgment, _worker_request_kwargs
 from validation_contract import (
     _failure_diagnostic, _looks_like_file_listing, assertion_driven_tool_contract, build_failure_provenance,
     from_task, is_dependency_setup_command, is_probe_quality_failure, is_tool_plane_failure,
     source_context_from_failure, failed_test_context,
 )
+from validation_packet import build_failed_validation_packet, extract_first_failure
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
 from lifecycle_policy import (
     build_validation_policy, counts_as_repair_inspection, is_dependency_manifest_path,
@@ -325,7 +326,7 @@ class KernelToolTests(unittest.TestCase):
         )
         self.assertEqual(
             _authoritative_gate_restrictions({"patch_file", "write_file"}, True),
-            {"patch_file", "write_file"},
+            set(),
         )
 
     def test_worker_gate_is_opt_in(self):
@@ -337,6 +338,20 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(_worker_triage_enabled(False, False))
         self.assertTrue(_worker_triage_enabled(True, False))
         self.assertTrue(_worker_triage_enabled(False, True))
+
+    def test_worker_triage_is_deferred_until_ambiguous_or_repeated_failure(self):
+        self.assertFalse(_should_run_worker_triage(
+            True, True, validation_failures=1,
+            failure_packet="AssertionError: wrong value",
+        ))
+        self.assertTrue(_should_run_worker_triage(
+            True, True, validation_failures=2,
+            failure_packet="AssertionError: wrong value",
+        ))
+        self.assertTrue(_should_run_worker_triage(
+            True, True, validation_failures=1,
+            failure_packet="No module named pytest; no tests discovered",
+        ))
 
     def test_validation_policy_is_setup_then_command(self):
         first = build_validation_policy(
@@ -1407,6 +1422,41 @@ class KernelToolTests(unittest.TestCase):
         self.assertEqual(metrics["mutations"], 1)
         self.assertEqual(len(calls), 2)
         self.assertIn("num_ctx", calls[0]["options"])
+
+    def test_worker_generation_is_schema_guided_and_deterministic(self):
+        request = _worker_request_kwargs(4096)
+        self.assertFalse(request["think"])
+        self.assertEqual(request["options"]["temperature"], 0)
+        self.assertEqual(request["options"]["seed"], 0)
+        self.assertEqual(request["options"]["repeat_penalty"], 1.0)
+        self.assertFalse(WORKER_OUTPUT_SCHEMA["additionalProperties"])
+        self.assertIn("failure_class", WORKER_OUTPUT_SCHEMA["required"])
+
+    def test_advisory_telemetry_scores_followed_successful_and_failed_advice(self):
+        context = NoveltyContext(
+            chat_fn=lambda **kwargs: _FakeResponse(
+                '{"phase":"repair","recommended_action":"patch_file",'
+                '"next_action":"patch_file","failure_class":"behavior",'
+                '"confidence":0.9}'
+            ),
+            worker_interval=100,
+        )
+        context.synchronous_triage(
+            1, "repair", "AssertionError: wrong value", legal_actions=("patch_file",)
+        )
+        context.observe(2, "patch_file", {"path": "app.py"}, "Wrote app.py", mutation=True)
+        context.synchronous_triage(
+            3, "repair", "AssertionError: wrong value", legal_actions=("patch_file",)
+        )
+        context.observe(4, "patch_file", {"path": "app.py"}, "ERROR: stale patch")
+        metrics = context.metrics()
+        context.close()
+        self.assertEqual(metrics["advice_issued"], 2)
+        self.assertEqual(metrics["advice_followed"], 2)
+        self.assertEqual(metrics["advice_successful"], 1)
+        self.assertEqual(metrics["advice_failed"], 1)
+        self.assertEqual(metrics["advice_regression_signals"], 1)
+        self.assertEqual(metrics["advice_success_rate"], 0.5)
 
     def test_context_worker_failure_does_not_block(self):
         def failing_chat(**kwargs):

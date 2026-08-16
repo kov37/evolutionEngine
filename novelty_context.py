@@ -28,6 +28,49 @@ MAX_WORKER_OUTPUT_CHARS = 1200
 MAX_REPAIR_PACKET_CHARS = 2200
 DEFAULT_TRIAGE_TIMEOUT = 5.0
 
+# Ollama accepts a JSON Schema in ``format``.  This constrains the worker's
+# token stream to one small machine-readable object instead of relying on a
+# prompt asking politely for JSON.  The schema describes suggestions only;
+# no field grants a tool or changes the lifecycle.
+WORKER_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "phase", "new_facts", "relevant_facts", "duplicate_action", "stagnating",
+        "recommended_action", "blocker", "target", "confidence", "diagnosis",
+        "failure_class", "next_action", "preserve_files",
+    ],
+    "properties": {
+        "phase": {"type": "string", "enum": ["orient", "localize", "hypothesize", "mutate", "verify", "repair"]},
+        "new_facts": {"type": "array", "items": {"type": "string", "maxLength": 300}, "maxItems": 3},
+        "relevant_facts": {"type": "array", "items": {"type": "string", "maxLength": 300}, "maxItems": 3},
+        "duplicate_action": {"type": "boolean"},
+        "stagnating": {"type": "boolean"},
+        "recommended_action": {"type": "string", "enum": ["inspect", "patch_file", "validate", "finish_or_repair"]},
+        "blocker": {"type": "string", "maxLength": 240},
+        "target": {"type": "string", "maxLength": 240},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "diagnosis": {"type": "string", "maxLength": 360},
+        "failure_class": {"type": "string", "enum": ["setup", "behavior", "progress", "completion", "unknown"]},
+        "next_action": {"type": "string", "enum": ["inspect", "patch_file", "validate", "run_command", "finish_or_repair"]},
+        "preserve_files": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 5},
+    },
+}
+
+
+def _worker_request_kwargs(num_ctx: int) -> dict[str, Any]:
+    """Return deterministic, schema-guided settings for the 4B utility."""
+    return {
+        "think": False,
+        "format": WORKER_OUTPUT_SCHEMA,
+        "options": {
+            "num_ctx": num_ctx,
+            "temperature": 0,
+            "seed": 0,
+            "repeat_penalty": 1.0,
+        },
+    }
+
 
 @dataclass
 class ContextEvent:
@@ -165,7 +208,7 @@ def _ollama_process(prompt: str, model: str, num_ctx: int, conn) -> None:
     try:
         from ollama import chat
         response = chat(model=model, messages=[{"role": "user", "content": prompt}],
-                        think=False, options={"num_ctx": num_ctx})
+                        **_worker_request_kwargs(num_ctx))
         raw = getattr(getattr(response, "message", None), "content", "") or ""
         conn.send({"ok": True, "raw": raw[:MAX_WORKER_OUTPUT_CHARS]})
     except Exception as exc:
@@ -256,6 +299,15 @@ class NoveltyContext:
         self.no_action_turns = 0
         self._gate_judgment: WorkerJudgment | None = None
         self._last_stale_pair: tuple[int, int] | None = None
+        # Synchronous triage advice is measured separately from correctness.
+        # These counters show whether the actor followed a suggestion and
+        # what happened immediately afterward; they never affect policy.
+        self.advisories_issued = 0
+        self.advisories_followed = 0
+        self.advisories_successful = 0
+        self.advisories_failed = 0
+        self.advisories_regression_signals = 0
+        self._pending_advisory: dict[str, Any] | None = None
 
     def state_text(self) -> str:
         with self._lock:
@@ -400,6 +452,11 @@ class NoveltyContext:
             judgment = deterministic
         with self._lock:
             self._gate_judgment = judgment
+            self.advisories_issued += 1
+            self._pending_advisory = {
+                "source_event_id": judgment.event_id,
+                "action": judgment.next_action or judgment.recommended_action,
+            }
         return judgment
 
     def consume_gate_restrictions(self) -> set[str]:
@@ -429,6 +486,7 @@ class NoveltyContext:
         with self._lock:
             self.events.append(event)
             self.events = self.events[-100:]
+            self._score_advisory_locked(event)
             # Harvest a completed result before replacing the future.  Without
             # this, a fast sequence of events could overwrite a completed
             # future before collect() ever saw it.
@@ -465,6 +523,36 @@ class NoveltyContext:
                 self.coalesced_events += 1
                 return
             self._start_worker_locked(event, fallback)
+
+    def _score_advisory_locked(self, event: ContextEvent) -> None:
+        """Score one next action after triage advice, without steering it."""
+        advice = self._pending_advisory
+        if not advice or event.event_id <= int(advice.get("source_event_id", 0)):
+            return
+        self._pending_advisory = None
+        action = str(advice.get("action", ""))
+        tool = event.tool
+        followed = (
+            (action == "patch_file" and tool in {"patch_file", "write_file"})
+            or (action == "run_command" and tool in {"run_command", "run_shell", "run_tests"})
+            or (action == "validate" and tool in {"run_tests", "run_command", "run_shell"})
+            or (action == "inspect" and tool in {"read_file", "search_file", "find_files", "list_symbols", "grep_dir"})
+            or (action == "finish_or_repair" and tool == "finish_task")
+        )
+        if not followed:
+            return
+        self.advisories_followed += 1
+        failed = event.result.startswith(("ERROR:", "REJECTED:")) or (
+            tool in {"run_tests", "run_command", "run_shell"}
+            and any(marker in event.result.lower() for marker in (
+                "exit code: 1", "exit code: 2", "failed", "assertionerror", "syntaxerror",
+            ))
+        )
+        if failed:
+            self.advisories_failed += 1
+            self.advisories_regression_signals += 1
+        else:
+            self.advisories_successful += 1
 
     def observe_no_action(self, iteration: int, content: str = "", legal_actions=None) -> None:
         """Record an actor turn that produced prose but no executable action.
@@ -554,8 +642,11 @@ class NoveltyContext:
             else:
                 chat_fn = self._chat_fn
             self.worker_calls += 1
-            response = chat_fn(model=self.worker_model, messages=[{"role": "user", "content": _prompt(state, event)}],
-                               think=False, options={"num_ctx": self.worker_num_ctx})
+            response = chat_fn(
+                model=self.worker_model,
+                messages=[{"role": "user", "content": _prompt(state, event)}],
+                **_worker_request_kwargs(self.worker_num_ctx),
+            )
             raw = getattr(getattr(response, "message", None), "content", "")
             judgment = _parse_judgment(raw[:MAX_WORKER_OUTPUT_CHARS], fallback)
             judgment.event_id = event.event_id
@@ -763,7 +854,19 @@ class NoveltyContext:
                     "worker_busy_drops": self.worker_busy_drops, "coalesced_events": self.coalesced_events,
                     "stale_judgments": self.stale_judgments, "latest_event_id": self.events[-1].event_id if self.events else 0,
                     "judgment_event_id": self.last_judgment.event_id, "judgments": len(self.judgments),
-                    "duplicate_judgments": duplicates, "elapsed_s": monotonic() - self.started_at}
+                    "duplicate_judgments": duplicates,
+                    "advice_issued": self.advisories_issued,
+                    "advice_followed": self.advisories_followed,
+                    "advice_successful": self.advisories_successful,
+                    "advice_failed": self.advisories_failed,
+                    "advice_regression_signals": self.advisories_regression_signals,
+                    "advice_followed_rate": round(
+                        self.advisories_followed / self.advisories_issued, 3
+                    ) if self.advisories_issued else 0.0,
+                    "advice_success_rate": round(
+                        self.advisories_successful / self.advisories_followed, 3
+                    ) if self.advisories_followed else 0.0,
+                    "elapsed_s": monotonic() - self.started_at}
 
     def blocked_calls(self) -> set[tuple[str, str]]:
         """Exact calls that produced the same error twice in succession."""

@@ -3697,3 +3697,303 @@ pass-to-pass regression evidence, and a separate hidden/shadow acceptance
 layer. These must remain benchmark-owned and unavailable to the actor.
 
 Source checkpoint: `820b4bf` (`Protect supplied tests during grading`).
+
+### 2026-08-15 — host validation packet, preconditions, and advisory-only 4B
+
+The host now builds a strict, dependency-free `FailedValidationPacket` from
+raw execution output. It selects one first actionable failure, confines paths
+to the candidate workspace, bounds all strings, records an evidence digest,
+and keeps the complete stream in host telemetry instead of copying it into the
+actor context. This is a compact fact packet (a small machine-readable report),
+not a model-generated diagnosis.
+
+The reusable benchmark now supports host-owned `fail_to_pass` preconditions
+(the initial checker must genuinely fail) and optional `pass_to_pass` checks
+(unrelated behavior must remain good). Timeout and invalid-environment results
+are not accepted as a valid baseline failure. Frozen cascading and multi-file
+tasks both record valid baseline `FAIL` evidence before the actor starts.
+
+The 4B worker is now explicitly advisory. Its suggestions are logged but can no
+longer remove tools or change lifecycle state. The deterministic host policy
+still restricts unsafe paths, including allowing only dependency manifests in
+the setup plane. This fixed a WebSocket deadlock where the worker's stale setup
+judgment removed the only path to create a root `package.json`.
+
+The worker request is also guided by a strict Ollama JSON Schema with thinking
+disabled, temperature `0`, seed `0`, and repetition penalty `1.0`. A live
+`qwen3.5:4b` call returned a schema-valid JSON object. This makes the format and
+sampling repeatable, not the semantic judgment correct; the host remains the
+authority.
+
+Research findings and sources are recorded in
+[`VALIDATION_GRADER_RESEARCH.md`](VALIDATION_GRADER_RESEARCH.md). The research
+supports independent execution, hidden/shadow checks, mutation-strength tests,
+and separate trajectory metrics. It also warns that a passing visible suite
+can accept a plausible but wrong patch, so this checkpoint is not the final
+grader design.
+
+Deterministic evidence after these changes: `185 passed, 37 subtests passed`.
+
+Real-model evidence before the advisory-only rerun:
+
+- Cascading: `PASS`, 3 iterations, valid fail-to-pass baseline, 2 mutations,
+  3 validations, supplied test unchanged.
+- Multi-file transaction: `PASS`, 5 iterations, valid fail-to-pass baseline,
+  2 mutations, 3 validations, supplied test unchanged.
+- WebSocket: independent acceptance eventually passed through one bounded
+  verifier-repair pass, but the first actor run stalled on setup/behavior plane
+  handling and did not call `finish_task`. This is evidence that the grader can
+  recover a correct artifact, not proof that the actor loop is solved.
+
+Source checkpoint: pending the full deterministic suite and the next unchanged
+WebSocket regression after making the 4B advisory-only.
+
+### 2026-08-15 — pause checkpoint: worker authority, advice telemetry, and ablation
+
+Implementation is intentionally paused at the user's request. No benchmark
+child process is running. The Ollama/MLX model servers are separate managed
+services and were not stopped.
+
+The 4B is now advisory-only in the live orchestration path. Its synchronous
+triage output is logged as `4B advisory only`; it cannot remove tools or change
+the FSM. Host policy and dispatch remain authoritative. The worker still
+appears in the actor context as a recommendation, so it can influence the
+35B's choice indirectly; that influence is now measured rather than trusted.
+
+The worker output request uses Ollama guided JSON generation: a closed JSON
+Schema, thinking disabled, temperature `0`, seed `0`, and repetition penalty
+`1.0`. A live `qwen3.5:4b` call returned a valid structured object. This
+improves format repeatability, not diagnosis correctness.
+
+New advice telemetry records:
+
+- `advice_issued`
+- `advice_followed`
+- `advice_successful`
+- `advice_failed`
+- `advice_regression_signals`
+- followed and successful rates
+
+The first paired ablation on the frozen cascading task found:
+
+| Condition | Result | Iterations | Mutations | Elapsed |
+| --- | --- | ---: | ---: | ---: |
+| 4B novelty | PASS | 3 | 2 | ~64.7 s |
+| 4B disabled baseline | PASS | 3 | 2 | ~49.0 s |
+
+The novelty run issued 2 synchronous advisories; the actor followed 1, which
+succeeded, and no followed advice produced a regression. However, the outcome
+was identical and novelty was about 15.7 seconds slower. This is not enough
+for a universal conclusion, but it is evidence that synchronous advice is not
+worth paying for on this simple cascading task.
+
+The latest generic optimization therefore defers synchronous 4B triage until
+setup failure, repeated failure, or a multi-file transaction. The deterministic
+local path handles the first ordinary behavior failure. This final optimization
+has a corrected unit test but has not been rerun after that correction because
+the implementation loop was paused.
+
+Latest confirmed verification before the pause: `187 passed, 37 subtests`
+with one warning. The last complete cascading novelty run passed with a valid
+fail-to-pass baseline and independent grader `PASS`. The last WebSocket run
+after the advisory-only change passed the independent grader through one
+bounded verifier-repair pass, but the actor did not call `finish_task`; the
+handoff was reconciled because the verifier had already accepted the artifact.
+That is useful recovery evidence, not proof of fast actor convergence.
+
+Known incomplete work:
+
+- Rerun the final corrected deterministic test after resuming.
+- Rerun cascading and multi-file after the triage deferral.
+- Run a paired multi-file/WebSocket ablation with and without the 4B.
+- Add hidden/shadow acceptance checks outside actor visibility.
+- Add mutation-guided grader-strength tests.
+- Decide whether the verifier-repair handoff should count as success in the
+  primary score or as a separate recovery score.
+
+The research summary is in
+[`VALIDATION_GRADER_RESEARCH.md`](VALIDATION_GRADER_RESEARCH.md). The next
+agent should read this section first, run the pending deterministic test, then
+resume the paired ablation cycle. Do not add task-specific hints or let the
+4B regain tool authority.
+
+## 2026-08-15 — reproducible handoff and phased implementation plan
+
+This is the operating manual for the next frontier model. The implementation
+loop is paused. Reproduce the method below, preserve the frozen benchmarks,
+and change one generic control at a time.
+
+### Current architecture in plain English
+
+NoveltyEngine is a host-controlled coding agent. The 27B/35B-class model is
+the actor (the model that reads the task, uses tools, changes product files,
+and tries to finish). The 4B model is the worker (a small helper that formats
+or summarizes evidence). The Python host is the control plane (the part that
+owns rules, runs commands, decides which tools are legal, and decides whether
+the work is actually correct).
+
+The actor proposes tool calls; it does not directly decide that its code is
+correct. The host validates each call, executes it in an isolated task
+workspace, records the event, and runs verification at controlled points. A
+bounded factual packet is sent back instead of an unlimited raw transcript.
+
+The layers are:
+
+1. Benchmark/workspace: agentic_benchmark.py creates a fresh temporary
+   workspace from a frozen task, snapshots supplied-test hashes, runs a
+   baseline checker, starts the actor, and invokes an independent grader.
+2. Actor/tools: agent.py exposes shell, reads, writes/patches, verification,
+   and finish_task. A tool call is a request, not an unrestricted command;
+   host dispatch checks names, paths, state, budgets, repeated failed
+   mutations, and context size.
+3. Lifecycle/FSM: lifecycle_policy.py and the lifecycle state machine track
+   setup, orientation, act, validate, repair, recover, and complete. An FSM
+   (finite-state machine, meaning fixed legal states and transitions) makes
+   the next legal actions explicit.
+4. Validation/grading: the host records PASS, FAIL, TIMEOUT, or
+   ENVIRONMENT_INVALID. A model claim or finish_task call is not proof. The
+   grader also rejects changes to benchmark-supplied tests.
+5. Failure packet: validation_packet.py selects one bounded first actionable
+   failure, confines paths to the task root, records command, exit code,
+   primary error, transaction overlap, and evidence digest. This is
+   provenance (where a fact came from), not an LLM diagnosis.
+6. Transaction/recovery: product mutations and failed mutation signatures
+   are tracked. A multi-file change may remain temporarily broken while
+   dependent files are aligned; exact replay of a rejected product mutation
+   is refused. Recovery is bounded and does not blindly erase user changes.
+7. 4B worker: novelty_context.py uses guided JSON, thinking disabled,
+   temperature 0, seed 0, and repetition penalty 1.0. The worker is advisory
+   only: it cannot remove tools, transition the FSM, or declare success. It
+   is deferred on a simple first failure and used for setup failure, repeated
+   failure, or multi-file ambiguity.
+8. Telemetry: each run writes to
+   state/benchmark/agentic/results.jsonl; monitors use
+   state/benchmark/agentic/monitor-<task>-<condition>-*.jsonl. Metrics include
+   iterations, mutations, validations, first-mutation time, worker calls,
+   advice followed/successful/failed, timeout, grader status, test integrity,
+   and verifier-repair use.
+
+Authority is deliberately ordered:
+
+    host evidence and dispatch rules
+      > deterministic FSM and grader
+      > actor tool proposal
+      > 4B suggestion
+      > actor's natural-language success claim
+
+The 4B is not a second judge. Its value must be established with paired
+ablation (the same run with and without it), not a single successful run.
+
+### Frozen benchmark paths and meanings
+
+Definitions are in agentic_benchmark.py; the independent checker is in
+independent_grader.py; deterministic coverage is in tests/.
+
+| Task | What it tests |
+| --- | --- |
+| cascading_loop | Two sequential defects; the first repair reveals the second. |
+| multi_file_transaction | A cross-file refactor with a broken intermediate state. |
+| websocket_chat | Server/browser protocol, payload, process setup, and recovery. |
+| 3d_scene | Short real application generation and artifact inspection. |
+| real_app | Broader end-to-end application workflow. |
+| wifi_simulator | Offline GUI artifact and interaction checks. |
+
+SymPy 13878 is the long-horizon capability target, not a replacement for the
+short regression suite. A timeout or manually stopped SymPy run is incomplete
+evidence, not a capability pass.
+
+### Reproduction procedure
+
+After resuming, use this bounded sequence:
+
+    cd /Users/digitialchameleon/noveltyEngine
+    git status --short
+    git log -1 --oneline
+    python3 -m py_compile agent.py agentic_benchmark.py novelty_context.py validation_packet.py
+    python3 -m pytest -q tests
+
+The paused checkpoint has not rerun the corrected triage-deferral test, so the
+older 187 passed, 37 subtests result is not proof of the current tree.
+
+Check services without starting duplicates:
+
+    pgrep -fl 'agentic_benchmark.py|agent.py|llama-server|ollama'
+    curl -fsS http://127.0.0.1:8080/health
+
+Use the already-running Qwen3.8-27B 4-bit MLX/llama.cpp-compatible actor at
+http://127.0.0.1:8080/v1 only if healthy. The local Ollama qwen3.5:4b is the
+worker. A dead endpoint is an environment result, not model-quality evidence.
+
+Run novelty and baseline on the same frozen task:
+
+    python3 agentic_benchmark.py --task cascading_loop --condition novelty --iterations 6 --chat-timeout 45 --run-timeout 300 --backend llama-cpp --base-url http://127.0.0.1:8080/v1 --action-critic --action-gate --action-first
+
+    python3 agentic_benchmark.py --task cascading_loop --condition baseline --iterations 6 --chat-timeout 45 --run-timeout 300 --backend llama-cpp --base-url http://127.0.0.1:8080/v1 --action-first
+
+Repeat for multi_file_transaction, then websocket_chat. Inspect:
+
+    tail -n 3 state/benchmark/agentic/results.jsonl
+    tail -f state/benchmark/agentic/monitor-cascading_loop-novelty-*.jsonl
+
+Use the exact monitor_log from the JSON result for automation. The
+authoritative fields are passed, grader.status, validation_evidence,
+test_integrity, timed_out, and verifier_repair. Never judge from a partial
+monitor file or from finish_task alone.
+
+### Methodology for every future change
+
+1. State one generic failure mode.
+2. Change one model-agnostic host mechanism.
+3. Add a deterministic regression test that fails before the change.
+4. Run deterministic preflight before any model call.
+5. Run a frozen task with the change.
+6. Run the same task with the component disabled.
+7. Compare useful progress per second: outcome, iterations, first mutation,
+   validations, total time, retries, and recovery cost.
+8. Repeat on a second task shape.
+9. Record verified and unverified evidence in this file and telemetry.
+10. Commit only coherent source/docs; exclude transient monitor logs and
+    results.jsonl unless deliberately preserving a fixture.
+
+### Phased plan
+
+Phase 0 — resume safely. Read this handoff, telemetry, and
+VALIDATION_GRADER_RESEARCH.md. Inspect the working tree. Run the pending
+deterministic suite; repair generic failures before model calls.
+
+Phase 1 — close the evidence gap. Rerun cascading and multi-file after the
+triage deferral. Run paired WebSocket novelty/baseline. Treat verifier-repaired
+success as a separate recovery score from direct actor convergence.
+
+Phase 2 — finish the grader. Add hidden/shadow checks (tests the actor cannot
+see), pass-to-pass checks for unrelated behavior, explicit environment-invalid
+outcomes, checker integrity, and mutation-guided checker-strength tests. A
+visible weak test must not be enough for a pass.
+
+Phase 3 — make transactions explicit. Add a host transaction record with
+touched paths, pre-mutation hashes, validation attempts, dependent-file
+evidence, and a bounded repair window. Preserve intermediate edits only when
+the host sees a credible transaction; do not make every failure immune to
+rollback.
+
+Phase 4 — improve context economics. Measure tokens before every actor
+request. Use percentage-based budgets and compact facts rather than fixed
+event-count assumptions. Measure pruning (removing old detail) separately
+from compaction (replacing old detail with a shorter summary).
+
+Phase 5 — optimize the worker contract. Keep the 4B advisory-only. Test
+worker-on, worker-off, and worker-delayed conditions. Optimize useful progress
+per second, not worker call count.
+
+Phase 6 — long-horizon validation. Only after short regressions are green,
+run the unchanged SymPy 13878 fixture with strict timeouts, preserved logs,
+independent checking, and full run metadata. Do not add issue-specific hints.
+
+### Stop and reporting rules
+
+Stop at provider timeout, total timeout, iteration limit, stale process, or a
+user stop request. Kill the benchmark process tree, not unrelated model
+servers. Report TIMEOUT, ENVIRONMENT_INVALID, FAIL, or PASS exactly as
+observed. After every material change record changed files, generic reason,
+deterministic result, real-model result, benchmark paths, unverified items,
+and the next safe action.

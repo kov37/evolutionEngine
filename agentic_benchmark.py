@@ -42,6 +42,11 @@ class Task:
     prompt: str
     setup: dict[str, str]
     grade: str
+    # Optional host-owned evidence checks.  ``baseline`` must fail before the
+    # actor starts (the task is genuinely broken); ``pass_to_pass`` must pass
+    # both before and after the actor (unrelated behavior is protected).
+    baseline: str | None = None
+    pass_to_pass: str | None = None
     budget: int = 20
     max_success_iterations: int | None = None
 
@@ -98,6 +103,52 @@ def _check_protected_paths(
 def _grade(task: Task, root: Path) -> GradeResult:
     """Run the task grader outside the actor's workspace."""
     return run_python_grader(task.grade, root, timeout_seconds=45.0)
+
+
+def _run_task_evidence(source: str | None, root: Path, *, phase: str) -> dict | None:
+    """Run one host-owned pre/post contract and return auditable evidence."""
+    if not source:
+        return None
+    result = run_python_grader(source, root, timeout_seconds=45.0, phase=phase)
+    return result.as_dict()
+
+
+def _baseline_contract_valid(task: Task, root: Path) -> tuple[bool, dict[str, dict]]:
+    """Require the declared initial state before spending model calls."""
+    evidence: dict[str, dict] = {}
+    baseline_source = task.grade if task.baseline == "__acceptance__" else task.baseline
+    baseline = _run_task_evidence(baseline_source, root, phase="baseline")
+    if baseline is not None:
+        evidence["fail_to_pass"] = {
+            "expected": "FAIL",
+            "observed": baseline,
+            "valid": baseline["status"] == "FAIL",
+        }
+        if baseline["status"] != "FAIL":
+            return False, evidence
+    pass_to_pass = _run_task_evidence(task.pass_to_pass, root, phase="pass_to_pass_before")
+    if pass_to_pass is not None:
+        evidence["pass_to_pass_before"] = {
+            "expected": "PASS",
+            "observed": pass_to_pass,
+            "valid": pass_to_pass["status"] == "PASS",
+        }
+        if pass_to_pass["status"] != "PASS":
+            return False, evidence
+    return True, evidence
+
+
+def _post_task_evidence(task: Task, root: Path, evidence: dict[str, dict]) -> bool:
+    """Run post-state regression evidence after the acceptance grader."""
+    if not task.pass_to_pass:
+        return True
+    result = _run_task_evidence(task.pass_to_pass, root, phase="pass_to_pass_after")
+    evidence["pass_to_pass_after"] = {
+        "expected": "PASS",
+        "observed": result,
+        "valid": bool(result and result["status"] == "PASS"),
+    }
+    return bool(result and result["status"] == "PASS")
 
 
 def _metrics(output: str) -> dict:
@@ -401,6 +452,7 @@ TASKS = {
             "assert re.search(r'(offline|simulation only|does not access|no real network)', lower)\n"
             "assert re.search(r'(indicator|detect|defen|mitigat)', lower)\n"
         ),
+        baseline="__acceptance__",
         budget=20,
     ),
     "3d_scene": Task(
@@ -450,6 +502,7 @@ TASKS = {
             "    try: proc.wait(timeout=3)\n"
             "    except subprocess.TimeoutExpired: proc.kill()\n"
         ),
+        baseline="__acceptance__",
         budget=14,
     ),
     "real_app": Task(
@@ -504,6 +557,7 @@ TASKS = {
             "    try: proc.wait(timeout=3)\n"
             "    except subprocess.TimeoutExpired: proc.kill()\n"
         ),
+        baseline="__acceptance__",
         budget=24,
     ),
     "cascading_loop": Task(
@@ -546,6 +600,7 @@ TASKS = {
             "    text=True, capture_output=True, timeout=30)\n"
             "assert direct.returncode == 0, (direct.stdout + direct.stderr)[-4000:]\n"
         ),
+        baseline="__acceptance__",
         budget=8,
         max_success_iterations=3,
     ),
@@ -589,6 +644,7 @@ TASKS = {
             "solver_source = open('matrix_solver.py', encoding='utf-8').read()\n"
             "assert 'is_symbolic' in solver_source and 'is_real' not in solver_source\n"
         ),
+        baseline="__acceptance__",
         budget=10,
         max_success_iterations=6,
     ),
@@ -705,6 +761,7 @@ TASKS = {
             "    except subprocess.TimeoutExpired: proc.kill()\n"
             "    probe.unlink(missing_ok=True)\n"
         ),
+        baseline="__acceptance__",
         budget=18,
     ),
     "bug_repair": Task(
@@ -732,6 +789,7 @@ TASKS = {
             "assert normalize_email('  Alice+news@Example.COM  ') == 'alice+news@example.com'\n"
             "assert normalize_email('BOB@EXAMPLE.COM') == 'bob@example.com'\n"
         ),
+        baseline="__acceptance__",
         budget=18,
     ),
     "feature": Task(
@@ -761,6 +819,11 @@ TASKS = {
             "assert [x['name'] for x in out] == ['b','c']\n"
             "assert items == [{'name':'a','quantity':5},{'name':'b','quantity':1},{'name':'c','quantity':3}]\n"
         ),
+        baseline="__acceptance__",
+        pass_to_pass=(
+            "from app.inventory import total_value\n"
+            "assert total_value([{'quantity': 2, 'price': 3}]) == 6\n"
+        ),
         budget=20,
     ),
     "data_report": Task(
@@ -783,6 +846,11 @@ TASKS = {
             "assert data['total_sales'] == 28\n"
             "assert data['sales_by_region'] == {'North': 16, 'South': 12}\n"
             "assert data['top_product'] == 'Book'\n"
+        ),
+        baseline="__acceptance__",
+        pass_to_pass=(
+            "from pathlib import Path\n"
+            "assert Path('sales.csv').read_text(encoding='utf-8').startswith('region,product,amount')\n"
         ),
         budget=22,
     ),
@@ -819,6 +887,22 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             run_timeout: float, keep_workspace: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
+    evidence_ok, validation_evidence = _baseline_contract_valid(task, work)
+    if not evidence_ok:
+        return {
+            "task": task.name,
+            "condition": condition,
+            "passed": False,
+            "model": model,
+            "backend": backend,
+            "detail": "task precondition evidence was invalid; model run was not started",
+            "timed_out": False,
+            "returncode": None,
+            "elapsed_seconds": 0.0,
+            "metrics": {},
+            "scorecard": {"artifact_passed": False, "run_completed": False},
+            "validation_evidence": validation_evidence,
+        }
     protected_paths = _protected_task_paths(task)
     protected_snapshot = _snapshot_protected_paths(work, protected_paths)
     # Unbuffered child output is required for true event-level monitoring;
@@ -860,6 +944,10 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             phase="integrity",
         )
     artifact_passed, detail = grade_result.passed, grade_result.detail
+    regression_ok = _post_task_evidence(task, work, validation_evidence)
+    artifact_passed = artifact_passed and regression_ok
+    if not regression_ok:
+        detail = "pass-to-pass regression evidence failed"
     metrics = _metrics(stdout or "")
     initial_metrics = metrics
     verifier_repair = None
@@ -910,6 +998,10 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
                 phase="integrity",
             )
         artifact_passed, detail = grade_result.passed, grade_result.detail
+        regression_ok = _post_task_evidence(task, work, validation_evidence)
+        artifact_passed = artifact_passed and regression_ok
+        if not regression_ok:
+            detail = "pass-to-pass regression evidence failed"
         verifier_repair = {
             "monitor_log": str(repair_monitor_path),
             "timed_out": repair_timed_out,
@@ -965,6 +1057,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
         "elapsed_seconds": round(elapsed, 1), "metrics": metrics,
         "scorecard": scorecard,
         "grader": grade_result.as_dict(),
+        "validation_evidence": validation_evidence,
         "protected_test_paths": list(protected_paths),
         "test_integrity": integrity_ok,
         "monitor_log": str(monitor_path),

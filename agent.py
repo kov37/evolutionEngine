@@ -34,6 +34,7 @@ import structured_state
 import task_contract
 import transaction_buffer
 import validation_contract
+import validation_packet
 import worker
 import working_state
 from lifecycle_fsm import LifecycleFSM, LifecycleState
@@ -923,8 +924,13 @@ def _force_repair_recovery(recovery_mode, repair_required, setup_failure):
 def _authoritative_gate_restrictions(gate_banned, setup_failure):
     """Keep stale 4B restrictions subordinate to the deterministic plane."""
     banned = set(gate_banned or ())
-    if not setup_failure:
-        banned -= {"patch_file", "write_file"}
+    # The host policy decides whether mutation is legal.  In the setup plane
+    # it deliberately keeps patch/write available for the narrow dependency
+    # manifest exception; dispatch then enforces the path allowlist.  A stale
+    # 4B judgment may therefore remove optional capabilities (such as
+    # finish_task), but it may not remove the only tool surface that can
+    # repair a missing root package.json/pyproject.toml.
+    banned -= {"patch_file", "write_file"}
     return banned
 
 
@@ -938,6 +944,31 @@ def _consume_worker_gate(novelty_action_gate, novelty_context):
 def _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
     """Keep synchronous 4B inference off the path unless explicitly requested."""
     return bool(novelty_action_critic or novelty_action_gate)
+
+
+def _should_run_worker_triage(
+    novelty_action_critic,
+    novelty_action_gate,
+    *,
+    validation_failures: int,
+    failure_packet: str,
+    transaction=None,
+) -> bool:
+    """Use synchronous 4B advice only where it can plausibly add value.
+
+    The host's deterministic recommendation handles the first ordinary
+    behavior failure faster.  A worker call is justified for setup recovery,
+    repeated failures, or a multi-file transaction, where the next action is
+    genuinely ambiguous.  This is an efficiency policy, not a correctness or
+    tool-authority decision.
+    """
+    if not _worker_triage_enabled(novelty_action_critic, novelty_action_gate):
+        return False
+    if _is_validation_setup_failure(failure_packet):
+        return True
+    if validation_failures >= 2:
+        return True
+    return bool(transaction is not None and len(transaction.files) > 1)
 
 
 def _novelty_progress_tool_names(
@@ -1637,16 +1668,17 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 ),
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
-            gate_banned = _consume_worker_gate(novelty_action_gate, novelty_context)
-            # The synchronous worker is advisory.  Once the deterministic
-            # validation policy has classified the active failure as product
-            # behavior, stale setup advice must not remove the only legal
-            # mutation tools.  The worker may narrow a behavior state (for
-            # example by removing finish_task), never invert its plane.
-            gate_banned = _authoritative_gate_restrictions(gate_banned, setup_failure)
-            if gate_banned:
-                validation_tools -= gate_banned
-                print(f"🚦 [4B triage gate] tools removed: {sorted(gate_banned)}")
+            worker_advisory = _consume_worker_gate(novelty_action_gate, novelty_context)
+            # The 4B is strictly suggestive.  It may report a stale or useful
+            # recommendation for telemetry, but it never removes tools and
+            # never changes lifecycle state.  The host policy above remains
+            # the sole authority; path-specific setup restrictions are applied
+            # later at dispatch time.
+            if worker_advisory:
+                print(
+                    f"💡 [4B advisory only] suggested restrictions={sorted(worker_advisory)}; "
+                    "host policy unchanged"
+                )
             tools_for_call = [t for t in tools_for_call if t.__name__ in validation_tools]
             if validation_required and not repair_required and not setup_failure:
                 # The validation FSM owns this capability plane. Escalation
@@ -2642,6 +2674,17 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         ),
                     )
                     packet = packet + "\n" + provenance.render()
+                    host_packet = validation_packet.build_failed_validation_packet(
+                        name,
+                        args,
+                        result_content,
+                        get_root(),
+                        changed_paths=(
+                            tuple(sorted(transaction.files))
+                            if transaction is not None else tuple(sorted(pending_product_paths))
+                        ),
+                    )
+                    packet = packet + "\n[HOST FAILED VALIDATION PACKET]\n" + host_packet.to_json()
                     test_context = validation_contract.failed_test_context(
                         result_content, get_root()
                     )
@@ -2693,7 +2736,13 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         "the existing checkpoint to make one deliberate recovery decision."
                     )})
             if (novelty_context is not None and last_repair_packet
-                    and _worker_triage_enabled(novelty_action_critic, novelty_action_gate)):
+                    and _should_run_worker_triage(
+                        novelty_action_critic,
+                        novelty_action_gate,
+                        validation_failures=validation_failures,
+                        failure_packet=last_repair_packet,
+                        transaction=transaction,
+                    )):
                 gate_judgment = novelty_context.synchronous_triage(
                     iteration,
                     lifecycle.state.value,

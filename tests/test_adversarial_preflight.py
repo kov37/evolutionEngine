@@ -13,10 +13,14 @@ from independent_grader import run_python_grader
 
 import action_governor
 from agentic_benchmark import (
+    TASKS,
     _check_protected_paths,
+    _baseline_contract_valid,
+    _post_task_evidence,
     _protected_task_paths,
     _scorecard_passed,
     _snapshot_protected_paths,
+    _write_setup,
     _verifier_repair_prompt,
 )
 from lifecycle_fsm import InvalidTransition, LifecycleFSM, LifecycleState
@@ -28,6 +32,32 @@ from workspace.run_tests_tool import run_tests
 
 
 class AdversarialPreflightTests(unittest.TestCase):
+    def test_frozen_tasks_prove_fail_to_pass_precondition_before_model_call(self):
+        for name in ("cascading_loop", "multi_file_transaction"):
+            with self.subTest(task=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = TASKS[name]
+                _write_setup(root, task.setup)
+                valid, evidence = _baseline_contract_valid(task, root)
+                self.assertTrue(valid)
+                self.assertTrue(evidence["fail_to_pass"]["valid"])
+                self.assertEqual(evidence["fail_to_pass"]["expected"], "FAIL")
+
+    def test_pass_to_pass_evidence_is_checked_after_acceptance(self):
+        task = type("Task", (), {
+            "baseline": None,
+            "pass_to_pass": "assert open('stable.txt', encoding='utf-8').read() == 'ok\\n'\n",
+            "grade": "assert True\n",
+        })()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "stable.txt").write_text("ok\n", encoding="utf-8")
+            valid, evidence = _baseline_contract_valid(task, root)
+            self.assertTrue(valid)
+            self.assertIn("pass_to_pass_before", evidence)
+            self.assertTrue(_post_task_evidence(task, root, evidence))
+            self.assertTrue(evidence["pass_to_pass_after"]["valid"])
+
     def test_supplied_test_integrity_is_detected_outside_agent_loop(self):
         task = type("Task", (), {
             "setup": {
