@@ -42,6 +42,7 @@ from kernel.exec_tools import active_background_handles, cleanup_background_proc
 from dispatch import _call_key, dispatch_tool_calls
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
+from kernel.patch_tools import patch_paths
 from novelty_context import NoveltyContext
 from registry import load_registry
 
@@ -61,6 +62,28 @@ ORIENTATION_TURN_BUDGET = 2
 # normal mutation operation, but the engine can replace the generic mutation
 # surface with one whose contract explicitly names the required target plane.
 PRODUCT_MUTATION_TOOLS = frozenset({"patch_product_file", "write_product_file"})
+EDIT_TOOLS = frozenset({"patch_file", "apply_patch"})
+GENERIC_MUTATION_TOOLS = EDIT_TOOLS | {"write_file"}
+
+
+def _mutation_paths(tool_name, arguments):
+    """Return all workspace paths a mutation call may touch."""
+    args = arguments or {}
+    if tool_name == "apply_patch":
+        try:
+            return patch_paths(args.get("patch", ""))
+        except (TypeError, ValueError):
+            return ()
+    path = args.get("path")
+    return (str(path),) if path else ()
+
+
+def _has_validation_helper_path(tool_name, arguments):
+    """Return whether a mutation touches the temporary verifier plane."""
+    return any(
+        lifecycle_policy.is_validation_helper_path(path)
+        for path in _mutation_paths(tool_name, arguments)
+    )
 
 
 class ChatTimeoutError(TimeoutError):
@@ -447,10 +470,10 @@ def _is_blocked_repair_action(tool_name, result_content):
 
 def _duplicate_product_mutation_reason(tool_name, arguments, successful_signatures):
     """Return a rejection when an identical product mutation already landed."""
-    if tool_name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
+    if tool_name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
         return None
     args = arguments or {}
-    if lifecycle_policy.is_validation_helper_path(args.get("path", "")):
+    if _has_validation_helper_path(tool_name, args):
         return None
     if _call_key(tool_name, args) not in (successful_signatures or set()):
         return None
@@ -468,10 +491,10 @@ def _replayed_rejected_mutation_reason(tool_name, arguments, rejected_signatures
     disagree. Replaying the same request cannot resolve that mismatch, so the
     host forces a new search/replace decision without judging the product.
     """
-    if tool_name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
+    if tool_name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
         return None
     args = arguments or {}
-    if lifecycle_policy.is_validation_helper_path(args.get("path", "")):
+    if _has_validation_helper_path(tool_name, args):
         return None
     if _call_key(tool_name, args) not in (rejected_signatures or set()):
         return None
@@ -930,7 +953,7 @@ def _authoritative_gate_restrictions(gate_banned, setup_failure):
     # 4B judgment may therefore remove optional capabilities (such as
     # finish_task), but it may not remove the only tool surface that can
     # repair a missing root package.json/pyproject.toml.
-    banned -= {"patch_file", "write_file"}
+    banned -= GENERIC_MUTATION_TOOLS
     return banned
 
 
@@ -989,7 +1012,7 @@ def _novelty_progress_tool_names(
         return None
     if rejected_mutation_read_pending:
         return {"read_file", "search_file", "list_symbols", "grep_dir"}
-    names = {"patch_file", "write_file", "finish_task"}
+    names = set(GENERIC_MUTATION_TOOLS | {"finish_task"})
     repeated_action = novelty_context.repeated_validation_loop()
     if novelty_context.recovery_reads_allowed() and not repeated_action:
         names.update({"read_file", "find_files", "search_file"})
@@ -999,7 +1022,7 @@ def _novelty_progress_tool_names(
         # with explicit product-scoped aliases. This is stronger than merely
         # removing write_file: the live SymPy trace showed the actor then
         # replayed patch_file with the same helper path.
-        names -= {"patch_file", "write_file"}
+        names -= GENERIC_MUTATION_TOOLS
         names.update(PRODUCT_MUTATION_TOOLS)
     return names
 
@@ -1097,7 +1120,7 @@ def _completion_ready(messages, task_type, validation_plan=None, validation_evid
             continue
         name = message.get("tool_name")
         content = str(message.get("content", ""))
-        if name in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS and not content.startswith(("ERROR:", "REJECTED")):
+        if name in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS and not content.startswith(("ERROR:", "REJECTED")):
             mutated = True
         if (validation_plan.assess(name, {}, content)[0] if validation_plan
                 else action_governor.is_substantive_validation(name, {}, content)):
@@ -1326,6 +1349,12 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
             novelty_context.close()
             print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
 
+    edit_tool = "apply_patch" if "apply_patch" in {tool.__name__ for tool in tools} else "patch_file"
+    edit_guidance = (
+        "Use apply_patch for one atomic patch that may update multiple files. Use write_file only to create a new file."
+        if edit_tool == "apply_patch" else
+        "Use patch_file for small surgical edits; its search must match the existing text exactly."
+    )
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
 Every tool you have is confined to this directory and its subdirectories — you cannot read or write
@@ -1338,8 +1367,7 @@ real file.
 You have a registry of tools. The CURRENT TOOL CONTRACT appended to each turn is authoritative; a tool not
 listed there is invalid for that turn, even if it appeared in an earlier message or in this registry.
 
-- Use patch_file for small surgical edits; `search` must match the existing text exactly — call read_file
-  first if you're not certain of the current contents.
+- {edit_guidance} Call read_file first if you're not certain of the current contents.
 - Use find_files/grep_dir/list_symbols/list_dir to understand code before changing it (grep_dir searches the whole
   project at once — prefer it over calling search_file file-by-file). Use run_tests for unittest projects and
   run_command with an explicit argv list for pytest or the project's native test command; use
@@ -1512,7 +1540,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # This is deliberately independent of provider, model name, and
             # quantization; it is an engine-level contract for agents that
             # need to begin changing a workspace promptly.
-            first_action_names = {"write_file", "patch_file", "read_file",
+            first_action_names = GENERIC_MUTATION_TOOLS | {"read_file",
                                   "list_workspace", "find_files", "run_tests",
                                   "run_command", "finish_task"}
             initial_action_instruction = (
@@ -2050,9 +2078,9 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     legal_actions=tuple(legal_names),
                 )
                 print(f"🧬 [novelty recovery] {novelty_context.render_for_model(action_critic=True)}")
-            if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & ({"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS):
+            if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & (GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS):
                 next_action = "run_command, run_shell, or run_tests to produce the required behavioral evidence"
-            elif legal_names & ({"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS):
+            elif legal_names & (GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS):
                 next_action = "the offered mutation tool to make the targeted repair"
             else:
                 next_action = "the next executable tool offered for this lifecycle phase"
@@ -2080,8 +2108,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         if _governed:
             for call in turn_calls:
                 if action_governor.classify(call.function.name, call.function.arguments) == "MUTATE":
-                    rel_path = (call.function.arguments or {}).get("path")
-                    if rel_path:
+                    for rel_path in _mutation_paths(call.function.name, call.function.arguments):
                         risk.checkpoint(rel_path, io_tools._resolve(rel_path), iteration)
 
         # Always enforced against whatever was actually offered THIS call
@@ -2122,10 +2149,9 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # validation, but do not let a helper write satisfy this specific
             # product-progress boundary.
             for call in turn_calls:
-                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
+                if call.function.name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
                     continue
-                path = (call.function.arguments or {}).get("path", "")
-                if lifecycle_policy.is_validation_helper_path(path):
+                if _has_validation_helper_path(call.function.name, call.function.arguments):
                     blocked_mutation_reasons[_call_key(call.function.name, call.function.arguments)] = (
                         "REJECTED: the novelty progress gate requires a product mutation; validation "
                         "helpers below .agentic/ cannot satisfy this turn. Patch the implicated product "
@@ -2157,13 +2183,13 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             # every validation plane; the actor must create it at the project
             # root before dependency installation can succeed.
             for call in turn_calls:
-                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
+                if call.function.name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
                     continue
                 args = call.function.arguments or {}
-                path = args.get("path", "")
                 if (
-                    lifecycle_policy.is_validation_helper_path(path)
-                    and lifecycle_policy.is_dependency_manifest_name(path)
+                    any(lifecycle_policy.is_validation_helper_path(path)
+                        and lifecycle_policy.is_dependency_manifest_name(path)
+                        for path in _mutation_paths(call.function.name, args))
                 ):
                     key = _call_key(call.function.name, args)
                     blocked_mutation_reasons[key] = (
@@ -2173,12 +2199,15 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     )
             if setup_failure:
                 for call in turn_calls:
-                    if call.function.name not in {"patch_file", "write_file"} | PRODUCT_MUTATION_TOOLS:
+                    if call.function.name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
                         continue
                     args = call.function.arguments or {}
-                    path = args.get("path", "")
-                    if not (lifecycle_policy.is_dependency_manifest_path(path)
-                            or lifecycle_policy.is_validation_helper_path(path)):
+                    paths = _mutation_paths(call.function.name, args)
+                    if paths and not all(
+                        lifecycle_policy.is_dependency_manifest_path(path)
+                        or lifecycle_policy.is_validation_helper_path(path)
+                        for path in paths
+                    ):
                         key = _call_key(call.function.name, args)
                         blocked_command_calls.add(key)
                         blocked_command_reasons[key] = (
@@ -2212,7 +2241,6 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             blocked_command_calls,
         )
         for call, tmsg in zip(turn_calls, tool_messages):
-            path = (call.function.arguments or {}).get("path", "")
             if (
                 novelty_action_gate
                 and novelty_context is not None
@@ -2221,11 +2249,13 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     helper_mutation_blocked=bool(blocked_progress_helper_paths),
                     rejected_mutation_read_pending=rejected_mutation_read_pending,
                 ) is not None
-                and
-                lifecycle_policy.is_validation_helper_path(path)
+                and _has_validation_helper_path(call.function.name, call.function.arguments)
                 and tmsg["content"].startswith("REJECTED:")
             ):
-                blocked_progress_helper_paths.add(path)
+                blocked_progress_helper_paths.update(
+                    path for path in _mutation_paths(call.function.name, call.function.arguments)
+                    if lifecycle_policy.is_validation_helper_path(path)
+                )
 
         # Proactive validation hook: when the actor writes a clearly named
         # helper below .agentic/, execute it immediately instead of spending a
@@ -2236,9 +2266,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         auto_messages = []
         product_mutation_landed = any(
             action_governor.classify(call.function.name, call.function.arguments or {}) == "MUTATE"
-            and not lifecycle_policy.is_validation_helper_path(
-                (call.function.arguments or {}).get("path", "")
-            )
+            and not _has_validation_helper_path(call.function.name, call.function.arguments)
             and not tmsg.get("content", "").startswith(("ERROR:", "REJECTED:"))
             for call, tmsg in zip(turn_calls, tool_messages)
         )
@@ -2253,11 +2281,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     continue
                 if tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
                     continue
-                normalized = transaction_buffer.normalize_product_path(
-                    get_root(), (call.function.arguments or {}).get("path", "")
-                )
-                if normalized:
-                    pending_product_paths.add(normalized)
+                for path in _mutation_paths(call.function.name, call.function.arguments):
+                    normalized = transaction_buffer.normalize_product_path(get_root(), path)
+                    if normalized:
+                        pending_product_paths.add(normalized)
         transaction_window_open = _transaction_window_open(
             transaction,
             validation_required=validation_required,
@@ -2309,9 +2336,10 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     continue
                 if tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
                     continue
-                test_target = _nearby_python_test_target(
-                    (call.function.arguments or {}).get("path", "")
-                )
+                for path in _mutation_paths(call.function.name, call.function.arguments):
+                    test_target = _nearby_python_test_target(path)
+                    if test_target:
+                        break
                 if test_target:
                     break
             if test_target:
@@ -2330,24 +2358,26 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 print(f"⚡ [nearby test validation] ran {test_target} after product mutation")
         if validation_required and not transaction_window_open and "run_command" in allowed_names:
             for call, tmsg in zip(turn_calls, tool_messages):
-                if call.function.name not in {"write_file", "patch_file"} | PRODUCT_MUTATION_TOOLS:
+                if call.function.name not in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS:
                     continue
-                path = (call.function.arguments or {}).get("path", "")
-                command = _auto_validation_command(path)
-                if not command or tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
+                if tmsg.get("content", "").startswith(("ERROR:", "REJECTED:")):
                     continue
-                auto_call = SimpleNamespace(function=SimpleNamespace(
-                    name="run_command",
-                    arguments={"command": command, "timeout": 120, "cwd": ".", "background": False},
-                ))
-                auto_calls.append(auto_call)
-                auto_messages.extend(dispatch_tool_calls(
-                    [auto_call], tool_map, allowed_names=allowed_names,
-                    blocked_calls=blocked_calls,
-                    blocked_mutation_paths=blocked_mutation_paths,
-                    blocked_command_calls=blocked_command_calls,
-                    blocked_command_reasons=blocked_command_reasons,
-                ))
+                for path in _mutation_paths(call.function.name, call.function.arguments):
+                    command = _auto_validation_command(path)
+                    if not command:
+                        continue
+                    auto_call = SimpleNamespace(function=SimpleNamespace(
+                        name="run_command",
+                        arguments={"command": command, "timeout": 120, "cwd": ".", "background": False},
+                    ))
+                    auto_calls.append(auto_call)
+                    auto_messages.extend(dispatch_tool_calls(
+                        [auto_call], tool_map, allowed_names=allowed_names,
+                        blocked_calls=blocked_calls,
+                        blocked_mutation_paths=blocked_mutation_paths,
+                        blocked_command_calls=blocked_command_calls,
+                        blocked_command_reasons=blocked_command_reasons,
+                    ))
         if auto_calls:
             turn_calls.extend(auto_calls)
             tool_messages.extend(auto_messages)
@@ -2379,23 +2409,25 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     f"⚠️ [repair checkpoint] blocked inspection {tool_name}; "
                     "discarding the stale action transcript before the next repair turn"
                 )
-            if _governed and capability == "MUTATE" and args.get("path"):
-                rejection = risk.reject_destructive_rewrite(
-                    args["path"], io_tools._resolve(args["path"]),
-                    tool_name=tool_name, repair_turn=repair_turn_before_dispatch,
-                )
-                if rejection is None:
-                    rejection = risk.reject_protected_test_mutation(
-                        args["path"], io_tools._resolve(args["path"]),
-                        repair_turn=repair_turn_before_dispatch,
+            if _governed and capability == "MUTATE":
+                for path in _mutation_paths(tool_name, args):
+                    rejection = risk.reject_destructive_rewrite(
+                        path, io_tools._resolve(path),
+                        tool_name=tool_name, repair_turn=repair_turn_before_dispatch,
                     )
-                if rejection:
-                    result = "REJECTED: " + rejection
-                    tmsg["content"] = result
-                    if "protected test" in rejection.lower():
-                        blocked_mutation_paths.add(args["path"])
-                        protected_edit_recovery_pending = True
-                    print(f"🛡️ [risk layer] {result}")
+                    if rejection is None:
+                        rejection = risk.reject_protected_test_mutation(
+                            path, io_tools._resolve(path),
+                            repair_turn=repair_turn_before_dispatch,
+                        )
+                    if rejection:
+                        result = "REJECTED: " + rejection
+                        tmsg["content"] = result
+                        if "protected test" in rejection.lower():
+                            blocked_mutation_paths.add(path)
+                            protected_edit_recovery_pending = True
+                        print(f"🛡️ [risk layer] {result}")
+                        break
             if repair_required and lifecycle_policy.counts_as_repair_inspection(tool_name):
                 repair_inspection_used = True
                 if rejected_mutation_read_pending:
@@ -2414,7 +2446,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
             if capability == "MUTATE" and result.startswith(("REJECTED:", "ERROR:")):
                 last_mutation_rejected = True
                 if (
-                    not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                    not _has_validation_helper_path(tool_name, args)
                     and "protected test" not in result.lower()
                 ):
                     rejected_mutation_signatures.add(_call_key(tool_name, args))
@@ -2426,11 +2458,11 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     f"repeating it.\n{result}"
                 )[-3000:]
                 if (
-                    not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                    not _has_validation_helper_path(tool_name, args)
                     and "protected test" not in result.lower()
                 ):
                     rejected_mutation_read_pending = True
-                    last_rejected_mutation_path = str(args.get("path", ""))
+                    last_rejected_mutation_path = ", ".join(_mutation_paths(tool_name, args))
                     print(
                         "🔎 [rejected mutation recovery] scheduling one fresh source inspection "
                         f"for {last_rejected_mutation_path or 'the implicated product file'}"
@@ -2442,7 +2474,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 success = False
             helper_mutation = (
                 capability == "MUTATE"
-                and lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                and _has_validation_helper_path(tool_name, args)
             )
             if capability == "MUTATE" and success is True and not helper_mutation:
                 turn_mutated = True
@@ -2570,7 +2602,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                         "Repeated tool-plane failure: validation recovery was already attempted. "
                         "Do not call run_command, run_shell, or process_status again. Inspect the "
                         "implementation named by the latest failure and make one targeted product "
-                        "repair with read_file followed by patch_file or write_file."
+                    "repair with read_file followed by the available edit tool."
                     )})
                     print("⚠️ [tool-plane recovery] grace exhausted; preserving repair state")
             else:
@@ -2606,10 +2638,8 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                 if capability == "MUTATE" and not result.startswith(("ERROR:", "REJECTED:")):
                     successful_mutation_messages.append(tmsg)
                     if transaction is not None:
-                        transaction.record_mutation(
-                            (call.function.arguments or {}).get("path", ""),
-                            checkpoint_id=iteration,
-                        )
+                        for path in _mutation_paths(call.function.name, call.function.arguments):
+                            transaction.record_mutation(path, checkpoint_id=iteration)
             last_mutation_checkpoint = successful_mutation_messages or last_mutation_checkpoint
             mutation_was_in_validation_batch = validation_phase_before_turn and not repair_turn_before_dispatch
             lifecycle.transition("mutation")
@@ -2766,7 +2796,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     iteration,
                     lifecycle.state.value,
                     last_repair_packet,
-                    legal_actions=("patch_file", "write_file", "run_tests", "run_command", "run_shell", "finish_task"),
+                    legal_actions=(*sorted(GENERIC_MUTATION_TOOLS), "run_tests", "run_command", "run_shell", "finish_task"),
                     protected_paths=tuple(sorted(blocked_mutation_paths)),
                 )
                 print(
@@ -2875,7 +2905,7 @@ listed there is invalid for that turn, even if it appeared in an earlier message
                     iteration, tool_name, args, tmsg["content"],
                     mutation=(
                         capability == "MUTATE"
-                        and not lifecycle_policy.is_validation_helper_path(args.get("path", ""))
+                        and not _has_validation_helper_path(tool_name, args)
                         and not tmsg["content"].startswith(("ERROR:", "REJECTED:"))
                     ),
                     validation=capability == "VALIDATE" or phase_validation,
@@ -3171,6 +3201,10 @@ if __name__ == "__main__":
         help="Use a model-neutral initial action contract with a small executable tool surface.",
     )
     parser.add_argument(
+        "--editor", choices=["patch_file", "apply_patch"], default="patch_file",
+        help="Select the edit primitive for this run; apply_patch supports atomic multi-file edits.",
+    )
+    parser.add_argument(
         "--network", action="store_true",
         help="Expose web_search and fetch. Off by default to reduce tool-routing cost for coding tasks.",
     )
@@ -3268,7 +3302,7 @@ if __name__ == "__main__":
     io_tools.AUTO_RUN_AFTER_WRITE["enabled"] = False
 
     task = " ".join(args.task)
-    tools = load_registry(include_network=args.network) + [finish_task]
+    tools = load_registry(include_network=args.network, editor=args.editor) + [finish_task]
 
     print(f"📁 Operating in: {get_root()}")
     print(f"🧰 Loaded {len(tools)} tool(s): {[fn.__name__ for fn in tools]}")

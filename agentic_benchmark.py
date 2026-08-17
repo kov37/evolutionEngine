@@ -417,7 +417,7 @@ def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
     command = [
         sys.executable, "-m", "unittest",
         "tests.test_agent_tools", "tests.test_adversarial_preflight",
-        "tests.test_novelty_context",
+        "tests.test_novelty_context", "tests.test_run_monitor",
     ]
     try:
         proc = subprocess.run(
@@ -1042,6 +1042,105 @@ TASKS = {
         ),
         budget=22,
     ),
+    "lru_cache": Task(
+        name="lru_cache",
+        prompt=(
+            "Repair this isolated Python project so the supplied test_suite.py passes. "
+            "Inspect the implementation modules and run the supplied tests to discover the "
+            "required behavior. The public APIs must remain usable by both modules. Do not "
+            "modify, delete, or weaken any assertion in test_suite.py. Make the smallest "
+            "coherent implementation changes across the project, rerun the tests after "
+            "repairing them, and call finish_task only after the suite passes."
+        ),
+        setup={
+            "cache.py": (
+                "import time\n\n"
+                "class LRUCache:\n"
+                "    def __init__(self, capacity: int, ttl_seconds: float = None):\n"
+                "        self.capacity = capacity\n"
+                "        self.ttl = ttl_seconds\n"
+                "        self.storage = {}\n"
+                "        self.timestamps = {}\n"
+                "        self.eviction_hook = None\n\n"
+                "    def get(self, key):\n"
+                "        if key not in self.storage:\n"
+                "            return -1\n"
+                "        return self.storage[key]\n\n"
+                "    def put(self, key, value):\n"
+                "        if len(self.storage) >= self.capacity:\n"
+                "            evict_key = next(iter(self.storage))\n"
+                "            del self.storage[evict_key]\n"
+                "        self.storage[key] = value\n"
+                "        self.timestamps[key] = time.time()\n\n"
+                "    def register_eviction_hook(self, callback):\n"
+                "        self.eviction_hook = callback\n"
+            ),
+            "storage_manager.py": (
+                "from cache import LRUCache\n\n"
+                "class PersistentStorageManager:\n"
+                "    def __init__(self, cache_capacity: int, ttl: float):\n"
+                "        self.cache = LRUCache(cache_capacity, ttl_seconds=ttl)\n"
+                "        self.cold_storage = {}\n\n"
+                "    def fetch(self, key):\n"
+                "        val = self.cache.get(key)\n"
+                "        if val != -1:\n"
+                "            return val\n"
+                "        return self.cold_storage.get(key, None)\n\n"
+                "    def store(self, key, value):\n"
+                "        self.cache.put(key, value)\n"
+            ),
+            "test_suite.py": (
+                "import time\n"
+                "import pytest\n"
+                "from cache import LRUCache\n"
+                "from storage_manager import PersistentStorageManager\n\n"
+                "def test_basic_lru_order():\n"
+                "    c = LRUCache(2)\n"
+                "    c.put(1, \"one\")\n"
+                "    c.put(2, \"two\")\n"
+                "    c.get(1)\n"
+                "    c.put(3, \"three\")\n"
+                "    assert c.get(2) == -1\n"
+                "    assert c.get(1) == \"one\"\n\n"
+                "def test_ttl_expiration():\n"
+                "    c = LRUCache(2, ttl_seconds=0.1)\n"
+                "    c.put(1, \"val\")\n"
+                "    time.sleep(0.15)\n"
+                "    assert c.get(1) == -1\n\n"
+                "def test_cascading_eviction_to_cold_storage():\n"
+                "    mgr = PersistentStorageManager(cache_capacity=2, ttl=10.0)\n"
+                "    mgr.store(\"A\", 1)\n"
+                "    mgr.store(\"B\", 2)\n"
+                "    mgr.store(\"C\", 3)\n"
+                "    assert mgr.cache.get(\"A\") == -1\n"
+                "    assert mgr.fetch(\"A\") == 1\n"
+            ),
+        },
+        grade=(
+            "import subprocess, sys\n"
+            "result = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'test_suite.py'], "
+            "text=True, capture_output=True, timeout=30)\n"
+            "assert result.returncode == 0, (result.stdout + result.stderr)[-5000:]\n"
+        ),
+        baseline="__acceptance__",
+        shadow=(
+            "from cache import LRUCache\n"
+            "events = []\n"
+            "c = LRUCache(1)\n"
+            "c.register_eviction_hook(lambda key, value: events.append((key, value)))\n"
+            "c.put('a', 1)\n"
+            "c.put('b', 2)\n"
+            "assert events == [('a', 1)], events\n"
+            "assert c.get('a') == -1\n"
+            "c2 = LRUCache(2, ttl_seconds=0.0)\n"
+            "c2.put('expired', 7)\n"
+            "assert c2.get('expired') == -1\n"
+            "assert 'expired' not in c2.storage\n"
+            "assert 'expired' not in c2.timestamps\n"
+        ),
+        budget=12,
+        max_success_iterations=8,
+    ),
     "recovery": Task(
         name="recovery",
         prompt=(
@@ -1072,7 +1171,8 @@ TASKS = {
 def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             action_gate: bool, chat_timeout: float, model: str,
             backend: str, base_url: str, action_first: bool,
-            run_timeout: float, keep_workspace: bool = False) -> dict:
+            run_timeout: float, keep_workspace: bool = False,
+            editor: str = "patch_file") -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
     evidence_ok, validation_evidence = _baseline_contract_valid(task, work)
@@ -1097,7 +1197,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     # otherwise Python holds agent logs until the entire run exits.
     cmd = [sys.executable, "-u", str(ROOT / "agent.py"), "--project", str(work),
            "--iteration-budget", str(iterations), "--chat-timeout", str(chat_timeout),
-           "--model", model, "--backend", backend, "--base-url", base_url]
+           "--model", model, "--backend", backend, "--base-url", base_url,
+           "--editor", editor]
     if action_first:
         cmd.append("--action-first")
     if condition == "novelty":
@@ -1151,6 +1252,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             sys.executable, "-u", str(ROOT / "agent.py"), "--project", str(work),
             "--iteration-budget", str(min(iterations, 10)), "--chat-timeout", str(chat_timeout),
             "--model", model, "--backend", backend, "--base-url", base_url,
+            "--editor", editor,
         ]
         if action_first:
             repair_cmd.append("--action-first")
@@ -1259,7 +1361,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
                 + json.dumps(scorecard, sort_keys=True)
             )
     record = {
-        "task": task.name, "condition": condition, "passed": passed,
+        "task": task.name, "condition": condition, "editor": editor, "passed": passed,
         "model": model,
         "backend": backend,
         "detail": detail, "timed_out": timed_out, "returncode": returncode,
@@ -1308,6 +1410,8 @@ def main() -> int:
     parser.add_argument("--action-gate", action="store_true")
     parser.add_argument("--action-first", action="store_true",
                         help="Use the model-neutral initial action contract.")
+    parser.add_argument("--editor", choices=["patch_file", "apply_patch"], default="patch_file",
+                        help="Edit primitive for the run; apply_patch supports atomic multi-file edits.")
     parser.add_argument("--keep-workspace", action="store_true",
                         help="Preserve the generated task workspace for inspection.")
     parser.add_argument("--skip-preflight", action="store_true",
@@ -1329,7 +1433,7 @@ def main() -> int:
     records = [run_one(task, condition, iterations, args.action_critic,
                        args.action_gate, chat_timeout, args.model,
                        args.backend, args.base_url, args.action_first,
-                       run_timeout, args.keep_workspace)
+                       run_timeout, args.keep_workspace, args.editor)
                for task in selected for condition in conditions]
     passed = sum(r["passed"] for r in records)
     print(json.dumps({"summary": {"passed": passed, "total": len(records),

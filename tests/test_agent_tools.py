@@ -16,6 +16,7 @@ import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
 from kernel.io_tools import _find_closest_match_hint, patch_file, read_file, validate_python_syntax
+from kernel.patch_tools import apply_patch, patch_paths
 from risk_layer import RiskLayer
 from transaction_buffer import TransactionBuffer
 from registry import _wrap_with_confinement
@@ -1623,7 +1624,7 @@ class KernelToolTests(unittest.TestCase):
             context.observe(iteration, "run_tests", {}, "passed")
         self.assertEqual(
             _novelty_progress_tool_names(context),
-            {"patch_file", "write_file", "finish_task"},
+            {"patch_file", "apply_patch", "write_file", "finish_task"},
         )
         context.close()
 
@@ -1925,6 +1926,74 @@ class KernelToolTests(unittest.TestCase):
             self.assertTrue(optional.isdisjoint(set(schema.get("required", []))), name)
             for field in optional:
                 self.assertTrue(schema["properties"][field].get("description"), f"{name}.{field}")
+
+    def test_apply_patch_updates_multiple_files_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            Path(tmp, "core.py").write_text("VALUE = 1\n")
+            Path(tmp, "consumer.py").write_text("from core import VALUE\nRESULT = VALUE\n")
+            patch = (
+                "*** Begin Patch\n"
+                "*** Update File: core.py\n"
+                "@@\n"
+                "-VALUE = 1\n"
+                "+VALUE = 2\n"
+                "*** Update File: consumer.py\n"
+                "@@\n"
+                " RESULT = VALUE\n"
+                "+CHECKED = True\n"
+                "*** End Patch"
+            )
+            self.assertEqual(patch_paths(patch), ("core.py", "consumer.py"))
+            result = apply_patch(patch)
+            self.assertTrue(result.startswith("Applied atomic patch"), result)
+            self.assertEqual(Path(tmp, "core.py").read_text(), "VALUE = 2\n")
+            self.assertIn("CHECKED = True", Path(tmp, "consumer.py").read_text())
+
+    def test_apply_patch_does_not_partially_apply_a_stale_multi_file_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            core = Path(tmp, "core.py")
+            consumer = Path(tmp, "consumer.py")
+            core.write_text("VALUE = 1\n")
+            consumer.write_text("RESULT = VALUE\n")
+            patch = (
+                "*** Begin Patch\n"
+                "*** Update File: core.py\n"
+                "@@\n"
+                "-VALUE = 1\n"
+                "+VALUE = 2\n"
+                "*** Update File: consumer.py\n"
+                "@@\n"
+                "-THIS LINE IS STALE\n"
+                "+RESULT = VALUE\n"
+                "*** End Patch"
+            )
+            result = apply_patch(patch)
+            self.assertTrue(result.startswith("ERROR:"), result)
+            self.assertEqual(core.read_text(), "VALUE = 1\n")
+            self.assertEqual(consumer.read_text(), "RESULT = VALUE\n")
+
+    def test_apply_patch_rejects_duplicate_file_operations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            path = Path(tmp, "module.py")
+            path.write_text("VALUE = 1\n")
+            patch = (
+                "*** Begin Patch\n"
+                "*** Update File: module.py\n"
+                "@@\n"
+                "-VALUE = 1\n"
+                "+VALUE = 2\n"
+                "*** Update File: module.py\n"
+                "@@\n"
+                "-VALUE = 1\n"
+                "+VALUE = 3\n"
+                "*** End Patch"
+            )
+            result = apply_patch(patch)
+            self.assertTrue(result.startswith("ERROR:"), result)
+            self.assertEqual(path.read_text(), "VALUE = 1\n")
 
 
 if __name__ == "__main__":

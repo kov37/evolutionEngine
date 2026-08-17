@@ -25,6 +25,32 @@ latest_tool_fix:
   real_model_status: "LRU run must be rerun; previous child loaded the pre-fix implementation"
 ```
 
+## 2026-08-16 verified runtime checkpoint
+
+- Deterministic suite: `205 passed, 38 subtests passed, 1 warning`.
+- Actor backend: llama.cpp, Qwen3.8 27B Q4_K_M GGUF; Ollama stopped for the
+  comparison.
+- Runtime flags: all GPU layers, Flash Attention, batch/micro-batch 2048,
+  Q8 KV cache, mlock, and `draft-mtp`.
+- Context-capacity sample: 8K `185.7/16.4`, 16K `185.2/16.4`, 32K
+  `185.2/14.7` prefill/decode tokens/sec for the same 3,017-token request.
+- Editor A/B on unchanged `multi_file_transaction`:
+  - `patch_file`: direct PASS, 6 iterations, 86.2 seconds, first mutation
+    41.8 seconds.
+  - `apply_patch`: artifact PASS but workflow scorecard FAIL after 12
+    iterations; verifier repair passed in 64.1 additional seconds. Total
+    177.9 seconds.
+- Interpretation: the atomic editor is safe and preserves multi-file state,
+  but the first real comparison does not show a convergence advantage. The
+  actor repeated a stale patch and then repeated `finish_task`; the host
+  correctly refused false completion.
+- Replication: an unchanged second `apply_patch` run reproduced the same
+  stale-patch/repeated-completion pattern. Artifact passed after verifier
+  repair; workflow scorecard failed. Total 147.3 seconds; repair 63.4 seconds.
+- Worker status: disabled for this clean editor A/B because the worker
+  adapter currently uses Ollama and no Qwen 4B GGUF is available. This is an
+  actor/editor result, not a worker-on/off result.
+
 ## Latest generic control-plane checkpoint (the engine's traffic-controller rules)
 
 ```json

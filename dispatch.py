@@ -19,6 +19,19 @@ capped.
 MAX_MESSAGE_CONTENT_CHARS = 4000
 
 
+def _mutation_paths(tool_name, arguments):
+    """Return every path a mutation call may touch for host-side blocking."""
+    args = arguments or {}
+    if tool_name == "apply_patch":
+        try:
+            from kernel.patch_tools import patch_paths
+            return patch_paths(args.get("patch", ""))
+        except (TypeError, ValueError):
+            return ()
+    path = args.get("path")
+    return (str(path),) if path else ()
+
+
 def _normalize_tool_arguments(tool_name, arguments):
     """Repair common JSON-schema shape drift before dispatching a tool.
 
@@ -109,13 +122,15 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
     messages = []
     for call in tool_calls:
         call_arguments = call.function.arguments or {}
+        touched_paths = _mutation_paths(call.function.name, call_arguments)
         if (blocked_mutation_paths
                 and call.function.name in {
-                    "write_file", "patch_file", "write_product_file", "patch_product_file"
+                    "write_file", "patch_file", "apply_patch", "write_product_file", "patch_product_file"
                 }
-                and call_arguments.get("path") in blocked_mutation_paths):
+                and any(path in blocked_mutation_paths for path in touched_paths)):
+            blocked_path = next(path for path in touched_paths if path in blocked_mutation_paths)
             result = (
-                f"REJECTED: mutation path '{call_arguments.get('path')}' is blocked after a protected-test "
+                f"REJECTED: mutation path '{blocked_path}' is blocked after a protected-test "
                 "edit was rejected. Repair the implementation, then run the validation command."
             )
             print(f"🚫 blocked mutation path {call.function.name}({call_arguments})")
@@ -124,7 +139,7 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
         mutation_key = _call_key(call.function.name, call.function.arguments)
         if (blocked_mutation_reasons
                 and call.function.name in {
-                    "write_file", "patch_file", "write_product_file", "patch_product_file"
+                    "write_file", "patch_file", "apply_patch", "write_product_file", "patch_product_file"
                 }
                 and mutation_key in blocked_mutation_reasons):
             result = blocked_mutation_reasons[mutation_key]

@@ -33,7 +33,7 @@ BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS - frozenset({"list_workspace", "list_dir
 REJECTED_MUTATION_READ_TOOLS = frozenset({
     "read_file", "search_file", "list_symbols", "grep_dir",
 })
-MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
+MUTATION_TOOLS = frozenset({"patch_file", "apply_patch", "write_file"})
 DEPENDENCY_MANIFEST_NAMES = frozenset({
     "package.json", "package-lock.json", "npm-shrinkwrap.json",
     "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock",
@@ -46,7 +46,7 @@ VALIDATION_TOOLS = frozenset({
     "diff_files", "git_diff",
 })
 ORIENTATION_TOOLS = frozenset({
-    "read_file", "find_files", "search_file", "patch_file", "write_file",
+    "read_file", "find_files", "search_file", "patch_file", "apply_patch", "write_file",
     "finish_task", "recall",
 })
 ORIENTATION_PROGRESS_TOOLS = frozenset({
@@ -55,13 +55,13 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     # Once consumed, recovery must be a real state transition: mutate the
     # product or explicitly finish. Re-offering search tools here silently
     # turns the one-read allowance into an unbounded orientation loop.
-    "patch_file", "write_file", "finish_task", "recall",
+    "patch_file", "apply_patch", "write_file", "finish_task", "recall",
 })
 # RECOVER may need one last focused source read when an earlier read was
 # incomplete or covered the wrong file. Keep that escape hatch bounded.
 ORIENTATION_RECOVERY_READ_TOOLS = frozenset({
     "read_file", "search_file", "list_symbols", "grep_dir",
-    "patch_file", "write_file", "finish_task", "recall",
+    "patch_file", "apply_patch", "write_file", "finish_task", "recall",
 })
 
 

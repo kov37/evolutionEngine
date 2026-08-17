@@ -4228,3 +4228,87 @@ editor against the existing `patch_file`. It must use the unchanged frozen
 cascading and multi-file benchmarks. Do not permanently expose both mutation
 tools; select one after measuring convergence, patch failures, first mutation,
 validation count, and hidden-grader outcome.
+
+### 2026-08-16: atomic editor A/B and llama.cpp runtime measurements
+
+The new `apply_patch` editor is implemented as a host-controlled atomic
+multi-file operation. It parses all file operations, checks patch context,
+confines paths, validates Python syntax in memory, and writes only after all
+files pass those checks. A stale patch is rejected without partially applying
+earlier files. The actor sees either `patch_file` or `apply_patch`, selected by
+the benchmark's `--editor` flag; both are never exposed together for this
+experiment.
+
+Deterministic verification after the implementation and integration changes:
+`205 passed, 38 subtests passed, 1 warning`.
+
+The paired real-model test used the unchanged `multi_file_transaction` task,
+Qwen3.8 27B Q4_K_M through llama.cpp, MTP enabled, Flash Attention enabled,
+32K context, and the same iteration/time budgets. Ollama was not used for the
+actor. The 4B novelty worker was not enabled in this clean editor comparison
+because this checkout only has its worker adapter wired to Ollama and no 4B
+GGUF is present; the run therefore isolates the actor/editor interaction.
+
+| editor | result | artifact | iterations | first mutation | elapsed | observation |
+|---|---|---|---:|---:|---:|---|
+| `patch_file` | PASS | PASS | 6 | 41.8s | 86.2s | Directly converged after 3 repair mutations and 3 validation failures. |
+| `apply_patch` | scorecard FAIL; artifact PASS | PASS | 12 + verifier repair | 38.7s | 177.9s total | Actor made one atomic edit, then repeated a stale patch and `finish_task`; bounded verifier repair changed the remaining file and passed. |
+
+Interpretation: `apply_patch` is technically sound and preserves the
+transaction, but this single A/B does not justify replacing `patch_file` for
+this model. It exposed a generic completion/recovery weakness rather than
+improving convergence. The next engineering step is not to teach the model
+the benchmark answer. It is to make the host handle repeated completion
+requests and stale multi-file intent more efficiently, then rerun the same
+frozen pair. Keep the raw monitor logs and exact result records referenced by
+the benchmark output for audit; do not edit the fixture.
+
+### llama.cpp context and decoding observations
+
+The active server was started with GPU offload (`--n-gpu-layers 99`), Flash
+Attention, batch and micro-batch 2048, Q8 KV cache, `--load-mode mlock`, and
+`--spec-type draft-mtp`. The older `--mlock` spelling is deprecated but has the
+same meaning. The model log confirmed MTP draft acceptance, so this was not
+an assumed setting.
+
+With the tuned flags, two large-prompt samples averaged approximately 181.4
+prompt-prefill tokens/sec and 15.6 decode tokens/sec, with about 74% MTP
+acceptance. The earlier MTP+Flash configuration was approximately 180–186
+prefill and 16–18 decode tokens/sec. The extra flags therefore reduced memory
+pressure potential but did not demonstrate a speed increase in this sample.
+
+Using the same 3,017-token prompt under the tuned flags:
+
+| max context | prefill | decode |
+|---:|---:|---:|
+| 8K | 185.7 tok/s | 16.4 tok/s |
+| 16K | 185.2 tok/s | 16.4 tok/s |
+| 32K | 185.2 tok/s | 14.7 tok/s |
+
+The practical lesson is that a larger maximum context is capacity, not a
+speed feature. Use 16K when the task fits; use 32K only when the agent needs
+the room. The 32K result had lower MTP acceptance in this single sample, so
+it is not proof that 32K intrinsically slows every request.
+
+### A/B replication: `apply_patch` behavior is repeatably inefficient
+
+The `apply_patch` arm was rerun unchanged after the first comparison. It
+reproduced the same trajectory: the actor applied a correct first edit to
+`core_math.py`, emitted a stale second patch for that file, then repeated
+`finish_task` while validation still failed. The host rejected false
+completion, and the bounded verifier repair subsequently changed
+`matrix_solver.py` and passed the grader.
+
+Replication result: artifact PASS, workflow scorecard FAIL, 12 primary
+iterations, 147.3 seconds total, 63.4 seconds in verifier repair. This makes
+the interaction failure repeatable enough to act on. Do not conclude that
+`apply_patch` is defective; conclude that the current actor-facing contract
+does not prevent stale patch replay or repeated completion requests.
+
+The proposed `patch_file` names `find_exact_block` and `replace_with_block`
+are a reasonable contract improvement. If adopted, describe it as replacing
+one exact block in one existing file, require reading first, reject stale
+context, forbid accidental file creation/overwrite, and set
+`additionalProperties: false`. Do not claim it manages the transaction buffer
+unless the host actually does so. This should be a separate contract A/B,
+not mixed into the current editor result.
