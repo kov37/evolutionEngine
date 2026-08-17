@@ -4196,3 +4196,13 @@ Targeted verification after this change: `158 passed, 1 warning` across
 real-model run remains a valid failure diagnosis: its child process loaded the
 old discovery implementation, so it is not evidence against this fix. Rerun
 the unchanged LRU fixture before judging capability improvement.
+
+### Pydantic V2 adoption decision
+
+Pydantic V2 is recommended at JSON/model boundaries, not as a blanket
+replacement for internal dataclasses. The first migration targets are strict
+tool-argument models, the 4B judgment packet, failed-validation packets, grader
+records, and persisted monitor events. Use `strict=True` and `extra="forbid"`
+after the host's narrow alias-normalization step. Keep internal FSM/event
+objects and process/callable holders as dataclasses. This preserves simple,
+fast host state while making model-facing contracts explicit.

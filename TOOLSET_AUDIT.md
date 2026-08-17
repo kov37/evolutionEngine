@@ -143,3 +143,54 @@ rerun before claiming the schema or discovery changes improved agent behavior.
 
 This sequence keeps the benchmark honest: it changes generic infrastructure,
 not the LRU implementation or its expected answer.
+
+## Pydantic V2 recommendation
+
+Use strict Pydantic V2 models at external boundaries, not as a replacement for
+every dataclass in the engine.
+
+Good candidates:
+
+- tool arguments after deterministic alias normalization;
+- the 4B worker judgment;
+- failed-validation packets and grader results;
+- transaction records and monitor event records when they cross a process or
+  JSONL boundary.
+
+Keep dataclasses for high-frequency internal event/state objects, FSM state, and
+objects containing process handles or callables. Those objects are controlled
+by the host already and do not need JSON parsing on every transition.
+
+The boundary pattern should be:
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class StrictContract(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+
+class RunCommandArgs(StrictContract):
+    command: list[str] = Field(min_length=1)
+    timeout: int = Field(default=15, ge=1, le=120)
+    cwd: str = "."
+    background: bool = False
+
+
+def parse_tool_args(tool_name: str, raw: dict) -> BaseModel:
+    # First perform only unambiguous host normalization, such as argv ->
+    # command and timeout_ms -> timeout. Then validate strictly. Do not let
+    # Pydantic silently turn "30" into 30 or accept unknown fields.
+    return TOOL_ARG_MODELS[tool_name].model_validate(normalize(raw))
+```
+
+This gives the small model a precise contract while preserving a useful,
+human-readable error path. Strict validation must happen after the existing
+deterministic normalization layer: otherwise harmless provider shape drift
+would become a hard failure. `extra="forbid"` is especially valuable because
+it rejects hallucinated argument names instead of silently ignoring them.
+
+The migration should be incremental: tool arguments first, then worker and
+grader packets, followed by persisted telemetry. Do not rewrite the FSM or
+the whole event ledger merely to use `BaseModel`.
