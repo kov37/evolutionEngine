@@ -25,7 +25,7 @@ import os
 import subprocess
 import sys
 
-from kernel.io_tools import read_file, write_file, patch_file
+from kernel.io_tools import read_file, write_file, patch_file, edit_range, set_active_editors
 from kernel.exec_tools import run_shell, run_command, process_status, stop_process
 from kernel.discovery import find_files
 from kernel.sandbox import confine
@@ -34,7 +34,9 @@ from kernel.sandbox import confine
 # internal/backward-compatible callers, but the 35B model gets one execution
 # primitive with unambiguous argv semantics instead of two competing command
 # tools.
-KERNEL_TOOLS = [read_file, write_file, patch_file, find_files,
+# edit_range is the line-anchored editor: the model names a line range
+# (as shown by read_file) instead of quoting the old text verbatim.
+KERNEL_TOOLS = [read_file, write_file, patch_file, edit_range, find_files,
                 run_command, process_status, stop_process]
 
 # Older discovery/editor primitives remain importable for host-side historical
@@ -108,12 +110,17 @@ NETWORK_TOOL_NAMES = {"web_search", "fetch"}
 
 def load_registry(include_network: bool = True, editor: str = "patch_file") -> list:
     """Return the model-facing registry with one strict editor."""
-    if editor != "patch_file":
-        raise ValueError("apply_patch is host-only; the model-facing editor is patch_file")
+    if editor not in ("patch_file", "edit_range"):
+        raise ValueError("model-facing editors are patch_file and edit_range")
     tools = [
         fn for fn in (list(KERNEL_TOOLS) + _load_graduated_tools(_load_manifest()))
         if fn.__name__ not in DEPRECATED_MODEL_TOOLS
     ]
+    if editor == "edit_range":
+        # The line-anchored editor replaces the exact-block editor on the
+        # model surface; both remain host-callable.
+        tools = [fn for fn in tools if fn.__name__ != "patch_file"]
+    set_active_editors((editor,))
     if not include_network:
         tools = [fn for fn in tools if fn.__name__ not in NETWORK_TOOL_NAMES]
     return tools

@@ -30,6 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from independent_grader import GradeResult, run_python_grader
+from run_streaming import (
+    descendant_pids as _descendant_pids,
+    event_kind as _event_kind,
+    live_summary as _live_summary,
+    stream_agent as _stream_agent,
+    terminate_process_tree as _terminate_process_tree,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -118,16 +125,40 @@ def _check_protected_paths(
     return True, "supplied test artifacts unchanged"
 
 
+def _task_expected_modules(task: Task) -> frozenset[str]:
+    """Map task setup Python files to importable dotted module names.
+
+    These are the modules the graders are expected to import from the
+    workspace. A grader failing on a missing import outside this set is an
+    environment problem (for example pytest missing from the benchmark
+    interpreter), not product evidence.
+    """
+    names: set[str] = set()
+    for rel in getattr(task, "setup", None) or {}:
+        path = Path(rel)
+        if path.suffix == ".py":
+            parts = [part for part in path.parent.parts + (path.stem,) if part]
+            names.add(".".join(parts))
+    return frozenset(names)
+
+
 def _grade(task: Task, root: Path) -> GradeResult:
     """Run the task grader outside the actor's workspace."""
-    return run_python_grader(task.grade, root, timeout_seconds=45.0)
+    return run_python_grader(
+        task.grade, root, timeout_seconds=45.0,
+        expected_modules=_task_expected_modules(task),
+    )
 
 
-def _run_task_evidence(source: str | None, root: Path, *, phase: str) -> dict | None:
+def _run_task_evidence(source: str | None, root: Path, *, phase: str,
+                       expected_modules: frozenset[str] = frozenset()) -> dict | None:
     """Run one host-owned pre/post contract and return auditable evidence."""
     if not source:
         return None
-    result = run_python_grader(source, root, timeout_seconds=45.0, phase=phase)
+    result = run_python_grader(
+        source, root, timeout_seconds=45.0, phase=phase,
+        expected_modules=expected_modules,
+    )
     return result.as_dict()
 
 
@@ -135,7 +166,10 @@ def _baseline_contract_valid(task: Task, root: Path) -> tuple[bool, dict[str, di
     """Require the declared initial state before spending model calls."""
     evidence: dict[str, dict] = {}
     baseline_source = task.grade if task.baseline == "__acceptance__" else task.baseline
-    baseline = _run_task_evidence(baseline_source, root, phase="baseline")
+    baseline = _run_task_evidence(
+        baseline_source, root, phase="baseline",
+        expected_modules=_task_expected_modules(task),
+    )
     if baseline is not None:
         evidence["fail_to_pass"] = {
             "expected": "FAIL",
@@ -144,7 +178,10 @@ def _baseline_contract_valid(task: Task, root: Path) -> tuple[bool, dict[str, di
         }
         if baseline["status"] != "FAIL":
             return False, evidence
-    pass_to_pass = _run_task_evidence(task.pass_to_pass, root, phase="pass_to_pass_before")
+    pass_to_pass = _run_task_evidence(
+        task.pass_to_pass, root, phase="pass_to_pass_before",
+        expected_modules=_task_expected_modules(task),
+    )
     if pass_to_pass is not None:
         evidence["pass_to_pass_before"] = {
             "expected": "PASS",
@@ -160,7 +197,10 @@ def _post_task_evidence(task: Task, root: Path, evidence: dict[str, dict]) -> bo
     """Run post-state regression evidence after the acceptance grader."""
     if not task.pass_to_pass:
         return True
-    result = _run_task_evidence(task.pass_to_pass, root, phase="pass_to_pass_after")
+    result = _run_task_evidence(
+        task.pass_to_pass, root, phase="pass_to_pass_after",
+        expected_modules=_task_expected_modules(task),
+    )
     evidence["pass_to_pass_after"] = {
         "expected": "PASS",
         "observed": result,
@@ -185,6 +225,7 @@ def _run_shadow_evidence(task: Task, root: Path) -> dict | None:
         root,
         timeout_seconds=45.0,
         phase="shadow_acceptance",
+        expected_modules=_task_expected_modules(task),
     )
     return result.as_dict()
 
@@ -428,153 +469,6 @@ def _run_preflight(timeout_seconds: float = 30.0) -> tuple[bool, str]:
         return False, f"preflight timed out after {timeout_seconds:.1f}s: {exc}"
     output = (proc.stdout + proc.stderr).strip()
     return proc.returncode == 0, output[-4000:]
-
-
-def _event_kind(line: str) -> str:
-    """Classify one live actor line for the durable monitor stream."""
-    stripped = line.strip()
-    if stripped.startswith("🌀 [Iteration"):
-        return "iteration"
-    if stripped.startswith("🔧"):
-        return "tool_call"
-    if stripped.startswith("⏱️"):
-        return "timing"
-    if stripped.startswith("🧰"):
-        return "repair_metrics"
-    if stripped.startswith("🧬"):
-        return "novelty_metrics"
-    if "validation" in stripped.lower():
-        return "validation"
-    if any(word in stripped.lower() for word in ("error", "rejected", "failed", "timeout")):
-        return "error"
-    if stripped.startswith(("🧠", "💭")):
-        return "model_output"
-    return "agent_event"
-
-
-def _live_summary(line: str) -> str:
-    """Return a compact user-facing line; the monitor JSONL keeps raw text."""
-    kind = _event_kind(line)
-    stripped = line.strip()
-    if kind == "tool_call":
-        match = re.match(r"🔧\s+([A-Za-z0-9_]+)\((.*)", stripped)
-        if match:
-            args = match.group(2)
-            path = re.search(r"['\"]path['\"]:\s*['\"]([^'\"]+)", args)
-            target = f" path={path.group(1)}" if path else ""
-            return f"📡 tool {match.group(1)}{target}"
-    if kind == "model_output":
-        return "📡 model " + stripped[:220]
-    if kind == "error":
-        return "📡 ERROR " + stripped[:300]
-    if kind in {"iteration", "timing", "repair_metrics", "novelty_metrics", "validation"}:
-        return "📡 " + stripped[:400]
-    return "📡 event " + stripped[:220]
-
-
-def _descendant_pids(pid: int) -> list[int]:
-    """Find descendants even when an actor gives a service a new session."""
-    try:
-        raw = subprocess.check_output(["pgrep", "-P", str(pid)], text=True, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.CalledProcessError):
-        return []
-    result = []
-    for value in raw.split():
-        try:
-            child = int(value)
-        except ValueError:
-            continue
-        result.append(child)
-        result.extend(_descendant_pids(child))
-    return result
-
-
-def _terminate_process_tree(proc) -> None:
-    """Terminate the actor and descendants, including detached service sessions."""
-    descendants = _descendant_pids(proc.pid)
-    # Detached descendants have their own process groups. Kill those first;
-    # then kill the actor's group, which also handles ordinary child processes.
-    for pid in reversed(descendants):
-        try:
-            pgid = os.getpgid(pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        for pid in reversed(_descendant_pids(proc.pid)):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-        proc.wait()
-
-
-def _stream_agent(proc, started: float, run_timeout: float, monitor_path: Path):
-    """Stream every agent line while retaining the watchdog."""
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ)
-    chunks = []
-    partial = b""
-    timed_out = False
-    interrupted = False
-    monitor_path.parent.mkdir(parents=True, exist_ok=True)
-    monitor = monitor_path.open("w", encoding="utf-8")
-
-    def emit(raw_line: bytes):
-        line = raw_line.decode(errors="replace")
-        chunks.append(line + "\n")
-        print(_live_summary(line), flush=True)
-        event = {
-            "elapsed_s": round(time.monotonic() - started, 3),
-            "kind": _event_kind(line),
-            "text": line,
-        }
-        monitor.write(json.dumps(event, ensure_ascii=False) + "\n")
-        monitor.flush()
-
-    try:
-        while True:
-            remaining = run_timeout - (time.monotonic() - started)
-            if remaining <= 0:
-                timed_out = True
-                break
-            ready = selector.select(min(0.5, remaining))
-            if not ready:
-                if proc.poll() is not None:
-                    break
-                continue
-            data = os.read(proc.stdout.fileno(), 4096)
-            if not data:
-                break
-            partial += data
-            lines = partial.split(b"\n")
-            partial = lines.pop()
-            for line in lines:
-                emit(line)
-        if partial:
-            emit(partial)
-    except KeyboardInterrupt:
-        interrupted = True
-        timed_out = False
-        print("📡 ⚠️ benchmark interrupted; terminating actor process tree", flush=True)
-    finally:
-        if proc.poll() is None or timed_out or interrupted:
-            _terminate_process_tree(proc)
-        else:
-            proc.wait()
-        selector.close()
-        monitor.close()
-    return "".join(chunks), timed_out, proc.returncode
 
 
 TASKS = {
@@ -1141,6 +1035,50 @@ TASKS = {
         budget=12,
         max_success_iterations=8,
     ),
+    "range_edit_probe": Task(
+        name="range_edit_probe",
+        prompt=(
+            "Repair this isolated Python project so the supplied test_probe.py passes. "
+            "Several functions in probe.py return the wrong values; each is wrong in a different "
+            "section of the file. Read probe.py, fix every broken function (the line-anchored "
+            "edit_range tool can replace several ranges in one call), rerun the supplied tests, "
+            "and call finish_task only after they pass. Do not modify test_probe.py."
+        ),
+        setup={
+            "probe.py": (
+                "def first(value):\n"
+                "    return value + 100\n"
+                "\n"
+                "def second(value):\n"
+                "    return value * 100\n"
+                "\n"
+                "def third(value):\n"
+                "    return str(value)\n"
+                "\n"
+                "def fourth(value):\n"
+                "    return [value, value]\n"
+            ),
+            "test_probe.py": (
+                "from probe import first, second, third, fourth\n"
+                "def test_first():\n"
+                "    assert first(1) == 2\n"
+                "def test_second():\n"
+                "    assert second(3) == 6\n"
+                "def test_third():\n"
+                "    assert third(7) == '7!' == third(7)\n"
+                "def test_fourth():\n"
+                "    assert fourth(4) == [4]\n"
+            ),
+        },
+        grade=(
+            "import subprocess, sys\n"
+            "result = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'test_probe.py'], "
+            "text=True, capture_output=True, timeout=30)\n"
+            "assert result.returncode == 0, (result.stdout + result.stderr)[-4000:]\n"
+        ),
+        baseline="__acceptance__",
+        budget=12,
+    ),
     "recovery": Task(
         name="recovery",
         prompt=(
@@ -1172,7 +1110,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             action_gate: bool, chat_timeout: float, model: str,
             backend: str, base_url: str, action_first: bool,
             run_timeout: float, keep_workspace: bool = False,
-            editor: str = "patch_file") -> dict:
+            editor: str = "patch_file", thinking: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=f"agentic-{task.name}-{condition}-"))
     _write_setup(work, task.setup)
     evidence_ok, validation_evidence = _baseline_contract_valid(task, work)
@@ -1199,6 +1137,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
            "--iteration-budget", str(iterations), "--chat-timeout", str(chat_timeout),
            "--model", model, "--backend", backend, "--base-url", base_url,
            "--editor", editor]
+    if thinking:
+        cmd.append("--thinking")
     if action_first:
         cmd.append("--action-first")
     if condition == "novelty":
@@ -1245,7 +1185,11 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     # verifier's exact evidence. This is a generic external-validation loop:
     # the harness does not interpret the task or synthesize a WebSocket-specific
     # fix, and it never runs more than one feedback pass per benchmark attempt.
-    if not artifact_passed and integrity_ok and _run_completed(timed_out, returncode):
+    # An invalid host environment (for example pytest missing from the
+    # benchmark interpreter) is not repairable by the actor, so it skips the
+    # repair pass instead of burning another model budget on it.
+    if (not artifact_passed and integrity_ok and _run_completed(timed_out, returncode)
+            and grade_result.status != "ENVIRONMENT_INVALID"):
         print("🔁 Independent verifier rejected the artifact; starting one bounded repair pass.")
         repair_monitor_path = RUNS / f"monitor-{task.name}-{condition}-{time.time_ns()}-repair.jsonl"
         repair_cmd = [
@@ -1254,6 +1198,8 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
             "--model", model, "--backend", backend, "--base-url", base_url,
             "--editor", editor,
         ]
+        if thinking:
+            repair_cmd.append("--thinking")
         if action_first:
             repair_cmd.append("--action-first")
         if condition == "novelty":
@@ -1363,6 +1309,7 @@ def run_one(task: Task, condition: str, iterations: int, action_critic: bool,
     record = {
         "task": task.name, "condition": condition, "editor": editor, "passed": passed,
         "model": model,
+        "thinking": thinking,
         "backend": backend,
         "detail": detail, "timed_out": timed_out, "returncode": returncode,
         "elapsed_seconds": round(elapsed, 1), "metrics": metrics,
@@ -1410,8 +1357,10 @@ def main() -> int:
     parser.add_argument("--action-gate", action="store_true")
     parser.add_argument("--action-first", action="store_true",
                         help="Use the model-neutral initial action contract.")
-    parser.add_argument("--editor", choices=["patch_file"], default="patch_file",
-                        help="Model-facing edit primitive; patch_file is the only supported editor.")
+    parser.add_argument("--thinking", action="store_true",
+                        help="Enable the actor model's request-level thinking mode.")
+    parser.add_argument("--editor", choices=["patch_file", "edit_range"], default="patch_file",
+                        help="Model-facing edit primitive: exact-block patch_file or line-anchored edit_range.")
     parser.add_argument("--keep-workspace", action="store_true",
                         help="Preserve the generated task workspace for inspection.")
     parser.add_argument("--skip-preflight", action="store_true",
@@ -1433,7 +1382,7 @@ def main() -> int:
     records = [run_one(task, condition, iterations, args.action_critic,
                        args.action_gate, chat_timeout, args.model,
                        args.backend, args.base_url, args.action_first,
-                       run_timeout, args.keep_workspace, args.editor)
+                       run_timeout, args.keep_workspace, args.editor, args.thinking)
                for task in selected for condition in conditions]
     passed = sum(r["passed"] for r in records)
     print(json.dumps({"summary": {"passed": passed, "total": len(records),

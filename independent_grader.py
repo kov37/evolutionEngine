@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,33 @@ from pathlib import Path
 
 
 MAX_DETAIL_CHARS = 4000
+
+
+def _missing_module_from_output(output: str) -> str | None:
+    """Extract the module named by a ModuleNotFoundError/ImportError, if any."""
+    match = re.search(r"No module named '([^']+)'", output)
+    if match:
+        return match.group(1)
+    match = re.search(r"cannot import name '[^']+' from '([^']+)'", output)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _module_is_workspace_product(
+    name: str, workspace: Path, expected_modules: frozenset[str]
+) -> bool:
+    """Whether a missing module is a product file, not a host environment gap."""
+    if name in expected_modules:
+        return True
+    rel = Path(*name.split("."))
+    if (workspace / f"{name}.py").exists():
+        return True
+    if (workspace / rel.with_suffix(".py")).exists():
+        return True
+    if (workspace / rel / "__init__.py").exists():
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -54,6 +82,7 @@ def _run_source(
     timeout_seconds: float,
     phase: str,
     python_executable: str,
+    expected_modules: frozenset[str],
 ) -> GradeResult:
     """Run a Python checker whose source is never written into `workspace`."""
     started = time.monotonic()
@@ -107,6 +136,26 @@ def _run_source(
                 phase=phase,
             )
 
+    if completed.returncode != 0:
+        # A checker that dies on a missing import of a module that is not a
+        # product file (for example pytest, when the benchmark was started
+        # with an interpreter that lacks it) is evidence about the host
+        # environment, not about the artifact. Only a missing module that
+        # belongs to the task's own source tree stays a product failure.
+        missing = _missing_module_from_output(_bounded_detail(completed.stdout, completed.stderr))
+        if missing is not None and not _module_is_workspace_product(
+            missing, workspace, expected_modules
+        ):
+            return GradeResult(
+                status="ENVIRONMENT_INVALID",
+                passed=False,
+                detail=_bounded_detail(completed.stdout, completed.stderr),
+                returncode=completed.returncode,
+                elapsed_seconds=round(time.monotonic() - started, 3),
+                checker_sha256=digest,
+                phase=phase,
+            )
+
     return GradeResult(
         status="PASS" if completed.returncode == 0 else "FAIL",
         passed=completed.returncode == 0,
@@ -126,6 +175,7 @@ def run_python_grader(
     phase: str = "acceptance",
     python_executable: str = sys.executable,
     preflight_source: str | None = None,
+    expected_modules: frozenset[str] = frozenset(),
 ) -> GradeResult:
     """Run optional environment preflight, then the independent acceptance check.
 
@@ -139,6 +189,7 @@ def run_python_grader(
             timeout_seconds=timeout_seconds,
             phase="preflight",
             python_executable=python_executable,
+            expected_modules=expected_modules,
         )
         if not preflight.passed:
             return GradeResult(
@@ -156,4 +207,5 @@ def run_python_grader(
         timeout_seconds=timeout_seconds,
         phase=phase,
         python_executable=python_executable,
+        expected_modules=expected_modules,
     )

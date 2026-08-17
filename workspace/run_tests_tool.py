@@ -208,6 +208,112 @@ def _function_style_fallback(path: str, absolute_path: str) -> tuple[bool, str] 
     return pass_count == tests_run and tests_run > 0, summary
 
 
+def _task_interpreter() -> str | None:
+    """Return the task-declared interpreter when it differs from this one.
+
+    A runner can declare a dedicated virtual environment for the task
+    through ``VIRTUAL_ENV`` (the swebench runner does this for legacy
+    checkouts). In-process unittest discovery would then import the project
+    under the wrong Python and report misleading collection errors, so the
+    tool delegates the whole check to a subprocess under that interpreter.
+    """
+    venv = os.environ.get("VIRTUAL_ENV")
+    if not venv:
+        return None
+    candidate = os.path.join(venv, "bin", "python")
+    if not os.path.isfile(candidate):
+        return None
+    if os.path.realpath(candidate) == os.path.realpath(sys.executable):
+        return None
+    return candidate
+
+
+def _delegated_run_tests(interpreter: str, absolute_path: str) -> tuple[bool, str]:
+    """Run this same tool under the task interpreter and translate its exit.
+
+    The subprocess needs the sandbox root explicitly: it imports a fresh
+    kernel.sandbox whose default root would otherwise be this repository's
+    workspace directory, not the active project.
+    """
+    script = os.path.abspath(__file__)
+    try:
+        from kernel.sandbox import get_root
+        root = get_root()
+    except (ImportError, OSError):
+        root = ""
+    command = [interpreter, script]
+    if root:
+        command += ["--root", str(root)]
+    command.append(str(absolute_path))
+    env = os.environ.copy()
+    # The script's directory is the subprocess's sys.path[0], so the engine
+    # packages (kernel/, workspace/) are only importable when the repository
+    # root is on PYTHONPATH, exactly as it is in the agent process.
+    repo_root = os.path.dirname(os.path.dirname(script))
+    env["PYTHONPATH"] = os.pathsep.join(
+        item for item in (repo_root, env.get("PYTHONPATH")) if item
+    )
+    try:
+        probe = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=RUN_TESTS_TIMEOUT_SECONDS + 30,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"task-interpreter test run timed out after {RUN_TESTS_TIMEOUT_SECONDS + 30}s"
+    except OSError as exc:
+        return False, f"could not execute task test interpreter {interpreter}: {exc}"
+    output = "\n".join(part.strip() for part in (probe.stdout, probe.stderr) if part.strip())
+    if len(output) > 3600:
+        output = output[:1800] + "\n...[truncated]...\n" + output[-1800:]
+    if probe.returncode == 0:
+        return True, f"task-interpreter tests passed: {output or 'tests passed'}"
+    return False, f"task-interpreter tests failed (exit {probe.returncode}): {output or 'see test output'}"
+
+
+def _framework_setup_only(result) -> bool:
+    """Whether the run was dominated by framework setup, never assertions.
+
+    A collection whose errors are module-import failures, setUp/tearDown
+    failures, or one repeated framework-initialization traceback never
+    produced assertion evidence, so its output is evidence about the
+    harness, not about product behavior. The actor must not treat it as a
+    product failure signal. Setup-level error labels are accepted even when
+    their traceback text is empty, which unittest emits for some setUpClass
+    cascades.
+    """
+    if getattr(result, "failures", None) or not getattr(result, "errors", None):
+        return False
+    setup_markers = ("setUpClass", "setUpModule", "tearDownClass", "tearDownModule")
+    setup_count = 0
+    other_tails: list[str] = []
+    for test_case, traceback_text in result.errors:
+        label = str(test_case or "")
+        if "unittest.loader._FailedTest" in label:
+            setup_count += 1
+            continue
+        if label.startswith(setup_markers):
+            setup_count += 1
+            continue
+        if any(marker in traceback_text for marker in (*setup_markers, "setUp", "tearDown")):
+            setup_count += 1
+            continue
+        frames = [
+            line.strip() for line in traceback_text.splitlines()
+            if line.strip().startswith("File ")
+        ]
+        other_tails.append(frames[-1] if frames else traceback_text[-120:].strip())
+    if not other_tails:
+        return True
+    if setup_count < len(other_tails):
+        return False
+    # The remaining errors must all share one identical final frame: one
+    # framework-initialization failure cascading through many tests.
+    return len(set(other_tails)) == 1
+
+
 def run_tests(path: Optional[str] = ".") -> tuple[bool, str]:
     """Discover and run all tests under *path* using unittest APIs.
 
@@ -221,6 +327,9 @@ def run_tests(path: Optional[str] = ".") -> tuple[bool, str]:
             summary  — Short human-readable string such as
                        "Ran 5 tests: 4 passed, 1 failed, 0 errors".
     """
+    interpreter = _task_interpreter()
+    if interpreter is not None:
+        return _delegated_run_tests(interpreter, os.path.abspath(path or "."))
     loader = unittest.TestLoader()
     # Agents naturally pass either a project directory or the focused test
     # file they just inspected. unittest.discover only accepts directories;
@@ -346,7 +455,10 @@ def run_tests(path: Optional[str] = ".") -> tuple[bool, str]:
     if any("_TestRunTimeout" in traceback_text for _, traceback_text in result.errors):
         return (False, f"Test run timed out after {RUN_TESTS_TIMEOUT_SECONDS}s; the implementation may be stuck")
     skip_count: int = len(result.skipped) if hasattr(result, "skipped") else 0
-    pass_count: int = tests_run - fail_count - error_count
+    # setUpClass/tearDown errors count separately from failures, so the
+    # subtraction can overcount errors and go negative; clamp instead of
+    # reporting nonsense like "-94 passed" to the actor.
+    pass_count: int = max(0, tests_run - fail_count - error_count)
 
     summary = (
         f"Ran {tests_run} tests: "
@@ -380,6 +492,14 @@ def run_tests(path: Optional[str] = ".") -> tuple[bool, str]:
         summary += " — " + " || ".join(details)[:1800]
 
     success = pass_count == tests_run and tests_run > 0
+    if not success and _framework_setup_only(result):
+        summary += (
+            " — NOTE: the run was dominated by test-framework initialization errors and no "
+            "test assertion ran. This output is harness evidence, not product evidence. If an "
+            "import error names a product module you edited, fix that import; otherwise run the "
+            "project's supported test entry point (for example via run_command) to obtain real "
+            "test results."
+        )
     return (success, summary)
 
 
@@ -478,10 +598,20 @@ class TestAllPass(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # If called with a directory argument, run that suite; otherwise run
-    # the internal self-test.
+    # Optional delegated form:
+    #   python run_tests_tool.py --root <sandbox_root> [target_path]
+    # The root argument exists because a delegated subprocess imports a
+    # fresh sandbox whose default root is not the active project.
     if len(sys.argv) > 1:
-        target_dir = sys.argv[1]
+        if sys.argv[1] == "--root":
+            if len(sys.argv) < 3:
+                print("--root requires a path argument", file=sys.stderr)
+                sys.exit(2)
+            from kernel.sandbox import set_root
+            set_root(sys.argv[2])
+            target_dir = sys.argv[3] if len(sys.argv) > 3 else "."
+        else:
+            target_dir = sys.argv[1]
         success, summary = run_tests(target_dir)
         print(summary)
         sys.exit(0 if success else 1)

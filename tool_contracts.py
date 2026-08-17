@@ -24,6 +24,30 @@ class PatchFileArgs(StrictToolArgs):
     replace_with_block: StrictStr = Field(description="Replacement block to write into the file.")
 
 
+class EditSpecArgs(StrictToolArgs):
+    start_line: int = Field(ge=1, description="First line to replace (1-based, inclusive).")
+    end_line: int = Field(ge=1, description="Last line to replace (1-based, inclusive).")
+    replacement: StrictStr = Field(description="Text that replaces the line range.")
+    expect: StrictStr | None = Field(
+        default=None,
+        description="Optional short token that must appear inside the range; "
+                    "the batch is rejected with the actual region if it does not.",
+    )
+
+
+class EditRangeArgs(StrictToolArgs):
+    path: StrictStr = Field(min_length=1, description="Workspace-relative path to an existing file.")
+    edits: list[EditSpecArgs] = Field(
+        min_length=1, max_length=8,
+        description="Batched line-range replacements, applied bottom-up atomically.",
+    )
+    snapshot: StrictStr | None = Field(
+        default=None,
+        description="Optional [snapshot ...] token from a read_file header; the "
+                    "batch is rejected if the file changed since that read.",
+    )
+
+
 class WriteFileArgs(StrictToolArgs):
     path: StrictStr = Field(min_length=1, description="Workspace-relative path for a new file only.")
     content: StrictStr = Field(description="Complete contents of the new file.")
@@ -63,6 +87,7 @@ class PathOnlyArgs(StrictToolArgs):
 
 CONTRACT_MODELS: dict[str, Type[BaseModel]] = {
     "patch_file": PatchFileArgs,
+    "edit_range": EditRangeArgs,
     "write_file": WriteFileArgs,
     "read_file": ReadFileArgs,
     "find_files": FindFilesArgs,

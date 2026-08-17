@@ -177,6 +177,61 @@ class AdversarialPreflightTests(unittest.TestCase):
             self.assertEqual(result.status, "ENVIRONMENT_INVALID")
             self.assertIn("preflight failed", result.detail)
 
+    def test_missing_host_module_is_environment_invalid_not_product_failure(self):
+        # A grader whose subprocess dies on a missing interpreter-level module
+        # (the exact "No module named pytest" class of host failure) must not
+        # count as product evidence: no baseline run should start from it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_python_grader(
+                "import subprocess, sys\n"
+                "probe = subprocess.run([sys.executable, '-c', "
+                "'import novelty_absent_host_module_xyz'], "
+                "text=True, capture_output=True, timeout=30)\n"
+                "assert probe.returncode == 0, (probe.stdout + probe.stderr)[-2000:]\n",
+                root,
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.status, "ENVIRONMENT_INVALID")
+            self.assertIn("novelty_absent_host_module_xyz", result.detail)
+
+    def test_missing_declared_product_module_stays_a_product_failure(self):
+        # The same missing-import signature is product evidence when the
+        # module is part of the task's own source tree but was removed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_python_grader(
+                "from cache import value\nassert value == 1\n",
+                root,
+                expected_modules=frozenset({"cache"}),
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.status, "FAIL")
+            self.assertIn("cache", result.detail)
+
+    def test_baseline_contract_rejects_environment_invalid_evidence(self):
+        task = type("Task", (), {
+            "setup": {"cache.py": "value = 1\n"},
+            "grade": (
+                "import subprocess, sys\n"
+                "probe = subprocess.run([sys.executable, '-c', "
+                "'import novelty_absent_host_module_xyz'], "
+                "text=True, capture_output=True, timeout=30)\n"
+                "assert probe.returncode == 0, (probe.stdout + probe.stderr)[-2000:]\n"
+            ),
+            "baseline": "__acceptance__",
+            "pass_to_pass": None,
+        })()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_setup(root, task.setup)
+            valid, evidence = _baseline_contract_valid(task, root)
+            self.assertFalse(valid)
+            self.assertFalse(evidence["fail_to_pass"]["valid"])
+            self.assertEqual(
+                evidence["fail_to_pass"]["observed"]["status"], "ENVIRONMENT_INVALID"
+            )
+
     def test_external_verifier_feedback_is_preserved_for_one_repair_pass(self):
         task = type("Task", (), {"prompt": "Repair the application."})()
         prompt = _verifier_repair_prompt(task, "AssertionError: required artifact is stale")

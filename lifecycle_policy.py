@@ -30,7 +30,13 @@ BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS
 REJECTED_MUTATION_READ_TOOLS = frozenset({
     "read_file", "list_symbols",
 })
-MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
+# patch_file and edit_range are mutually exclusive per run (registry.py
+# loads exactly one as the model-facing editor), so naming both here is
+# safe: agent.py always intersects this set against the tools actually
+# registered for the run before offering anything to the model. Naming
+# only one meant every policy below silently starved edit_range runs of
+# their sole mutation tool once any of these phases engaged.
+MUTATION_TOOLS = frozenset({"patch_file", "edit_range", "write_file"})
 DEPENDENCY_MANIFEST_NAMES = frozenset({
     "package.json", "package-lock.json", "npm-shrinkwrap.json",
     "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock",
@@ -43,7 +49,7 @@ VALIDATION_TOOLS = frozenset({
     "diff_files", "git_diff",
 })
 ORIENTATION_TOOLS = frozenset({
-    "read_file", "find_files", "patch_file", "write_file",
+    "read_file", "find_files", "patch_file", "edit_range", "write_file",
     "finish_task", "recall",
 })
 ORIENTATION_PROGRESS_TOOLS = frozenset({
@@ -52,13 +58,13 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     # Once consumed, recovery must be a real state transition: mutate the
     # product or explicitly finish. Re-offering search tools here silently
     # turns the one-read allowance into an unbounded orientation loop.
-    "patch_file", "write_file", "finish_task", "recall",
+    "patch_file", "edit_range", "write_file", "finish_task", "recall",
 })
 # RECOVER may need one last focused source read when an earlier read was
 # incomplete or covered the wrong file. Keep that escape hatch bounded.
 ORIENTATION_RECOVERY_READ_TOOLS = frozenset({
     "read_file", "find_files", "list_symbols",
-    "patch_file", "write_file", "finish_task", "recall",
+    "patch_file", "edit_range", "write_file", "finish_task", "recall",
 })
 
 
@@ -105,6 +111,9 @@ def _contains_file_mutation(argv) -> bool:
         "writefilesync", "appendfilesync", "unlinksync", "mkdirsync",
         "fs.writefile", "fs.appendfile", "fs.promises.writefile",
         "write_text", ".write(", ".write (", ".unlink(",
+        # File-replacement builtins a model uses to sidestep the editor.
+        "shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move",
+        "os.replace(", "os.rename(", "write_bytes",
     }):
         return True
     if re.search(
@@ -420,18 +429,18 @@ def build_validation_policy(
         tools.discard("write_file")
     if validation_failures >= 2 and not setup_failure:
         tools.discard("write_file")
-        prompt += " After repeated failures, use patch_file only and preserve the existing structure."
+        prompt += " After repeated failures, use the currently offered edit tool only and preserve the existing structure."
     if protected_edit_recovery_pending:
         tools -= MUTATION_TOOLS
         tools.update(VALIDATION_TOOLS)
         prompt = "The previous edit targeted a protected path. Run a fresh executable check before proposing another edit."
     if repair_recovery_mode and repair_required and not setup_failure:
-        tools = {"patch_file", "finish_task"}
+        tools = {"patch_file", "edit_range", "finish_task"}
         if not last_mutation_rejected:
             tools.add("write_file")
         prompt = "Repair recovery is active. Use the evidence already gathered and make exactly one targeted patch now."
         if last_mutation_rejected:
-            prompt += " write_file was rejected earlier; use patch_file instead and do not retry it."
+            prompt += " write_file was rejected earlier; use the currently offered edit tool instead and do not retry it."
     if accepted_validation_evidence and not setup_failure:
         # A later orchestration/tool-plane failure must not erase an already
         # accepted behavioral result or force a needless product rewrite.

@@ -8,6 +8,7 @@ module should stay small and easy to audit by eye.
 
 import ast
 import difflib
+import hashlib
 import os
 import re
 import subprocess
@@ -29,6 +30,17 @@ RUN_STATE = {"goal_met": False, "target_file": None}
 # not something you want against a real project's file with side effects.
 AUTO_RUN_AFTER_WRITE = {"enabled": True}
 
+# The single-file editor(s) actually registered on the model-facing tool
+# surface for this run. registry.load_registry() sets this to match its
+# --editor choice; write_file's existing-file rejection must only name a
+# tool the model can actually call this turn, not every editor the kernel
+# happens to implement.
+ACTIVE_EDITORS = {"names": ("patch_file",)}
+
+
+def set_active_editors(names) -> None:
+    ACTIVE_EDITORS["names"] = tuple(names) or ("patch_file",)
+
 
 def _resolve(path: str) -> str:
     """Confine a model-supplied path to the current sandbox root. Allows
@@ -47,7 +59,22 @@ def validate_python_syntax(file_path, content):
         hint = ""
         if "generator expression must be parenthesized" in e.msg.lower():
             hint = " Hint: wrap the generator expression in parentheses before passing another keyword argument."
-        return False, f"SyntaxError: {e.msg} (line {e.lineno}, offset {e.offset}).{hint}"
+        # A line/column number alone gives a stuck model nothing to correct
+        # against — it can only guess again. Show the actual offending text
+        # (whitespace made visible, the same convention every other
+        # rejection in this file uses) so a repeated identical rejection is
+        # diagnosable instead of a silent loop.
+        content_lines = content.splitlines()
+        excerpt = ""
+        if e.lineno and 1 <= e.lineno <= len(content_lines):
+            bad_line = content_lines[e.lineno - 1]
+            caret_pos = max(0, (e.offset or 1) - 1)
+            excerpt = (
+                f"\n--- offending line {e.lineno} ---\n"
+                f"{_visible_whitespace(bad_line)}\n"
+                f"{' ' * caret_pos}^"
+            )
+        return False, f"SyntaxError: {e.msg} (line {e.lineno}, offset {e.offset}).{hint}{excerpt}"
 
 
 def _strip_code_fences(text: str) -> str:
@@ -136,7 +163,10 @@ def read_file(path: str, offset: Optional[int] = 1, limit: Optional[int] = None)
     window_note = ""
     if offset != 1 or end_idx != total_lines:
         window_note = f" [lines {offset}-{end_idx} of {total_lines}]"
-    return f"--- {path}{window_note} ({len(content)} chars) ---\n{content}"
+    # Snapshot hash: the model can pass this token back to edit_range so a
+    # stale edit is rejected instead of landing on a drifted file.
+    digest = hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()[:12]
+    return f"--- {path}{window_note} ({len(content)} chars) [snapshot {digest}] ---\n{content}"
 
 
 def list_workspace() -> str:
@@ -155,8 +185,9 @@ def list_workspace() -> str:
 def write_file(path: str, content: str) -> str:
     """Create a new file inside the workspace.
 
-    Existing files are protected: use patch_file for revisions so the model
-    must identify the current block it intends to change.
+    Existing files are protected: use the currently offered edit tool for
+    revisions so the model must identify the current block or line range it
+    intends to change.
 
     Args:
       path: Filename to write, e.g. 'patch_validator.py'.
@@ -164,9 +195,11 @@ def write_file(path: str, content: str) -> str:
     """
     full_path = _resolve(path)
     if os.path.exists(full_path):
+        editors = " or ".join(ACTIVE_EDITORS["names"])
         return (
-            f"REJECTED: '{path}' already exists. write_file only creates new files; "
-            "use patch_file with the exact current block to edit it."
+            f"REJECTED: '{path}' already exists. write_file only creates new files. "
+            f"To edit this file, use {editors}. "
+            "To create a different file, choose a filename that does not exist yet."
         )
     content = _strip_code_fences(content)
 
@@ -179,6 +212,138 @@ def write_file(path: str, content: str) -> str:
         f.write(content.rstrip() + "\n")
 
     return _test_after_write(full_path)
+
+
+def edit_range(path: str, edits: list, snapshot: str | None = None) -> str:
+    """Apply batched, line-anchored replacements to an existing file.
+
+    This is the line-anchored editor: the model names the line ranges it
+    wants to replace (as shown by read_file's window headers) and supplies
+    the new text for each — no verbatim quoting of the old text is required.
+    Edits are applied atomically and bottom-up, so all line numbers stay
+    valid within one batch regardless of earlier edits in the same call. An
+    optional short ``expect`` token on any edit lets the model confirm it is
+    editing the region it thinks it is: if the token is absent from the
+    current lines, the whole batch is rejected and the host returns the
+    actual region with real line numbers — a free, self-correcting re-read
+    instead of a silent wrong edit. The optional ``snapshot`` token from
+    read_file verifies the whole file is unchanged since it was read.
+
+    Args:
+      path: Filename to edit, e.g. 'patch_validator.py'. Must already exist.
+      edits: List of dicts with keys:
+        start_line (int, 1-based inclusive),
+        end_line (int, 1-based inclusive),
+        replacement (str, text that replaces the range),
+        expect (str, optional; a short token that must appear in the range).
+      snapshot: Optional [snapshot ...] token from a read_file header.
+    """
+    full_path = _resolve(path)
+    if not os.path.exists(full_path):
+        return f"ERROR: '{path}' does not exist yet — use write_file to create it first."
+
+    with open(full_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    if snapshot is not None:
+        # The model passes back the [snapshot ...] token read_file printed.
+        # Any file change since that read invalidates every line anchor.
+        current_digest = hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()[:12]
+        if not snapshot.startswith(current_digest):
+            return (
+                f"REJECTED: snapshot mismatch — '{path}' has changed since the "
+                f"lines were read (current snapshot {current_digest}). Re-read the "
+                "file, then retry with fresh line numbers and the new snapshot."
+            )
+
+    if not isinstance(edits, list) or not edits:
+        return "REJECTED: edits must be a non-empty list of edit objects."
+    if len(edits) > 8:
+        return f"REJECTED: at most 8 edits per batch, got {len(edits)}."
+
+    parsed = []
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return f"REJECTED: edit {index + 1} is not an object."
+        unknown = set(edit) - {"start_line", "end_line", "replacement", "expect"}
+        if unknown:
+            return f"REJECTED: edit {index + 1} has unknown fields: {sorted(unknown)}."
+        start_line = edit.get("start_line")
+        end_line = edit.get("end_line")
+        for value in (start_line, end_line):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return (
+                    f"REJECTED: edit {index + 1} — start_line and end_line must be "
+                    f"integers, got {type(value).__name__}."
+                )
+        if start_line < 1 or end_line < start_line:
+            return (
+                f"REJECTED: edit {index + 1} — invalid line range {start_line}-"
+                f"{end_line}; start_line must be >= 1 and end_line >= start_line."
+            )
+        if end_line > len(lines):
+            return (
+                f"REJECTED: edit {index + 1} — range {start_line}-{end_line} exceeds "
+                f"the current file length ({len(lines)} lines). Re-read the file to "
+                "get current line numbers, then retry."
+            )
+        expect = edit.get("expect")
+        if expect is not None:
+            if not isinstance(expect, str) or not expect.strip():
+                return f"REJECTED: edit {index + 1} — expect must be a short string."
+            region_text = "".join(lines[start_line - 1: end_line])
+            if expect.strip() not in region_text:
+                bounded = "".join(lines[max(0, start_line - 5): min(len(lines), end_line + 5)])
+                return (
+                    f"REJECTED: edit {index + 1} — expected token {expect.strip()[:80]!r} "
+                    f"was not found in lines {start_line}-{end_line}. The file has drifted; "
+                    f"the actual region is:\n{bounded[:1200]}"
+                )
+        replacement = str(edit.get("replacement", ""))
+        # Remove code fences without stripping meaningful newlines: the
+        # replacement is spliced between existing lines, so a lost trailing
+        # newline would merge lines together.
+        replacement = re.sub(r"^```(?:python)?\s*\n?", "", replacement, flags=re.IGNORECASE)
+        replacement = re.sub(r"\n?```$", "", replacement)
+        replacement_lines = replacement.splitlines(keepends=True)
+        if replacement_lines and not replacement_lines[-1].endswith("\n"):
+            replacement_lines[-1] += "\n"
+        parsed.append((index + 1, start_line, end_line, replacement_lines))
+
+    # Bottom-up application keeps every line number valid within the batch.
+    applied_lines = list(lines)
+    results = []
+    for index, start_line, end_line, replacement_lines in sorted(
+        parsed, key=lambda item: item[1], reverse=True
+    ):
+        applied_lines[start_line - 1: end_line] = replacement_lines
+        results.append((index, start_line, end_line, replacement_lines))
+
+    new_content = "".join(applied_lines)
+    valid, err = validate_python_syntax(full_path, new_content)
+    if not valid:
+        return f"REJECTED (invalid syntax, nothing written): {err}"
+
+    with open(full_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    # Report the new line map so the model can anchor its next batch
+    # without a full re-read, plus a bounded preview of the last edit.
+    line_map = []
+    for index, start_line, end_line, replacement_lines in results:
+        new_end = start_line + len(replacement_lines)
+        line_map.append(f"edit {index}: lines {start_line}-{end_line} -> {start_line}-{new_end - 1}")
+    last_start, last_repl = results[-1][1], results[-1][3]
+    preview_start = max(1, last_start - 1)
+    preview = "".join(applied_lines[preview_start - 1: preview_start - 1 + len(last_repl) + 2])
+    new_digest = hashlib.sha256("".join(applied_lines).encode("utf-8")).hexdigest()[:12]
+    return (
+        f"Applied {len(results)} edit(s) to '{path}' ({len(applied_lines)} lines now) "
+        f"[snapshot {new_digest}]. "
+        + "; ".join(line_map)
+        + f"\n--- preview around the last edit (lines {preview_start}-{preview_start + len(last_repl) + 1}) ---\n"
+        + preview[:800]
+    )
 
 
 def _visible_whitespace(text: str) -> str:
@@ -339,6 +504,26 @@ def patch_file(path: str, find_exact_block: str, replace_with_block: str) -> str
     replace = _strip_code_fences(replace_with_block)
 
     if search in content:
+        occurrences = content.count(search)
+        if occurrences > 1:
+            # Silent first-match replacement corrupts the wrong location.
+            # Refuse ambiguity and tell the model where the matches are.
+            starts = []
+            pos = 0
+            while True:
+                index = content.find(search, pos)
+                if index == -1:
+                    break
+                starts.append(index)
+                pos = index + 1
+            line_numbers = [
+                str(content.count("\n", 0, index) + 1) for index in starts[:5]
+            ]
+            return (
+                f"REJECTED: the block appears {occurrences} times in '{path}' "
+                f"(first matches near lines {', '.join(line_numbers)}). "
+                "Make the block longer or unique, or use edit_range with explicit line numbers."
+            )
         new_content = content.replace(search, replace, 1)
     else:
         match = _find_whitespace_tolerant_match(content, search)
