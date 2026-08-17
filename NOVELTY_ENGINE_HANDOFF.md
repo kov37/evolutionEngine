@@ -1,4420 +1,673 @@
 # Novelty Engine Handoff
 
-Updated: 2026-08-15
+Updated: 2026-08-17
 
-## Latest test-cycle note
+This file is the active handoff for NoveltyEngine, an agentic coding-benchmark
+harness: a local model calls tools (read/edit/patch/run_tests/finish) against
+a task in an isolated workspace, and an independent grader — never the model's
+own claim — decides pass/fail. This version has been aggressively trimmed:
+older day-by-day debugging narratives for retired conditions were compressed
+into short changelog bullets (the fix, not the blow-by-blow), while the most
+recent (2026-08-17) work is kept close to verbatim. Git history has the full
+prior narrative if a past incident ever needs to be re-read in detail.
 
-The latest real-app novelty run reached internal completion after one repair
-cycle, but the independent grader failed its homepage assertion. The grader
-now includes the first 500 response characters in that failure, so the next
-run can distinguish bad HTML from a startup or routing failure. Treat the
-run as failed until the independent grader passes.
+## Current state (2026-08-17)
 
-The benchmark also supports `--keep-workspace`, which preserves the generated
-temporary project for manual inspection after a run. Use it for demonstrations
-or debugging; ordinary evals should leave cleanup enabled.
+- **Actor policy: single-actor baseline only.** One Qwen3.8-27B Q4_K_M GGUF
+  model via llama.cpp on `127.0.0.1:8080`. There is **no** 4B worker, **no**
+  novelty/action-critic/action-gate multi-agent condition, and **no** MLX
+  backend in current use. Ollama may be running but is not used by these
+  runs. Everything below that mentions `--condition novelty`, a 4B worker, or
+  MLX is historical: it explains why a generic mechanism exists, not a
+  currently-exercised code path.
+- **`swebench_runner.py`** is the current benchmark entrypoint — an instance
+  registry, not a SymPy-only script. Registered instances: `django__django-14034`
+  and `sympy__sympy-13878`. `--mode baseline` matches the single-actor policy.
+- **`agentic_benchmark.py`** is a separate, older harness with its own task
+  set (`lru_cache`, `bug_repair`, `real_app`, `websocket_chat`,
+  `cascading_loop`, `multi_file_transaction`, `3d_scene`, `wifi_simulator`,
+  `feature`, `data_report`, `recovery`, `dependency-graph`). Most of these
+  were exercise beds for the retired novelty/4B condition and are not part of
+  the current benchmark cycle. `lru_cache` and `bug_repair` reruns on
+  2026-08-17 (baseline condition, correct interpreter) are still current —
+  see below.
+- Deterministic suite as of this read: `.venv-swebench/bin/python -m pytest -q
+  tests` → **252 passed, 38 subtests passed, 1 warning**. Trust the doc's own
+  recent claims as a baseline; older test counts quoted in the changelog below
+  are the count *at that historical point*, not the count today.
+- **In flight:** a django-14034 baseline run using `--editor edit_range` for
+  the first time is running in the background to check whether the turn-2
+  block-mismatch loop (see below) is actually resolved. Its outcome is not
+  yet known — do not report a result for it until it reports.
 
-The first Qwen3.6 MTP Todo run exposed a provider-boundary issue: llama.cpp
-expects `tool_choice` as the string `"required"`, while the actor adapter was
-sending the structured OpenAI function-choice object. The adapter now performs
-that translation at the llama.cpp boundary. Re-run deterministic checks, then
-repeat the Qwen hybrid Todo benchmark; do not interpret the pre-fix run as a
-model capability result.
+## Operating instructions for the next agent
 
-The reusable benchmark now includes `cascading_loop`, based on the multi-step
-dependency specification: an isolated `target_code.py` first fails to compile,
-then exposes a runtime type error after the syntax repair, and is graded only by
-an independent pytest subprocess. The prompt does not name either expected
-patch, replace the test, or add model/provider-specific logic. Run it with
-`--task cascading_loop` to measure whether the actor moves through fresh failure
-states instead of repeating the first repair.
+Working directory: `/Users/digitialchameleon/noveltyEngine`, branch
+`noveltyEngine`. Read this file before changing code. The worktree is
+routinely left intentionally dirty with in-progress work — inspect `git
+diff`/`git status` before editing or resetting anything; do not discard
+uncommitted changes.
 
-The cascading grader prefers pytest when installed and otherwise invokes the
-provided `test_calculation` function in a fresh Python subprocess. This keeps
-the test valid on minimal environments without weakening the assertion or
-coupling it to the expected implementation.
-
-The first live cascading run exposed three generic loop defects. The command
-boundary now normalizes a missing `python` alias to an available Python
-interpreter; validation recognizes direct `test_*.py` checks as evidence; and
-a successful, fully covered validation adds a deterministic delivery nudge so
-the actor calls `finish_task` instead of rereading the corrected file. The
-cascading scorecard now separates artifact correctness from workflow success
-and requires both `finish_task` and the specified iteration target.
-
-The next live pass found another false-positive path: executing a pytest-style
-`test_*.py` file directly can exit zero without invoking any test function. The
-validation contract now rejects that silent result and tells the actor to use a
-runner or explicitly call the test function. A zero exit code alone is never
-enough evidence for completion.
-
-The execution boundary also converts a silent zero-exit direct `python
-test_*.py` invocation into an actionable error. This prevents a model from
-repeating a command that technically exits zero but never calls the test
-function, and lets the normal recovery path select a real runner.
-
-The hard cascade exposed the next generic failure mode: after a semantic test
-mismatch, Mistral repeatedly reread the implementation while the 4B worker's
-stale judgment was still rendered. The engine now extracts compact exception
-and unittest assertion-diff evidence, renders the deterministic replacement
-for stale worker judgments, and applies a repair lock after one targeted
-inspection so the next turn must mutate the implementation. This is intended
-to improve semantic repair without naming any fixture, file, model, or
-provider.
-
-The hard-cascade rerun then exposed a validation false negative: standard
-`unittest` writes its successful report to stderr, while the silent-test guard
-only checked stdout. The guard now treats both streams as evidence, preserving
-the rejection of genuinely silent test modules without rejecting real passing
-tests.
-
-The following deterministic check found the validator also missed named
-unittest output such as `test_report_contract ... ok` because it only matched
-the standalone word `test`. Named `test_*` evidence is now recognized while
-silent direct test modules remain rejected.
-
-The next cycle found that a dead llama.cpp endpoint caused the agent to spend
-all retry attempts on `Connection refused` and end with a traceback. Provider
-errors that cannot improve through retry now terminate the run cleanly and
-record the blocker immediately; transient malformed responses still retain
-the bounded retry policy.
-
-## Generic-to-specialized architecture priority
-
-Build additions in descending order of how many workflows they help. The
-universal core comes before domain adapters:
-
-1. Persistent task memory: goals, completed steps, failures, artifacts, current
-   state, and next action must survive beyond the prompt.
-2. Checkpoint and resume: save state after meaningful mutations and validation
-   so a timeout or process restart can continue safely.
-3. Universal action/evidence ledger: record tool calls, results, file changes,
-   processes, and validation evidence in structured form.
-4. Generic failure recovery: handle repeated actions, malformed arguments,
-   stale processes, missing dependencies, and incomplete validation.
-5. Generic planning and milestone tracking: derive milestones from any task
-   without embedding Todo, SymPy, or TUA-specific assumptions.
-6. Environment and dependency state: track tools, packages, services, ports,
-   working directory, and external resources.
-7. Independent completion validation: require evidence that the objective was
-   achieved, not merely that a command returned zero.
-8. Model/provider compatibility: normalize tool schemas, structured outputs,
-   timeouts, context limits, and provider-specific protocol differences.
-9. Specialized adapters: add spreadsheet, image, browser, medical,
-   engineering, and other domain support only after the universal core is
-   reliable.
-
-Architectural rule: persistent state is authoritative; prompt context is a
-temporary working view; the 4B worker is advisory; validation decides whether
-work is complete. TUA-Bench is a useful stress test for this roadmap because
-its long, heterogeneous tasks expose memory and recovery failures that a small
-Todo task cannot reveal.
-
-## Benchmark-cycle strategy
-
-TUA-Bench is part of the test cycle, but not the only test. Use three layers:
-
-1. Fast deterministic tests and small agent tasks after every code change.
-2. Focused agent tests—Todo, bug repair, dependency recovery, and selected TUA
-   hard tasks—after meaningful architecture changes.
-3. The broader TUA-Bench suite as a periodic long-horizon stress test after
-   changes to memory, checkpointing, recovery, validation, or tool protocols.
-
-TUA is valuable because its tasks are execution-graded and span terminal
-workflows beyond coding, but its environments are slower and heavier than the
-local loop. A TUA score must therefore be treated as a system-level signal,
-not as the only regression test.
-
-## Current objective
-
-Improve general agent progress through model-independent context, validation,
-and recovery mechanisms. The primary actor is the larger local model; the 4B
-worker remains advisory and cannot edit, execute, or declare success.
-
-## Start here: operating instructions for the next agent
-
-This file is the active handoff. Read it completely before changing code.
-The working directory is `/Users/digitialchameleon/noveltyEngine` on branch
-`noveltyEngine`. The last committed baseline is:
-
-```text
-3ee9d3a Add task-derived validation and repair loop
-```
-
-### 2026-08-15 — harden generic command and progress boundaries
-
-The next SymPy run exposed two reusable harness problems before the actor made
-any product mutation: Qwen issued `/workspace` as if it were the virtual
-project root, and stale inspection calls could still be replayed from an older
-conversation turn after the novelty progress gate had narrowed the legal tool
-surface. The first caused a false sandbox escape error; the second consumed
-repair time without producing a mutation.
-
-The kernel now maps only the exact `/workspace` prefix to the already-trusted
-active project root. Other absolute paths remain rejected. When the host
-novelty gate says progress is required, llama.cpp is also required to emit one
-tool from the final current tool contract. This is a transport-level guard,
-not a prompt hint; the dispatcher still rejects any stale tool name that slips
-through.
-
-The transaction proposal remains sound with three refinements. The buffer must
-stay host-owned and path-normalized, it should preserve only transaction-owned
-files through a bounded bridge, and expiry should enter targeted recovery
-rather than run a broad `git checkout` that could erase unrelated user work.
-The 4B should remain advisory for failure compaction; deterministic local
-compaction is the safe fallback and should never delay the actor.
-
-Deterministic evidence after this change: `159 passed, 35 subtests passed`.
-The subsequent real multi-file attempt was interrupted by the execution
-wrapper while the actor was still in its repair path, so it is not a pass or
-failure against the benchmark. The prior authoritative clean multi-file pass
-remains the valid real-model result. The next real run should verify that the
-virtual-root alias and required-tool boundary reduce the orientation/path
-contract stall without changing the fixture or scorecard.
-
-The worktree is intentionally dirty. Existing uncommitted work includes the
-watchdog, repair metrics, response-shape validation, 4B event coalescing, and
-tests under `tests/test_novelty_context.py`. Do not discard or reset these
-changes. Inspect them with `git diff` before editing.
-
-### First five commands
+**First commands to run:**
 
 ```bash
 cd /Users/digitialchameleon/noveltyEngine
 git status --short
-git diff --stat
-python3 -m py_compile agent.py agentic_benchmark.py validation_contract.py novelty_context.py
-python3 validation_contract.py
-python3 -m unittest -v tests.test_novelty_context
+git log -1 --oneline
+python3 -m py_compile agent.py swebench_runner.py agentic_benchmark.py
+./.venv-swebench/bin/python -m pytest -q tests
 ```
 
-If these fail, fix the failure before starting a model benchmark. Update this
-handoff after every code, test-policy, or benchmark-policy change.
+If these fail, fix the failure before starting a model benchmark.
 
-### Exact next work sequence
-
-1. Review the uncommitted diff, especially the watchdog and repair metrics.
-2. Run the focused `bug_repair` novelty eval first. It is the controlled test
-   for failure-to-repair and previously passed.
-3. Run the same `bug_repair` task with `--condition baseline` for comparison.
-4. Inspect the newest JSONL records and compare the `repair` metrics, not just
-   pass/fail.
-5. Only then run `real_app`; use the watchdog and actively monitor it.
-6. If code changes are made, run deterministic tests, update this file, and
-   commit only after the result is understood.
-
-### Focused benchmark commands
-
-Use the real llama.cpp actor only when `llama-server` is already listening on
-`127.0.0.1:8080`. Do not start a second server if one is already running.
+**Running a benchmark.** Check for an already-running server before starting
+one (`pgrep -fl 'llama-server|agent.py|swebench_runner.py|agentic_benchmark.py'`,
+`curl -fsS http://127.0.0.1:8080/health`). Example current-condition run:
 
 ```bash
-python3 agentic_benchmark.py --task bug_repair --condition novelty \
-  --iterations 18 --chat-timeout 60 --run-timeout 600 \
-  --backend llama-cpp --base-url http://127.0.0.1:8080/v1 \
-  --action-critic --action-gate --action-first
-
-python3 agentic_benchmark.py --task bug_repair --condition baseline \
-  --iterations 18 --chat-timeout 60 --run-timeout 600 \
-  --backend llama-cpp --base-url http://127.0.0.1:8080/v1 \
-  --action-first
+./.venv-swebench/bin/python swebench_runner.py --instance django__django-14034 \
+  --mode baseline --editor edit_range --thinking --chat-timeout 240
 ```
 
-Monitor from another terminal:
+Monitor from another terminal: `tail -f state/benchmark/runs/<run_id>.log` and
+`state/benchmark/agentic/monitor-*.jsonl`. A run is complete only when its JSON
+result is printed and the independent grader result is recorded — a timeout is
+an infrastructure result, not a model-quality result, and `finish_task` alone
+is never evidence of success.
 
-```bash
-pgrep -fl 'agentic_benchmark.py|agent.py|llama-server'
-tail -f state/benchmark/agentic/results.jsonl
-```
+**Run-monitoring rule.** Every live benchmark run must be actively monitored
+and reported: state the task, mode/condition, backend, and iteration budget
+before starting; poll for milestones and stalls while it runs (iterations,
+tool calls, mutations, validations, errors); report the independent grader
+result and final metrics when it ends. Do not launch a long run without an
+active monitoring loop, and do not walk away from one silently.
 
-The benchmark is complete only when its JSON result is printed and the
-independent grader result is recorded. A timeout is an infrastructure result,
-not a model-quality result. Do not claim success from `finish_task`; use the
-grader and the JSONL record.
+**What not to do:**
 
-### What not to do
-
-- Do not add Qwen-, Devstral-, Todo-, or SymPy-specific branches to the engine.
-- Do not treat a 4B judgment as authoritative; local evidence wins.
-- Do not remove the independent grader or weaken assertions to make a run pass.
+- Do not add model-, task-, or benchmark-specific branches to the engine
+  (no Qwen-, Devstral-, Todo-, SymPy-, or Django-specific logic in the
+  generic control plane).
+- Do not treat a model's own success claim, or a 4B/worker judgment, as
+  authoritative — local deterministic evidence and the independent grader win.
+- Do not remove or weaken the independent grader, or weaken an assertion, to
+  make a run pass.
 - Do not launch an uncapped overnight benchmark.
-- Do not reset, checkout, or delete existing worktree changes.
-- Do not commit benchmark output blindly without inspecting what changed.
-
-### Definition of a useful improvement
-
-A change is useful only if it improves independently verified completion,
-repair convergence, or context efficiency across more than one task shape. The
-minimum evidence is a deterministic test plus a paired benchmark comparison.
-Record iterations, mutations, validations, repair failures, repair mutations,
-successful repair cycles, duplicate actions, worker calls, worker failures,
-elapsed time, and independent grader outcome.
-
-## Current failure-to-repair design
-
-The agent now uses an explicit state machine:
-
-```text
-mutation -> validation -> pass / repair -> validation
-```
-
-After a failed behavioral check, `agent.py` enters `repair_required` mode. It
-temporarily offers focused inspection and mutation tools, removes validation
-and finish tools, and requires a successful mutation before revalidation.
-
-`validation_contract.py` creates a task-derived contract by extracting
-acceptance clauses, interfaces, and typed fields from the user task. It does
-not branch on model, provider, benchmark name, or expected source code.
-For resource-oriented API wording it also derives narrowly explicit response
-requirements: created resources are JSON objects with their typed fields and
-an identifier, while collection responses are JSON lists whose items are
-inspected. These requirements are used to reject smoke checks that exercise
-an endpoint but never establish its response shape.
-
-## Structured repair packet
-
-Each failed validation now creates a packet containing:
-
-- the exact failed probe;
-- expected interface and response evidence;
-- observed failure output;
-- the next repair focus;
-- a constraint to make one concrete mutation before rerunning the check.
-
-This is task-grounded feedback, not model-specific implementation. For
-example, a task mentioning `/api/tasks` causes the packet to identify that
-interface; it does not prescribe a Todo-specific implementation.
-
-## Verification status
-
-Deterministic checks currently pass:
-
-```text
-python3 -m py_compile agent.py validation_contract.py action_governor.py
-python3 validation_contract.py
-python3 task_contract.py
-python3 action_governor.py
-git diff --check
-```
-
-The latest real-app benchmark used llama.cpp, the Devstral Q4 actor, the 4B
-novelty worker, action critic, action gate, and a 24-iteration budget. The
-previous completed 24-iteration run made 11 mutations and 10 validations, but
-still failed the independent Todo grader because the API response shape did
-not converge. A later rerun became stale after more than 21 minutes without a
-completion record and was stopped; it is not treated as a model result.
-
-The controlled `bug_repair` eval subsequently passed with the structured
-repair packet enabled:
-
-```text
-task: bug_repair
-iterations: 18
-mutations: 4
-validations: 4
-worker_calls: 4
-worker_failures: 0
-independent grader: PASS
-```
-
-This confirms the failure-to-repair state transition works on a seeded defect.
-The remaining Todo failure is a harder multi-interface convergence problem,
-not evidence that repair mode is completely ineffective.
-
-The benchmark runner now has a 600-second per-run watchdog by default. It
-starts the agent in its own process group and terminates the group on expiry,
-preserving partial agent output and recording `timed_out` plus the watchdog
-message. This prevents stale long-running benchmarks from surviving overnight.
-Override with `--run-timeout` when deliberately testing a longer run.
-Timeout buffers are normalized before metrics and JSONL recording so a partial
-run cannot fail while being reported.
-
-The agent and benchmark now also record repair-cycle metrics: validation
-failures, repair-mode entries, repair mutations, revalidation attempts, and
-successful repair cycles. These distinguish genuine recovery from repeated
-editing or repeated testing.
-
-## Next handoff actions
-
-1. Read the newest `state/benchmark/agentic/results.jsonl` entry.
-2. If the grader still fails, inspect the latest repair packet and generated
-   artifact before changing policy.
-3. Compare mutation count, validation count, repair transitions, duplicate
-   checks, and independent pass/fail—not just model completion.
-4. Update this document after every code or benchmark-policy change.
-
-## Run-monitoring rule
-
-Every live benchmark run must be actively monitored and reported to the user.
-Before starting, state the task, condition, backend, iteration budget, and
-monitoring plan. While it runs, poll for progress and report meaningful
-milestones or stalls, including iterations, tool calls, mutations,
-validations, worker activity, and errors when available. After completion,
-report the independent grader result and final metrics. Do not launch a long
-run without an active monitoring loop.
-
-## Latest context-manager implementation
-
-`novelty_context.py` now tags every event and worker judgment with an event ID.
-If the asynchronous worker is busy, the newest actionable event is retained in
-a single pending slot and launched after the current judgment completes. This
-coalesces bursts without replaying an unbounded backlog. The model-facing
-context marks judgments that lag the newest event and falls back to the local
-deterministic recommendation for action-critical advice. Metrics now include
-`coalesced_events`, `stale_judgments`, `latest_event_id`, and
-`judgment_event_id`.
-
-Deterministic verification passes:
-
-```text
-python3 -m unittest -v tests.test_novelty_context
-python3 -m py_compile novelty_context.py agent.py validation_contract.py
-python3 message_compaction.py
-python3 validation_contract.py
-git diff --check
-```
-
-## Latest implementation change
-
-The API validation contract now tracks inferred response shapes and created
-resource identifiers. This addresses the latest real-app failures where the
-independent grader observed a task collection containing strings or a created
-response without the expected `title`/`id` object fields, despite the actor
-having run a superficially successful request. Deterministic checks pass:
-
-```text
-python3 -m py_compile validation_contract.py agent.py action_governor.py
-python3 validation_contract.py
-python3 task_contract.py
-python3 action_governor.py
-git diff --check
-```
-
-`AGENT_UX_EVAL.md` defines the product test protocol. Todo is only an external
-fixture; the timing and repair instrumentation are generic and must transfer
-to non-web tasks before a policy is promoted.
-
-The benchmark now streams agent events live and persists each event to a
-timestamped `state/benchmark/agentic/monitor-*.jsonl` file. Monitor the live
-terminal plus that file; a final result is not required to diagnose a stall.
-The child actor is launched with unbuffered Python output so event delivery is
-immediate; if a future provider buffers internally, record that as a transport
-limitation rather than claiming live visibility.
-The terminal stream is compacted to event summaries; full raw lines remain in
-the monitor JSONL so active monitoring does not consume unnecessary context.
-
-## Proactive run ownership
-
-When a benchmark is started, the active agent owns the run through termination.
-It must poll the process and monitor log, report meaningful milestones and
-stalls in the conversation, and report the final independent grader result,
-timeout state, and metrics without waiting for the user to ask. A run is not
-considered complete merely because model output stopped; verify the JSONL
-result and process state.
-
-Recent failure feedback now handles two generic environment mistakes: missing
-imports inspect project declarations and distinguish an explicitly required
-dependency from an ad hoc probe dependency. Required dependencies may be
-installed through the project's normal workflow using internet access and
-recorded in the project declaration; probe-only dependencies should prefer the
-standard library. Foreground service timeouts recommend a bounded background
-lifecycle plus a probe. These rules are not tied to Todo or any framework.
-
-The generic background execution primitives are available through
-`run_command(..., background=true)` or `run_shell(..., background=true)`, with
-`process_status(handle)` and `stop_process(handle)` for inspection and cleanup.
-The agent cleans up owned background processes when its run ends.
-
-The most recent Todo run was started before these primitives were loaded, so
-it is not evidence about the new lifecycle behavior. It ran 22 iterations in
-587.5 seconds, made 9 mutations and 9 validations, and failed independently
-because the task collection contained strings. Treat that as a baseline
-failure; run a fresh process after this change before evaluating lifecycle
-support.
-
-The action-gate unit test now explicitly checks that targeted reads are
-available before the orientation threshold and close after it, preserving the
-intended policy that reads do not become an exploration loop.
-
-The latest lifecycle Todo run confirmed that background start/status/stop
-works, but exposed a generic coverage hole: a passing `/health` probe reopened
-the actor before `/api/tasks` had been exercised. `ValidationContract` now
-keeps the focused validation phase active until every interface named by the
-task has accepted evidence. The contract renders the remaining-interface rule
-to the actor and exposes `uncovered_endpoints()` for the state machine. This
-does not add Todo-specific behavior; it applies to any task with multiple
-interfaces. The run still failed independently because the actor never
-validated the create-task response and the grader found a missing `id`.
-
-After this change, run:
-
-```text
-python3 validation_contract.py
-python3 -m unittest -v tests.test_novelty_context tests.test_agent_tools
-python3 -m py_compile agent.py validation_contract.py
-git diff --check
-```
-
-Then repeat the real-model Todo benchmark and inspect whether the actor probes
-each required interface before attempting completion.
-
-The first rerun after that coverage change exposed and fixed another generic
-scope error: inferred fields for a create response were being demanded from a
-health probe. Response requirements are now operation-scoped. Write probes
-validate created-object fields/shapes, collection probes validate list/item
-shapes, and unrelated API probes are not forced to satisfy either response
-schema. This keeps the contract task-derived without teaching it Todo-specific
-paths.
-
-The operation-scoping self-test uses an explicit write probe; health and read
-probes must not look like create requests merely because they mention the same
-API path.
-
-The follow-up parser fix also bounds each endpoint's inferred response scope to
-its own task clause. A later collection requirement can no longer leak into an
-earlier health endpoint merely because both appear in the same prompt.
-
-Repair packets now apply that same scope. A failed health or unrelated read
-probe no longer displays create-response fields as if they were required for
-that endpoint; write probes receive object/field guidance and collection
-probes receive list/item guidance.
-
-The repair-phase prompt now explicitly treats validation scripts as evidence,
-not the thing to rewrite. Unless the failure is explicitly a probe dependency,
-setup, or syntax problem, the actor must repair the artifact under test and
-must not weaken or rewrite the check to make it pass. This is a generic repair
-integrity rule intended to reduce small-model repair loops.
-
-The validation contract also accepts a successful health response containing
-the task-required `status=ok` as health evidence; curl does not need to emit a
-literal assertion for that narrow health check. During a multi-interface
-validation phase, the actor prompt now prints the exact interfaces that still
-lack accepted evidence, so the small model is directed toward the next
-behavior instead of repeating an already-good health probe.
-
-The health-evidence path is covered by the validation self-test and keeps
-endpoint detection ahead of operation-specific checks.
-
-The self-test now covers the actual JSON form `{"status": "ok"}` as well as
-the compact form, preventing quoted JSON keys from being misclassified.
-
-The latest live trace found that `run_command` is intentionally classified as
-an observation capability, whose generic success inference is `None`. During
-the explicit validation phase, the engine now accepts the task-derived
-validation contract's positive assessment directly instead of requiring the
-capability classifier to call the shell command a mutation/validation tool.
-This restores shell-based behavioral validation without changing tool
-classification.
-
-## Context ceiling incident and fix
-
-The real llama.cpp trace showed prompt growth from 1,201 tokens to 15,937
-tokens, followed by a request of 16,785 tokens against `n_ctx=16,384`.
-Assistant scratch compaction had reduced model prose, but the novelty-only
-run did not enable the optional raw-tool pruning branches, so repeated file
-reads and shell output remained in the live transcript. This was a genuine
-context-manager bug, not merely a llama.cpp configuration issue.
-
-`agent.py` now applies `_bound_live_tool_results()` after every tool batch in
-every mode. It discovers llama.cpp's `/props` context size when available and
-keeps raw tool output to 18% of the provider window, using a conservative
-4-character/token estimate. Other providers use their configured `NUM_CTX`,
-and discovery failure falls back to a safe 16,384-token window. Older tool
-results are replaced in place, preserving tool-call/result pairing. This is
-percentage-based rather than a fixed token-count policy; the 4B novelty worker
-remains responsible for useful semantic guidance, not for making an unbounded
-transcript safe.
-
-The provider may still be configured with a smaller context than
-`agent.py`'s preferred `NUM_CTX`; the live transcript must remain bounded
-regardless. Validate with:
-
-```text
-python3 -m py_compile agent.py
-python3 -m unittest -q tests.test_novelty_context tests.test_agent_tools
-python3 message_compaction.py
-python3 validation_contract.py
-git diff --check
-```
-
-The transport now also performs an exact pre-request measurement through
-llama.cpp's `/tokenize` endpoint. It reserves `max_tokens` plus a 256-token
-margin for the response, then replaces oldest tool payloads and remeasures
-until the prompt fits. If `/tokenize` is unavailable, the percentage/raw-tail
-bound remains the fallback. If the prompt still cannot fit, the request fails
-with an explicit `PromptBudgetError` instead of sending a doomed request or
-retrying the same oversized prompt.
-
-The measurement payload includes the offered tool schemas as well as chat
-messages. This matters because llama.cpp's reported prompt usage includes
-those schemas; measuring messages alone undercounted the real request.
-
-## Benchmark process cleanup
-
-`agentic_benchmark.py` now terminates the complete actor descendant tree on
-watchdog timeout, keyboard interruption, or abnormal stream termination. This
-includes services launched by the actor with `background=true`, even though
-those services intentionally create their own process sessions. Verify with a
-controlled interruption and then confirm no `agent.py`, benchmark, or task
-server process remains.
-
-Repeated `stop_process` calls now report `Already stopped ... launch a fresh
-process before probing` instead of pretending cleanup made new progress. This
-gives the actor truthful stale-handle evidence and prevents a cleanup loop from
-being mistaken for successful lifecycle validation.
-
-## Important files
-
-## Mandatory continuation protocol
-
-This work is an active test-fix cycle. After every implementation change, the
-next agent must run the relevant deterministic checks and then a real-model
-evaluation when the change affects the agent loop, context, tools, transport,
-or lifecycle. Do not stop after explaining a result or applying an isolated
-patch. Monitor active runs, inspect the independent grader, fix the next
-generic failure, and continue until the test completes or a real external
-blocker requires user direction.
-
-- `agent.py`: actor loop and validation/repair state machine.
-- `validation_contract.py`: task-derived acceptance and repair packets.
-- `action_governor.py`: capability classification and evidence bookkeeping.
-- `novelty_context.py`: asynchronous 4B context worker.
-- `agentic_benchmark.py`: independent agentic graders.
-- `state/benchmark/agentic/results.jsonl`: benchmark history.
-
-## Actionable test failure evidence
-
-The real bug-repair cycle exposed a generic weakness in the shell/tool
-contract: `workspace/run_tests_tool.py` previously returned only aggregate
-counts. A small model then knew that validation failed but not why, so it
-could reread the same implementation or rewrite its test. The runner now
-keeps the count headline and appends bounded failure/error case names plus
-the final traceback lines (up to 1,800 characters). This gives the next turn
-actionable evidence without allowing a large traceback to consume context.
-
-After changing this tool, run its self-test and the full deterministic suite,
-then repeat a real llama.cpp bug-repair benchmark. Judge the result by the
-independent grader and by whether a failed validation is followed by a
-targeted implementation mutation and a passing revalidation.
-
-The same cycle also found that agents commonly pass a focused test filename
-to `run_tests`. The runner now accepts both directory and file targets; a
-file is converted into parent-directory discovery with an exact filename
-pattern. Its self-test covers both forms.
-
-The next live run exposed a separate gate issue: after an execution/setup
-failure such as a missing interpreter, repair mode had removed `run_command`
-and `run_tests` from the available tools. `agent.py` now detects bounded setup
-failure markers and temporarily permits those tools so the actor can recover
-the execution path (for example by selecting an available interpreter). A
-normal assertion failure remains mutation-first and cannot be papered over by
-repeated probes.
-
-The branch-local registry manifest was also still pointing at the original
-`evolutionEngine` checkout. That meant live benchmarks could silently load
-old graduated tools even when this branch's source and unit tests were green.
-All manifest module paths now point at this checkout; verify this whenever a
-new copy is created, before trusting a live result.
-
-The live Todo run then exposed a validation false negative: a shell script can
-prove a JSON object/list by printing the response and a successful field
-assertion without using the literal words `object` or `list` in its command.
-The contract now accepts concrete JSON delimiters (`{...}`/`[...]`) together
-with bounded success-language evidence such as “returns task with id and
-title”. A regression case covers this script-style evidence; it does not
-accept a bare successful command or an unasserted payload.
-
-A second live script format printed endpoint labels directly, for example
-`POST /api/tasks: {"id": ...}`. The contract now recognizes endpoint-labeled
-JSON output and JSON-key evidence as well. This remains bounded to required
-fields and required interfaces, so it is not a generic “Exit code 0 means
-success” bypass.
-
-The final validator edge is raw JSON output from a focused request, such as
-`curl /api/tasks` followed by `[ {"id": ...} ]` with no label. This is accepted
-only when the command contains the required interface and the response has
-the required shape/fields. A regression test covers the raw collection form.
-
-The latest live Todo grader exposed the deeper contract bug: POST and GET
-shared `/api/tasks`, so POST evidence incorrectly counted as GET evidence.
-Validation contracts now retain required method/path operations and coverage
-is method-aware. A passing `POST /api/tasks` probe can no longer satisfy a
-required `GET /api/tasks` collection check.
-
-The follow-up live run passed both operations and the independent grader but
-still looped after `finish_task`. Completion verification was re-assessing
-tool output with empty arguments, which discarded the original command's
-endpoint/method. `_completion_ready` now uses the dispatch-time accepted
-evidence ledger and method-aware coverage instead of re-parsing tool output
-without its arguments. This lets a validated agent stop even when an
-unrelated optional probe (such as an unavailable pytest command) fails.
-
-The next live cycle exposed stale-service validation: after editing
-`server.py`, the actor continued probing the already-running old process.
-`kernel.exec_tools.active_background_handles()` and the actor loop now emit a
-restart directive whenever a live managed process exists after mutation. The
-actor must stop that handle, launch the updated service, and then validate;
-this applies to any mutable long-running service, not just Todo apps.
-
-The first guard implementation left that directive in permanent history and
-caused repeated stop/start cycles. It is now a one-turn pending instruction:
-the next actor turn performs one restart, after which normal validation
-instructions resume.
-
-The live evidence showed the 35B could still spend several turns deciding to
-stop the stale process. The engine now automatically stops every live managed
-background handle immediately after a workspace mutation, then gives the
-actor one transient instruction to launch a fresh process. This makes service
-freshness deterministic instead of depending on the actor to notice it.
-
-The next live cycle showed combined API scripts need method-specific shape
-checks too: a script containing POST and GET was treated as a write probe, so
-the GET collection could incorrectly return a wrapper object. Shape assessment
-now checks creation-object and collection-list requirements independently;
-the validator regression suite includes a wrapped-collection failure case.
-
-The frozen cascading multi-file repair cycle was then run against the real
-Devstral/Mistral model through llama.cpp. The unchanged fixture progressed
-through syntax repair, a runtime type repair, case-insensitive label ordering,
-and validation-driven context compaction. The 4B worker produced asynchronous
-judgments; stale judgments were explicitly ignored in favor of deterministic
-local state. The context stayed within the 8,192-token provider window and
-automatically pruned old tool output.
-
-That run exposed a model-level semantic failure: after seeing actual `3.0`
-versus expected `33.0`, the 35B repeatedly added float conversions instead of
-changing the calculation's meaning. The engine now adds generic repair guidance
-for assertion mismatches: compare actual and expected values semantically and
-repair computation, shape, ordering, or meaning—not only types or formatting.
-The validation repair packet carries the same model-agnostic contract reminder,
-with a regression test. This is guidance infrastructure, not a fixture-specific
-tax rule. The live attempt was stopped after the repeated semantic stall; the
-fixture remains partially repaired and the test file remains unchanged.
-
-The clean rerun confirmed the semantic guidance improved diagnosis: the model
-removed the extra return wrapper and recognized that tax and ordering remained
-wrong. It then made repeated syntactically invalid generator-expression patches;
-the tool rejected them without writing. The engine now records a rejected
-mutation and tells the next repair turn not to repeat the same edit, to use a
-different valid mutation representation, and to account for the rejection
-message. This is a generic tool-feedback recovery rule. The rerun is paused at
-that repair point for the next validation cycle; the frozen test remains
-unchanged.
-
-The next live attempt correctly repaired the tax semantics (`30 * 1.10 =
-33.0`) and reduced the remaining failure to output shape plus label ordering.
-It then misread `['Beta', 'alpha']` versus `['alpha', 'Beta']` as descending
-order. The failure diagnostic now states the unittest convention explicitly:
-`-` is actual and `+` is expected, and case, nesting, and ordering are
-meaningful. This remains generic assertion-diff guidance. Deterministic tests
-remain green; the real-model run is ready to restart from the frozen fixture.
-
-The faster Ollama run exposed a separate validator correctness bug. The
-graduated `run_tests` tool runs inside the long-lived agent process, and
-unittest reused an implementation module from `sys.modules` after the agent
-patched it. The validator therefore reported an obsolete TypeError even though
-the current file was correct. `workspace/run_tests_tool.py` now invalidates
-caches and removes modules belonging to the target project before each
-discovery. A regression test edits a module between two passing validations;
-the suite is now 24/24, and the tool self-test passes.
-
-The subsequent live run confirmed the cache fix but exposed evidence loss in
-the same validator: its failure summary kept only the final three traceback
-lines, often dropping the actual/expected assertion values. The test runner
-now preserves bounded `AssertionError` and `+`/`-` diff lines alongside the
-traceback tail. A regression test verifies that assertion operands survive in
-the returned summary. The deterministic suite is now 25/25 and the runner
-self-test still passes.
-
-The next Ollama cycle showed the model could use the preserved diff: it
-identified case-insensitive ordering and the total-plus-tax meaning. Its first
-ordering patch used invalid Python generator syntax, and repeated retries hit
-the same parser rejection. `kernel.io_tools.validate_python_syntax` now adds a
-generic corrective hint when Python reports that a generator expression must
-be parenthesized. This is language/tool feedback, not a fixture-specific
-patch. The deterministic suite is now 26/26.
-
-The clean rerun then exposed a small-model editing problem: the actor had the
-correct repair text but omitted the common four-space Python block indentation,
-so exact patch matching rejected it repeatedly. `patch_file` now has a narrow,
-unambiguous fallback for a uniformly omitted outer indentation level; internal
-indentation and content must still match, and the replacement receives the
-original block indent. A regression test covers this behavior. The deterministic
-suite is now 27/27.
-
-The completion-only verification pass exposed one final generic lifecycle bug:
-`_completion_ready` required a file mutation for every `code_change` task,
-including tasks that explicitly only asked to run and verify an existing
-implementation. The gate now permits mutation-free completion only when the
-task text contains no build/change/repair verbs and accepted validation
-evidence exists; repair/build tasks still require a mutation. A regression test
-covers this distinction. The deterministic suite is now 28/28.
-
-Using Ollama's faster local actor (`qwen3.5:9b`) with the asynchronous 4B
-worker, a clean frozen-fixture run repaired the syntax/type defects, tax
-semantics, case-insensitive ordering, and response shape. The validation
-returned `Ran 1 tests: 1 passed, 0 failed, 0 errors`; an independent direct
-`python3 test_pipeline.py` also passed. The frozen test file was not modified
-and its current git-object hash is `270b1c949d28d4cf6f182a058127762d253f37ad`.
-The first completion attempt hit the iteration budget while verifying
-`finish_task`, so lifecycle completion still needs a larger-budget pass.
-
-The harder frozen multi-file task then passed end-to-end with the real Ollama
-actor and 4B worker. It required edits in `service.py`, recovered from a bad
-first patch that removed the local `record` definition, fixed stable `rec-N`
-IDs, removed an incorrect collection wrapper, revalidated, and emitted `DONE`.
-The independent `python3 -m unittest test_service -v` check passed. Metrics were
-16 iterations, 4 validation failures, 2 successful mutations, 6 validations,
-and 4 worker calls; stale worker judgments were ignored by deterministic state.
-
-The next stateful catalog task exposed a registry boundary bug. When the model
-called the graduated `run_tests()` tool without its optional path argument,
-the function defaulted to the agent process cwd and ran unrelated checks. The
-registry now fills omitted path parameters with `.` before confinement, so they
-resolve to the active project root. A regression test covers the default-path
-behavior. The deterministic suite is now 29/29.
-
-The resumed catalog run exposed a false-positive validation path: a command
-like `python -m unittest.main` can exit 0 while discovering no tests. The
-contract now rejects runner commands that report zero tests, even with exit 0,
-and gives a focused-test next action. A regression test covers the warning-only
-case. The deterministic suite is now 30/30.
-
-The third stateful catalog task then completed with a clean bounded verification
-pass and `DONE`. It exercised persistent add/update/filter behavior after the
-actor repaired one ID defect and one response-shape defect. The run confirmed
-the registry path fix in practice: an omitted path resolved to the active
-project, and the focused test ran once with `1/1` passing.
-
-The fourth, more stateful configuration task also completed with `DONE`. It
-tested missing-file defaults, overrides, disabled jobs, persistence, and
-malformed JSON recovery. The actor made one generic implementation mutation in
-`config_store.py`; the focused test passed with `1/1`, and an independent
-`python3 -m unittest test_runner -v` check passed. The run used the 9B actor and
-4B worker, with two worker judgments and no stale-state interference.
-
-The next real-model cycle exposed repeated command-schema drift from the small
-actor: JSON-encoded command strings, `argv` instead of `command`, and
-millisecond timeout fields. Dispatch now normalizes only these unambiguous
-aliases before invoking trusted execution tools. A regression test covers all
-three forms. The deterministic suite is now 31/31.
-
-The live verification of that normalization found one adjacent schema artifact:
-the actor supplied `cwd` wrapped in literal quote characters, including
-`"."` and `""`. Dispatch now strips only matching outer quotes and removes
-empty/default cwd values so the trusted tool uses the active sandbox root. A
-regression assertion covers the normalization; all deterministic tests remain
-green.
-
-Live telemetry showed the `--action-first` contract was blocking the actor's
-usual first `list_workspace` call, wasting a turn before the same bounded
-inspection succeeded. The initial contract now includes `list_workspace`,
-`find_files`, and `run_tests` alongside read/mutate/execute/finish tools. This
-keeps broad network or shell exploration unavailable while removing an
-avoidable routing failure. Deterministic tests remain 31/31.
-
-The live check confirmed the improvement: the first action contract offered
-`run_tests`, the actor validated `test_runner.py` in one call, and the agent
-emitted `DONE` in two iterations with no blocked discovery call.
-
-The follow-up real-model verification succeeded: the actor emitted a quoted
-default cwd (`./`), dispatch normalized it, the test runner executed the
-project's one test, and the agent emitted `DONE`. This confirms the command
-normalization path works in the live loop, not only in unit tests.
-
-The next harder ingestion task initially exposed a fixture setup omission:
-`report.py` had not been created even though it was part of the declared
-isolated task. It was restored without changing the frozen test. The untouched
-baseline then failed on the intended malformed CSV row. With the 9B Ollama
-actor and 4B worker, the agent repaired `parser.py` to skip missing/non-numeric
-amounts, then repaired `report.py` to sort names case-insensitively. It passed
-the frozen test in iteration 12 and emitted `DONE` in iteration 13. An outside
-`python3 test_report.py` run also passed; the frozen test hash was
-`bd01d713a877e3e6234d3b5d25a49fbcf9ccda1e0e4e61d1df31b235f71d5ce5`.
-Metrics were 15 events, 2 mutations, 5 validations, 3 validation failures,
-and 2 worker calls. The worker identified stale/repeated activity, while the
-deterministic event state kept the actor on the concrete repair path. The
-repository deterministic suite remains 31/31, and no generic engine change
-was justified by this run.
-
-The following event-log cycle exposed a generic argument-boundary issue rather
-than a task-specific repair issue. The actor repeated a malformed scalar
-timeout value (`"30,\\nbackground=False]"`) while trying to run the test. Dispatch
-now salvages a numeric prefix for string timeout values, while leaving command
-content and other arguments untouched. A regression assertion covers this
-case; the deterministic suite remains 31/31. The event-log implementation was
-then repaired by the actor to treat a missing log as an empty log. Both frozen
-tests passed, including duplicate-event suppression and delete replay, and an
-outside `python3 test_state_store.py` run passed. The live run used the 9B actor
-and 4B worker, with one implementation mutation, six validations, five worker
-calls, and no test-file edits.
-
-The next transactional-batch task was intentionally harder: duplicate IDs,
-blank customers, malformed amounts, negative amounts, aggregation, and stable
-ordering. The untouched baseline failed as expected. The real actor did not
-finish within 24 iterations. It repeatedly reread the same frozen test,
-misread the actual/expected arithmetic (`2 + -1` versus expected `2`), made
-several malformed or incomplete rewrites, and ended without calling
-`finish_task`. This is a genuine agent failure; the fixture and test were not
-changed. The run had 25 events, 6 validations, 5 validation failures, 7
-mutations, and 8 worker calls, with 29 stale judgments. The failure was not a
-provider/context overflow: it was semantic analysis paralysis after a repeated
-assertion mismatch.
-
-To address that generic failure mode, repeated semantic validation failures now
-add an explicit recovery instruction: trace the reported actual value back to
-each contributing input or state transition, compare that trace with expected,
-then make one mutation; do not speculate or reread unchanged files repeatedly.
-The deterministic suite remains 31/31. This change must be re-tested against
-the same frozen batch task and then against a different semantic task before it
-is considered effective.
-
-The repeated-failure recovery was then tested against the same frozen batch
-task from a clean implementation baseline. This time the actor reached the
-semantic trace: it identified that `2 + (-1)` produced the observed `1.0`,
-while the contract required negative records to be ignored. It also repaired
-blank-customer filtering, malformed amounts, first-seen ID deduplication, and
-case-insensitive ordering. The focused test passed in iteration 17 and the
-agent emitted `DONE` in iteration 18. An independent `python3 test_batch.py`
-run passed; the frozen test hash is
-`ad06e7088b5546853ed74e128745d8a5dea598b7c09de074833ba7732483af79`.
-Metrics were 18 events, 4 validation failures, 4 repair-mode entries, 6
-mutations, 6 validations, and 2 worker calls. The first run had failed at 24
-iterations; the rerun demonstrates that the generic trace instruction changed
-the outcome rather than the benchmark being edited.
-
-The dependency-graph benchmark was the next harder cycle. Its frozen contract
-requires stable topological ordering, skipping a task whose dependency is
-missing, and raising on a real cycle. The actor repeatedly confused an
-unresolved external dependency with a cycle, then produced increasingly broad
-rewrites, incomplete functions, and finally a non-terminating planner. The
-real run was stopped at its controlled 24-event budget; it did not reach
-`finish_task`, and the frozen test was never changed. This is a substantive
-agent failure, not a passing benchmark artifact.
-
-The failure exposed two generic protections. Mutation errors reported as
-`ERROR:` are now treated like `REJECTED:` mutations, so the next repair turn
-removes `write_file` and prefers a narrow `patch_file` recovery. Also,
-`workspace.run_tests` now has a 30-second execution bound and reports a stuck
-implementation as ordinary failure evidence instead of hanging the parent
-agent. A deterministic regression uses a shortened timeout and passes. The
-repository suite is now 32/32. These changes still need a fresh real-model
-graph run and an independent outside verification before they are considered
-effective.
-
-The clean graph rerun after those protections still failed. Starting from the
-original planner, the actor added cycle detection, then repeatedly damaged the
-implementation while trying to reconcile the frozen contract's two distinct
-cases: an external missing dependency should be omitted, while an all-internal
-cycle must raise. It lost initialization variables, produced incomplete
-functions, and never reached a passing validation. The run was stopped during
-a later provider call after 19 events because it was repeating the same repair
-pattern; the frozen test remained unchanged (hash
-`ab6475c5caca076d9fdc0bd71301da848082b429a6b071b6b3812a3ba9b90c57`). This
-confirms the graph task is currently beyond the actor's reliable semantic
-repair ability, even though the engine's deterministic suite is 32/32 and the
-new test timeout prevents implementation hangs from trapping the parent.
-
-Because both graph runs showed valid-but-destructive whole-file rewrites after
-repeated assertion failures, the repair gate now removes `write_file` after two
-behavioral validation failures (while retaining it for initial work and setup
-failures). The actor must preserve the current artifact and use `patch_file`
-for subsequent localized repairs. The deterministic suite remains 32/32.
-
-The graph was rerun from a clean baseline after that escalation rule. The
-actor still failed to solve the two-case contract: it repeatedly generated
-incomplete cycle-detection implementations and whole-file rewrites, despite
-the later patch-only restriction. The run reached 18 events with two
-validation failures before the actor entered another malformed-response loop;
-the frozen test was unchanged. This task is currently a reliable stress case
-for small-model semantic drift, but its missing-dependency wording is more
-ambiguous than the earlier cascading fixtures.
-
-The same run exposed a provider-loop issue: Ollama returned repeated XML tool
-call parse errors while retrying the same turn. Agent retries now stop after
-two repeated XML syntax failures instead of consuming the full 20-attempt
-backoff. The deterministic suite remains 32/32. The graph fixture is left
-untouched for future regression work; do not treat its corrupted implementation
-as an engine artifact.
-
-The clearer TTL/LRU cache task was then run with the real 9B actor and 4B
-worker. The baseline failed on recency eviction. The actor entered another
-analysis loop, made an invalid broad rewrite, and ended at its 16-iteration
-budget without passing validation. The frozen test was unchanged. This run
-exposed a lifecycle classification bug: a rejected mutation could still be
-classified as successful by the action governor, reopening the repair cycle.
-Mutation results beginning with `ERROR:` or `REJECTED:` now force
-`success=False`, preserving the repair lock. The deterministic suite remains
-32/32. The cache task remains an unsolved real-model benchmark for the next
-cycle.
-
-The cache task was rerun from its untouched baseline after the mutation
-classification fix. The actor correctly reached the first expiry/eviction
-failure, but misread the test sequence, changed the expiry comparison instead
-of implementing access-order LRU, then entered repeated broad reasoning and
-provider latency. After two validation failures, the patch-only repair gate
-was active and prevented further broad edits; the run was stopped while the
-actor produced no actionable repair. The frozen test was unchanged. This
-confirms the gate behavior, but the cache task still does not pass with the
-current small actor.
-
-The larger locally installed `qwen3.6:35b-mlx` actor was then tested against
-the untouched cache fixture with the 4B worker. It never reached iteration 1:
-the MLX runner failed with a Metal command-queue/GPU timeout. A subsequent 9B
-health check also failed because the Ollama service was no longer listening on
-port 11435. No real-model result is claimed after that point; deterministic
-engine work continued independently.
-
-Recent cache and graph runs showed the actor narrating hypotheses without
-tracing stateful operations in test order. The validation-repair prompt now
-explicitly requires exact operation-order tracing for stateful behavior and
-one concrete mutation before further explanation. The deterministic suite
-remains 32/32. Real-model revalidation is pending Ollama recovery.
-
-## 2026-08-14: activate the existing risk checkpoints
-
-Inspection found that `risk_layer.py` already took in-memory snapshots before
-mutations, but no runtime path used them. A generic safety gate now uses those
-snapshots during repair turns: if `write_file` on an existing file removes
-more than 65% of its non-blank lines and leaves a much smaller artifact, the
-engine restores the exact pre-edit content and returns a rejected mutation
-requiring `patch_file`. Initial file creation, normal non-repair rewrites,
-and surgical patches remain allowed. This is based on edit shape, not on a
-model, provider, task, or filename.
-
-Added regression coverage for rollback and for allowed surgical edits. The
-deterministic suite is now 34/34, plus `risk_layer.py`'s standalone self-test
-passes. The next live cycle should rerun the frozen cache or dependency-graph
-task from an untouched fixture and inspect whether destructive rewrites are
-rolled back without preventing legitimate cascading fixes.
-
-The first restored Mistral/llama.cpp cascading run used the correct Devstral
-Q4 GGUF actor and Qwen3.5 4B worker, but the actor was placed on CPU with a
-16,384-token context and did not produce its first tool call within the
-60-second chat timeout. The frozen fixture and grader were unchanged; this is
-recorded as a serving/timeout result, not an agent capability result. The next
-run should keep the same models and task while increasing only the actor chat
-timeout to accommodate the measured CPU load time.
-
-The longer run exposed a more important integrity failure: after the syntax
-repair, Mistral attempted to patch the supplied `test_metrics.py` rather than
-repairing `target_code.py`. The risk layer now snapshots novelty-mode runs as
-well as the older summary modes, marks test files that existed at run start
-as protected evidence, and automatically restores/rejects mutations to those
-files during repair turns. Newly created test files remain allowed for tasks
-that explicitly add coverage. Added deterministic coverage for both cases;
-the suite is now 35/35. The frozen cascading fixture was not changed by the
-engine; its failed run remains a recorded capability result.
-
-The protected-test rerun confirmed the safeguard in a real run. Mistral first
-fixed `target_code.py`, then tried to append a direct call to the supplied
-`test_metrics.py`; the risk layer restored the original test and returned a
-clear rejection. The actor subsequently repaired the second implementation
-bug, and the independent grader confirmed the final artifact passed. The run
-still failed the workflow scorecard because CPU inference consumed the
-600-second watchdog before the final validation and `finish_task` turn. This
-is evidence that the integrity gate works, while actor serving latency and
-completion latency remain separate issues.
-
-The next reusable correction classifies the validator's “test module produced
-no test evidence” result as setup/runner failure. The repair turn therefore
-keeps `run_command`, `run_tests`, and `run_shell` available so the actor can
-select a real runner or explicitly call the supplied test function; it does
-not need to edit the protected test. This classification is provider-,
-model-, and task-independent. Added regression coverage; the deterministic
-suite is now 36/36.
-
-The follow-up live run showed the actor repeating the same protected-test
-patch after the first rejection, consuming another long CPU inference turn.
-Dispatch now maintains a path-level block after a protected-test rejection:
-the same path cannot be mutated again during that run, while implementation
-patches and validation commands remain available. Added a dispatch regression;
-the deterministic suite is now 37/37.
-
-The latest cascade reached both implementation repairs and an exit-0
-validation, but the actor was still spending another long turn trying to
-request `finish_task`. The orchestrator now treats complete independent
-validation as authoritative and marks the run done immediately, with a
-machine-generated summary. This saves a model turn and prevents a correct
-artifact from timing out behind a slow actor; it does not weaken validation or
-allow completion without a mutation and accepted behavioral evidence. The
-deterministic suite remains 37/37. The next live rerun should verify that the
-same frozen cascade now emits `DONE` immediately after its passing check.
-
-The next cascade attempt showed the model still proposing protected-test
-edits before running a fresh check. Repair handling now enters a temporary
-validation-only phase after the first protected-test rejection: `run_tests`,
-`run_command`, and `run_shell` remain available, while mutation tools are
-removed until a fresh executable result arrives. The stale run was stopped so
-it could not mix code versions; the new code passes the full 37/37 deterministic
-suite. Rerun the frozen cascade from a clean fixture before judging this
-change, then run the supplied WebSocket task as the next harder workflow.
-
-The supplied broken WebSocket chat is now registered as a separate frozen
-`websocket_chat` benchmark. Its grader checks the frontend protocol contract,
-safe DOM insertion, the declared `ws` dependency, a real two-client local
-exchange, ping/pong, and a send after one peer closes. It does not rewrite the
-fixture or accept static pattern matching as success. The project/model
-services were stopped before this test; restart only the required Mistral
-llama.cpp actor and Qwen worker, run the deterministic suite first, then run
-this benchmark from a clean workspace.
-
-The first WebSocket live run found a generic validation weakness: the actor
-started only the dependency install, then used curl against a WebSocket URL;
-curl exited 0 but returned `Upgrade Required`. The orchestrator incorrectly
-accepted that as behavioral evidence and stopped while `index.html` was still
-unchanged. Validation now requires actual interaction/assertion output for
-web tasks that do not expose ordinary HTTP endpoints, with regression tests
-for rejecting protocol-error-only output and accepting a reported client
-exchange. The independent grader remains the final authority; rerun the
-WebSocket task after the deterministic suite.
-
-The first regression was intentionally strict enough to expose an overly
-narrow evidence classifier: a legitimate client probe reported “received
-pong and message” but the older generic keyword gate did not recognize it.
-The classifier now recognizes observed exchange terms such as received,
-connected, response, message, pong, WebSocket, and passed, while the separate
-web-task rule still rejects an empty or protocol-error-only result.
-
-The follow-up unit test found one representation edge case in the tool
-adapter: compact command results without explicit `STDOUT:` labels were being
-treated as empty output. The validator now treats the unlabeled result body
-as output, preserving the same evidence rule across providers and command
-wrappers.
-
-The second live attempt reached the repaired files but the grader collided
-with the llama.cpp actor because both used port 8080. This was a benchmark
-isolation defect, not evidence about the app. The frozen WebSocket grader now
-launches the app with an isolated `PORT=18767`, and the task explicitly
-requires `process.env.PORT || 8080`; the actor/frontend behavior remains
-unchanged. Rerun the task after this harness-only correction.
-
-The third run showed the actor still hardcoded port 8080. More importantly,
-the engine treated `process_status: EXITED code=1` as observation rather than
-failed validation, allowing repeated dead-service checks without a repair
-transition. The orchestrator now includes process-status results in the
-validation phase and failure packet path; a failed service must be repaired or
-restarted before the actor can proceed. Added a regression for nonzero service
-status. Rerun the WebSocket task after the deterministic suite.
-
-The fourth run found that `npm init` output contained the generic word
-`test`, which was mistaken for behavioral evidence. The web-specific evidence
-vocabulary now requires concrete interaction terms such as received,
-connected, response, message, pong, handshake, round-trip, or an explicit
-assertion/pass result. Dependency setup and package metadata no longer count.
-Added a regression for npm setup output.
-
-The fifth live run confirmed the stricter setup handling and exercised the new
-process-status failure path: package installation was rejected, the server
-was repaired once, the frontend validation attempted to start the app, and
-`EXITED code=1` correctly triggered repair. Mistral then spent the remaining
-900-second budget revisiting the port conflict and did not finish the frontend
-repair or pass the independent grader. The final WebSocket result is a real
-failure, not a coerced pass. Deterministic coverage is 41/41. All model and
-test background services have now been stopped; the next continuation should
-inspect the preserved fifth workspace and improve repair convergence before
-rerunning the live task.
-
-The next architecture change is a bounded repair-turn controller. After three
-repair turns without a mutation, the engine enters recovery mode, compacts the
-repair context to the task foundation plus recent evidence, and exposes only
-mutation/review tools. It does not use `pkill -f node`, a fixed three-second
-timeout, or premature completion. Process handles remain scoped, validation
-remains mandatory, and the recovery state is tracked in repair metrics. Added
-a deterministic checkpoint-bounding regression; run the full suite before the
-next real-model WebSocket attempt.
-
-The latest run found a contract-parser false positive: the second slash in
-`http://localhost:8080` was extracted as an application endpoint. That made
-the validator skip the no-HTTP-endpoint WebSocket evidence rule and accept
-dependency setup as validation. `_PATH_RE` now excludes URL host slashes,
-with a regression test. The artifact still had a correct server repair but an
-unchanged frontend; rerun the benchmark after the deterministic suite.
-
-The subsequent clean run made four inspection calls before any validation or
-mutation, so the repair budget could not help: there was no failure yet. A
-separate orientation budget is now added. After three no-mutation turns, the
-next actor call is restricted to mutation, validation, recall, or finish, and
-receives an explicit progress checkpoint. This is independent of task type,
-model, and provider; it prevents analysis paralysis without removing the
-initial opportunity to inspect an unfamiliar workspace.
-
-The first orientation-budget run showed that allowing `run_command` and
-`run_tests` in orientation recovery still let the actor reread files through
-shell commands. Orientation recovery is now a true mutation gate: only
-`patch_file`, `write_file`, `recall`, and `finish_task` remain available. A
-successful mutation immediately returns the normal validation tools. This
-keeps the policy engine-level and prevents shell-tool substitution.
-
-## TODO: speculative context compression with the 4B worker
-
-Do not forget this next architecture feature. The current Qwen3.5 4B worker
-is an asynchronous event critic; it is not yet a semantic context compressor.
-Implement compression as a bounded, speculative sidecar that never blocks the
-35B actor and never declares task success.
-
-Trigger it only on measurable stalls: repeated action fingerprints, two or
-more failed validations, a no-progress repair turn, or exhaustion of the
-three-turn repair budget. Send the worker a compact packet rather than the
-entire transcript: recent tool events, latest failure packet, files/symbols
- touched, last mutation, validation status, and repeated-action counts.
-
-Have the worker return strict bounded JSON with: `diagnosis`, `facts`,
-`affected_files`, `last_mutation`, `validation_state`, `repeated_actions`,
-`next_action`, `target`, and `confidence`. Validate and truncate every field;
-unknown facts must not become durable state. Use a deterministic local
-fallback when the worker is stale, unavailable, malformed, or over its time
-budget.
-
-Inject the result as an explicit engine-generated `Repair checkpoint`, clearly
-marked as advisory rather than ground truth. On recovery, give the actor the
-checkpoint plus the exact failure evidence and restrict tools to the smallest
-valid action set. Keep raw history recallable but out of the active prompt.
-
-Add deterministic tests for bounded output, stale-worker fallback, malformed
-JSON, trigger conditions, and no-context-growth. Then measure whether it
-reduces time-to-next-mutation, repeated-action rate, repair turns per fix,
-false completion, and prompt tokens on the frozen cascading and WebSocket
-benchmarks. Compare worker-on versus worker-off with the same actor and
-fixtures; do not tune it to one model, task, or endpoint.
-
-The first frozen cascade run with the orientation and repair budgets forced
-real progress. Mistral initially inspected three turns, then the mutation
-gate caused an implementation write. After a no-test validation and a blocked
-protected-test edit, repair recovery forced a patch to `target_code.py`; the
-independent grader confirmed the artifact passed. The run still hit the
-720-second watchdog before its final validation/completion turn, so this is
-partial workflow success, not a passing scorecard. The next check should keep
-the same fixture and code while allowing enough time to measure the new
-completion shortcut separately from CPU inference latency.
-
-The three-layer refactor has begun. Layer 1 now has an assertion-driven tool
-contract that separates execution success, setup-only state, failure, and
-behavioral evidence before task-specific criteria run. Layer 2 now exposes a
-bounded synthesized failure packet with diagnosis and one next repair focus
-instead of replaying an unbounded raw log. Existing risk checkpoints,
-stale-process cleanup, validation locks, and independent completion checks are
-the initial Layer 3 proactive hooks. Add further owned-port and post-mutation
-hooks only with deterministic transition tests.
-### 2026-08-14 — zero-test runner feedback tightened
-
-The frozen cascade exposed a generic convergence gap after the artifact was
-repaired: the actor selected `python -m unittest test_metrics`, but the
-supplied module contained a plain test function and unittest discovered zero
-tests. The validation layer already rejected that as non-evidence; the repair
-packet now explicitly says that no assertions ran and directs the actor to
-inspect the supplied test and either invoke its function directly or select
-the correct installed runner. This is model- and benchmark-independent and is
-covered by `test_failure_feedback_replaces_zero_test_runner_with_explicit_assertion`.
-### 2026-08-14 — explicit lifecycle FSM
-
-Layer 3 now has an explicit `lifecycle_fsm.py` state machine. It governs the
-high-level lifecycle only: `ORIENT`, `ACT`, `VALIDATE`, `REPAIR`, `RECOVER`,
-`COMPLETE`, and `FAILED`. Mutation, validation failure, validation success,
-and repair-budget exhaustion are named events with strict transition rules.
-Invalid transitions raise `InvalidTransition`, making lifecycle drift visible
-in deterministic tests instead of silently falling through scattered runtime
-conditionals. Tool parsing, risk checks, and task-specific validation remain
-separate policies; the FSM is not coupled to a model or benchmark. The suite
-now passes 48 tests, including a complete repair/recovery path and an invalid
-transition assertion.
-### 2026-08-14 — setup failures no longer trigger destructive recovery
-
-The FSM test exposed an important Layer 3 boundary. A missing test runner,
-missing dependency, or zero-test discovery result is a validation/setup
-failure, not evidence that the implementation should be rewritten. Previously
-the repair-recovery hook could still force a mutation after three such turns;
-the actor then replaced a correct cascade repair with a placeholder. The
-`_force_repair_recovery` guard now permits forced implementation mutation only
-for a genuine product/behavior failure. Setup failures retain bounded command
-and runner recovery. This is covered by a deterministic regression test; the
-suite passes 49 tests.
-### 2026-08-14 — recovery guard initialization fix
-
-The first post-FSM rerun caught an orchestration wiring error before the model
-could act: `setup_failure` was initialized only inside the validation branch,
-while the recovery transition is evaluated on every turn. It is now
-initialized at the start of each loop iteration, and a regression test covers
-the pre-validation path. This reinforces the rule that lifecycle guards must
-be total over all states, not only the states where they usually fire.
-### 2026-08-14 — preserve failure cause through repair turns
-
-The next live cascade showed that a read-only repair turn could clear the
-previous validation packet. That made a missing-runner/no-test-evidence
-problem look like a product defect when the recovery budget fired. The loop
-now retains the last nonempty failure packet and derives setup-vs-behavior
-classification from both the packet and its compact summary. This prevents
-the FSM from taking a destructive product-repair transition after the reason
-for the failure has been compacted away. The deterministic suite passes 51
-tests. The interrupted live comparison had an independently passing artifact
-before it was stopped, but did not satisfy the completion scorecard.
-### 2026-08-15 — structured 4B repair checkpoints
-
-The 4B worker is no longer limited to a generic inspect/repair signal. On a
-validation failure, NoveltyEngine now sends one bounded checkpoint containing
-the lifecycle state, legal actions, protected paths, and compact failure
-packet. The worker returns structured `diagnosis`, `failure_class`,
-`next_action`, and `preserve_files` fields. A deterministic local classifier
-is installed immediately, so the actor gets a safe setup-vs-behavior
-recommendation even while the asynchronous 4B call is running or stale.
-Setup failures recommend validation/runner recovery and preserve the
-implementation; behavior failures recommend a targeted patch. The 4B still
-does not execute tools—the FSM and orchestrator retain authority. Added
-worker parsing, fallback, and rendering tests; the suite passes 53 tests.
-### 2026-08-15 — recovery completion transition
-
-The first live run with structured checkpoints reached the correct direct
-assertion and returned exit code 0, but the new FSM crashed because it only
-allowed `VALIDATE -> COMPLETE`; setup recovery was still in `RECOVER`. The
-transition table now explicitly permits `RECOVER -> COMPLETE`, with a
-regression test. This preserves the FSM invariant that every accepted
-validation result, including one after setup recovery, can terminate cleanly.
-The deterministic suite passes 54 tests. The live artifact itself passed, but
-the run is recorded as failed because the missing transition prevented clean
-completion.
-### 2026-08-15 — synchronous 4B triage gate milestone
-
-The 4B worker now has a bounded synchronous gate at validation-failure
-boundaries, while routine event observation remains asynchronous. The gate
-receives FSM state, legal actions, protected paths, and the compact failure
-packet; it returns a structured failure classification and can only remove
-tools for the next actor turn. Setup triage removes `write_file` and
-`patch_file`, preserving the implementation while runner recovery occurs.
-Behavior triage removes `finish_task` until repair/validation proceeds.
-Malformed, stale, low-confidence, or busy-worker results fall back to the
-deterministic policy. Structured checkpoint diagnoses are preserved when newer
-ordinary events arrive. The deterministic suite passes 56 tests.
-
-The latest real cascade reached independent validation success and clean
-orchestrator completion through `RECOVER -> COMPLETE`; its benchmark scorecard
-still reports false only because the actor needed 10 iterations rather than
-the benchmark's under-3 target. This is progress in correctness and lifecycle
-safety, but convergence speed remains an open optimization target.
-### 2026-08-15 — deterministic precedence over 4B triage
-
-The first real synchronous-gate run proved the gate could remove mutation
-tools for a setup failure, but it also exposed a trust boundary: the 4B
-hallucinated that a pytest decorator was required and reclassified a missing
-runner as a progress problem. The gate now gives deterministic setup evidence
-precedence. The 4B may refine the command or target, but it cannot convert a
-known setup/runner mismatch into a product defect. Added a regression test with
-a deliberately hallucinating worker; the suite passes 57 tests.
-
-### 2026-08-15 — dependency setup is not product evidence
-
-The WebSocket benchmark exposed another generic validation-plane error. A
-successful `npm install` produced no behavioral assertion, but the repair
-packet was classified as a product behavior failure because the fallback did
-not recognize package-manager setup output. The deterministic checkpoint now
-classifies common dependency-install commands and success summaries (`npm
-install`, `npm ci`, `pip install`, `added ...`, `audited ...`, and equivalent
-setup-only markers) as setup. The 4B cannot override that classification, so
-the actor is directed toward the next real probe instead of editing product
-files. The deterministic suite passes 58 tests. The WebSocket benchmark remains
-open: its actor made a valid server mutation but timed out before completing
-the independent frontend and runtime checks.
-
-### 2026-08-15 — explicit validation-plane separation
-
-The validation contract now labels executable outcomes as `setup`,
-`verification`, or `non_evidence` in addition to its existing acceptance
-decision. Successful dependency installation, process startup, and zero-exit
-commands without assertions are setup/non-evidence; a passing test or an
-asserted request/round-trip is verification. During setup recovery the actor
-can still use explicit argv commands to select a runner or install a declared
-dependency, but unrestricted `run_shell` is withheld along with file mutation
-tools. This is an engine policy, not a model or benchmark rule. Added plane
-classification regression checks; the deterministic suite passes 58 tests.
-
-### 2026-08-15 — Qwen3.8 runtime tuning and MLX candidate
-
-The first Qwen3.8 test used `--device none`, which forced the 27B GGUF onto
-CPU and produced roughly 90-second actor turns. A controlled llama.cpp test on
-the M4 Max found the useful configuration: `MTL0`, all GPU layers, Flash
-Attention, one slot, 16K context, and `--reasoning off`. Warmed short requests
-then reached about 0.17 seconds to first streamed byte and 1.1 seconds total;
-thinking-budget probes around 128–1024 tokens took about 3.0–4.7 seconds and
-did not improve the action response. This is the current Qwen coding-agent
-baseline. llama.cpp exposes native reasoning budgets, including per-request
-`thinking_budget_tokens`, but Qwen's high/xhigh labels are not direct
-llama.cpp modes; they must be experimentally mapped to token budgets.
-
-The optimized Qwen GGUF WebSocket run made two useful mutations (`server.js`
-and `index.html`) in eight iterations, with first tool 10.1s and first
-mutation 60.0s. The independent grader then crashed with `NameError: name
-'port' is not defined`, so the run is not a benchmark pass or fail. The native
-MLX 4-bit candidate requested by the user was downloaded to
-`~/.cache/mlx/Qwen3.8-27B-4bit` (about 15 GB); it should be compared next.
-
-### 2026-08-15 — earlier orientation convergence gate
-
-The Mistral control run and the Qwen3.8 probe both showed the actor spending
-its short real-model budget on repeated reads. The orientation governor now
-switches to executable progress tools after two read-only turns instead of
-three. This is a model-neutral convergence policy: it does not prescribe a
-file, patch, or benchmark-specific action; it simply prevents a third
-unchanged exploration turn. The next real run must compare first-mutation
-latency and artifact progress against the prior three-read baseline.
-
-The four-iteration comparison reached the new gate as expected: Mistral made
-its first mutation on iteration 3, then ran `npm install`; the new checkpoint
-classified that result as setup and withheld mutation plus unrestricted shell
-tools. The short run ended before the actor had a repair turn, so it is not a
-pass/fail capability result. First mutation was 182.9 seconds and first
-validation was 262.2 seconds on this CPU-only server. A longer unchanged run
-is required to measure whether the actor can now continue from setup into the
-real WebSocket verification probe.
-
-### 2026-08-15 — provider-neutral tool-call argument normalization
-
-The first MLX agent run exposed a transport compatibility defect. The actor
-adapter parsed tool-call `function.arguments` into a Python dict for dispatch,
-then reused that dict in the next assistant message. MLX's OpenAI-compatible
-server expects the field to remain a JSON string and returned `the JSON object
-must be str, bytes or bytearray, not dict`. The transport boundary now
-serializes non-string arguments before any provider receives the next message.
-This is provider-neutral and does not branch on MLX or model name. The
-deterministic suite passes 59 tests. Re-run the MLX benchmark after this fix;
-the prior MLX result is a protocol failure, not a model score.
-
-### 2026-08-15 — Qwen3.8 capability review and policy decision
-
-The official [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)
-describes a 27B dense vision-language model with native 262K context,
-multi-token prediction, flexible thinking control, and explicit support for
-`reasoning_effort` values `low`, `medium`, and `xhigh`. Its published results
-include Terminal Bench 2.1 **73.0**, SWE-bench Pro **61.7**, DeepSWE 1.1
-**42.2**, QwenSWEBench **79.0**, WebArena-Verified **64.8**, and
-ClawEval-MM **57.4 Pass@3 / 56.9 average**. These are directional evidence,
-not a direct apples-to-apples comparison: the table uses different harnesses,
-benchmark versions, prompts, and context lengths than our local runs.
-
-For comparison, the [Devstral Small 2 model card](https://huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512)
-reports SWE-bench Verified **68.0**, SWE-bench Multilingual **55.7**, and
-Terminal Bench 2 **22.5**. Qwen's Terminal Bench 2.1 number is not directly
-comparable to Mistral's Terminal Bench 2 number, while Qwen's SWE-bench Pro
-and Mistral's SWE-bench Verified are different tasks. The public evidence
-supports testing Qwen seriously for long-horizon terminal work, not declaring
-it universally better.
-
-The current NoveltyEngine constraints divide into two groups:
-
-* Keep invariant: assertion-driven validation, setup/verification plane
-  separation, protected test paths, FSM transitions, bounded repair budgets,
-  rollback, and tool permissions. These protect the environment and are
-  model-agnostic.
-* Make adaptive: hardcoded `reasoning_format=none`, `reasoning_effort=none`,
-  low temperature, fixed output reserve, and a universal two-turn orientation
-  cutoff. These can suppress Qwen3.8's trained reasoning and long-horizon
-  planning. Qwen's own guidance warns that lower reasoning effort can reduce
-  per-turn latency but increase total retries on multi-turn agents.
-
-Recommended actor policy is therefore a bounded two-speed profile, selected
-by observed task state rather than model name: fast/no-thinking for orientation,
-simple setup, and verification; bounded `medium` reasoning for a fresh
-behavior failure; and `xhigh` only for a repeated, high-value diagnosis with a
-hard token/time ceiling. The FSM and validator remain authoritative in every
-profile. We should retain Mistral as the control actor, test Qwen3.8 GGUF and
-MLX under the same frozen tasks, and choose by first mutation, accepted repair
-rate, validation success, total wall time, and tool-call validity—not by model
-card scores alone.
-
-### 2026-08-15 — WebSocket grader harness repair
-
-The WebSocket benchmark's independent grader had a real harness bug: it
-created the Node probe with port `18767` but never defined the Python variable
-used to set `env['PORT']`. Every recent WebSocket run therefore failed with
-`NameError: name 'port' is not defined` before the application could be
-graded. The grader now defines the same isolated port before launching the
-server. This changes no acceptance assertion or expected behavior; it only
-restores execution of the existing independent check. Added a regression test
-that compiles the generated grader and verifies the port contract. The
-deterministic suite passes 60 tests. A positive-control application now passes
-the repaired grader, while the original intentionally broken fixture reaches
-the expected WebSocket URL assertion and fails. This confirms the grader can
-both accept the target behavior and reject the broken starting state. Model
-comparison is paused here; the next benchmark run should be interpreted as a
-real agent result rather than a grader-harness result.
-
-### 2026-08-15 — validation runner compatibility and setup recovery gate
-
-The reusable `run_tests` tool still uses unittest as its standard-library
-path, but it now attempts a bounded pytest run when unittest discovers zero
-tests and pytest is already installed. It never installs dependencies and
-preserves the existing no-tests result when pytest is unavailable. This keeps
-the runner compatible with both unittest projects and common function-style
-pytest modules without making either framework mandatory.
-
-The validation recovery policy now combines the raw repair packet with the
-validator's failure-plane suggestion. A successful command that only prints a
-value, starts a process, or contains no assertion is setup/non-evidence, not a
-product failure. After one setup inspection, read-only tools are removed and
-the actor must issue an explicit assertion-bearing command or test invocation.
-This prevents correct code from being rewritten to compensate for a weak
-probe.
-
-### 2026-08-15 — lifecycle FSM completion invariant
-
-The live cascading run found a real FSM inconsistency: after a validation
-failure, a corrected executable check could pass while the FSM remained in
-`REPAIR`; the orchestrator then sent `validation_passed`, which was rejected
-and crashed the run even though the artifact was correct. `REPAIR` now has an
-explicit `validation_passed -> COMPLETE` transition for setup recovery, and a
-regression test covers that path. The transition remains table-driven and
-validation evidence remains authoritative; no model or benchmark-specific
-exception was added.
-
-### 2026-08-15 — centralized validation action policy
-
-The lifecycle FSM is now paired with a pure `lifecycle_policy.py` policy
-function. It derives one immutable validation-phase action surface from the
-current recovery snapshot: setup failures get one inspection and then only
-explicit runner/command tools; behavior failures get one inspection and then
-targeted mutation; protected or repeated failures narrow the surface further.
-`agent.py` consumes this policy instead of reconstructing the validation tool
-set through several independent branches. The 4B gate can still remove tools,
-but cannot add tools or override the deterministic plane. Added unit coverage
-for the setup-then-command and repair-then-patch transitions. The deterministic
-suite passes 65 tests.
-
-The first live policy run caught an implementation error in that policy: setup
-recovery still exposed mutation tools during its initial inspection turn. The
-policy now removes `patch_file` and `write_file` for every setup failure, not
-only after inspection. This preserves the core invariant that runner,
-dependency, and test-discovery problems cannot trigger speculative product
-edits.
-
-The next live trace found an orientation-policy conflict: after two idle
-turns, the old allow-list removed `read_file`, causing the actor's targeted
-inspection to be blocked and encouraging blind edits. Orientation recovery now
-uses the centralized policy surface: targeted read/search plus mutation and
-finish remain available, while broad listing/exploration stays unavailable.
-Setup recovery separately removes mutation tools, so these two policies do
-not conflict. Added deterministic coverage; the suite now passes 66 tests.
-
-The following live run exposed stale-worker authority: the 4B gate removed
-mutation tools during a current behavior-repair state because its pending
-judgment still described setup. The deterministic policy now filters worker
-restrictions by the active plane. A behavior repair always retains its legal
-mutation tool; a setup recovery may still retain the worker's mutation ban.
-Added regression coverage. The deterministic suite passes 67 tests.
-
-The attempted observation-only ablation found a flag-wiring defect: the agent
-was consuming synchronous 4B gate restrictions whenever novelty context was
-enabled, even when `--novelty-action-gate` was off. Gate consumption is now
-explicitly opt-in. This makes the planned ablation honest: novelty context can
-observe and record events without changing the actor's legal tools. Added
-coverage for both disabled and enabled gate behavior; the deterministic suite
-passes 68 tests.
-
-### 2026-08-15 — frozen cascade 4B ablation
-
-With the same Qwen3.8 actor, MLX server, frozen cascading fixture, and 18-turn
-budget, three conditions all repaired and independently verified the artifact
-in 9 actor turns: deterministic/no 4B **170.3s**, 4B observation-only
-**172.4s**, and 4B action gate **170.9s**. The observation and gated runs each
-made 3 worker calls and recorded 9 stale judgments. None met the historical
-three-actor-turn scorecard, but all reached lifecycle `COMPLETE` and passed the
-independent grader.
-
-This task provides no evidence that the 4B improves capability or speed. Keep
-the worker as optional telemetry/critic infrastructure for future tasks, but
-keep action authority disabled by default and out of the critical path. The
-deterministic FSM and validation policy are the production control plane until
-a frozen benchmark demonstrates a measurable worker benefit.
-
-To make that demotion real, synchronous 4B triage is now invoked only when
-`--novelty-action-critic` or `--novelty-action-gate` is explicitly enabled.
-Plain `--novelty-context` records asynchronous events without waiting for or
-injecting a worker judgment. This removes the worker from the default latency
-path while preserving an experimental path for future ablations. Deterministic
-tests and compilation remain green (68 tests).
-
-### 2026-08-15 — bounded provider failure handling and token-endpoint capability cache
-
-The live WebSocket benchmark exposed an engine-level latency failure rather
-than a WebSocket-specific defect. After its first validation failure, the MLX
-actor provider returned `RemoteDisconnected: Remote end closed connection
-without response`. The retry loop treated that request-specific server close as
-retryable and spent the remaining run budget repeating the same request five
-times. The run ended at its 600-second watchdog with no additional mutation.
-
-`agent.py` now classifies remote closed-response, broken-pipe, and aborted
-connection errors as terminal for the current actor turn. The run exits with a
-recorded model error instead of burning the whole budget on an unchanged
-request. This is a transport policy, not a model or benchmark exception.
-
-The same run showed that this MLX OpenAI-compatible server does not expose
-`/tokenize`; the context manager previously retried that optional probe on every
-turn. The provider capability is now cached by server root after a 404, so the
-existing bounded fallback context policy is used without repeated failed HTTP
-requests. Exact token measurement remains enabled for providers that expose the
-endpoint.
-
-Evidence:
-
-```text
-python3 -m unittest -v tests.test_agent_tools
-Ran 67 tests in 0.147s — OK (1 skipped: pytest unavailable)
-```
-
-The next real-model check should verify that the same provider failure ends in
-one bounded turn and that a healthy small request still works. Do not weaken
-the independent WebSocket grader or alter the fixture to compensate for a
-provider transport failure.
-
-### 2026-08-15 — short development profile and external mini-SWE baseline
-
-The next WebSocket run was intentionally interrupted at 501.2 seconds after
-14 actor iterations to avoid spending the remaining budget. Its independent
-grader passed the generated artifact, but the actor had not called
-`finish_task` and exited with return code `-15`. The benchmark incorrectly
-recorded `passed: true` because it considered artifact correctness alone for
-tasks without the historical iteration scorecard. `run_completed` is now part
-of the scorecard, and an interrupted, timed-out, or nonzero actor run cannot be
-reported as a passing benchmark even when its partial artifact happens to pass.
-
-The benchmark now has an explicit `--profile smoke` mode. It keeps the same
-fixture, actor, and independent grader, but caps a development run at 8 actor
-iterations, 45 seconds per model call, and 300 seconds total. `full` remains
-the default for final measurements. This separates fast convergence debugging
-from expensive capability measurement without changing task semantics.
-
-As an external baseline, mini-SWE-agent v2.4.6 was run against the same frozen
-WebSocket fixture using the Qwen3.8-27B MLX server. Its local-model adapter
-required the absolute loaded model path in the request; an alias caused MLX to
-look for a nonexistent Hugging Face repository. With the correct path, it made
-10 model calls / 8 assistant turns in the short run, created `package.json`
-and installed `ws`, but never mutated `server.js` or `index.html`. The
-independent grader failed on the original `http://` WebSocket URL. Several
-turns searched the whole filesystem or reread the trajectory, and two model
-responses exceeded mini-SWE-agent's one-bash-command format. This is a useful
-external baseline for analysis paralysis; it is not evidence against the
-NoveltyEngine implementation.
-
-Do not add mini-SWE-agent-specific branches to the engine. Future comparisons
-should use the smoke profile first, then a full run only after a real mutation
-and validation boundary are observed.
-
-### 2026-08-15 — evidence-aware orientation gate and shell inspection guard
-
-The first short WebSocket smoke run ended after 4 actor iterations with no
-mutation. The actor had inspected both files, then the orientation recovery
-surface removed `read_file`; it bypassed that restriction by issuing
-`run_command cat ...` for both files. This is a generic shell/tool-plane
-failure: restricting tool names does not prevent a shell tool from recreating
-the restricted action.
-
-The orientation policy now has two deterministic surfaces. Before useful
-inspection evidence exists, one targeted read/search remains legal. After
-evidence exists, only mutation, validation, finish, exact recall, and diff
-tools remain. In addition, simple single-command file/list inspection commands
-(`cat`, `sed`, `head`, `tail`, `grep`, `rg`, `find`, `ls`, and similar) are
-blocked during evidence-ready orientation recovery, even when emitted through
-`run_command` or `run_shell`. Pipelines, interpreters, test runners,
-installers, service probes, and compound commands remain available because they
-can produce behavioral evidence or perform legitimate setup.
-
-The deterministic suite had passed 74 tests in the preceding run. The current
-portable `unittest` invocation passes 72 tests because two pytest-dependent
-checks are not collected in this environment. The next WebSocket smoke run must
-verify the actor reaches a mutation rather than merely receiving a rejection;
-the independent grader remains unchanged.
-
-### 2026-08-15 — command-plane guard covers inline interpreter readbacks
-
-The next WebSocket smoke trace confirmed that blocking `read_file` and simple
-shell readers was not sufficient. After receiving usable source evidence, the
-actor switched to two commands of the form
-`node -e "console.log(require('fs').readFileSync(...))"` and printed both
-application files through the command tool. It made no mutation and no
-validation call. This was another generic action-plane escape hatch, not a
-WebSocket-specific rule.
-
-`lifecycle_policy.is_inspection_command()` now also recognizes a narrow class
-of inline interpreter commands from Node, Python, Ruby, Perl, PHP, Bun, and
-Deno when they both read a file and print it. It deliberately leaves ordinary
-scripts, test/assertion snippets, process or network probes, installers, and
-mutating snippets available. Dispatch rejects the command only during the
-evidence-ready orientation recovery state; the shell remains available for
-behavioral validation and setup recovery.
-
-The deterministic suite passes 72 tests with one environment-dependent skip.
-The next check is the same bounded WebSocket run, looking specifically for a
-mutation after the first useful reads. If the model still finds a new generic
-readback route, classify that route and extend the policy with a focused test
-rather than adding a WebSocket-specific prompt.
-
-### 2026-08-15 — fixed false orientation evidence from zero-line reads
-
-The guarded run revealed why the actor remained stuck even after every shell
-readback was rejected. The model had requested `read_file` with `limit: 0`.
-The tool returned a non-empty header such as
-`--- server.js [lines 1-0 of 27] (0 chars) ---`, and the orientation detector
-mistook that header for useful source evidence. The engine then removed the
-read tools even though the actor had never seen the file contents.
-
-`_has_orientation_evidence()` now rejects zero-character and `lines 1-0`
-read results. This keeps targeted reading legal until actual evidence exists;
-it is a generic tool-result contract fix, not a benchmark-specific exception.
-The next WebSocket run should distinguish this case from true post-inspection
-paralysis. The per-request Qwen thinking probe also confirmed that this MLX
-server accepts `chat_template_kwargs: {"enable_thinking": true|false}`; that
-will remain an optional provider capability experiment, not a replacement for
-the deterministic action policy.
-
-### 2026-08-15 — FSM-owned orientation recovery and explicit thinking payload
-
-The live trace after the zero-line fix showed a second architectural gap: the
-actor had real source evidence, but the lifecycle still reported `ACT` while a
-separate counter changed the tool list. The engine could restrict tools without
-recording a state transition that made mutation mandatory.
-
-`LifecycleFSM` now has an explicit `ACT -> RECOVER` `orientation_stalled`
-transition. In `RECOVER`, a code-change contract with usable evidence exposes
-only `patch_file` and `write_file`, and the llama.cpp adapter requests a tool
-call. This is a generic contract-driven recovery path; diagnosis tasks are not
-forced to mutate. A second-pass live run reached the new state correctly, but
-the mutation-only provider call timed out, so the benchmark was not counted as
-success.
-
-The second pass also caught and fixed a missing `LifecycleState` import before
-the next run. The llama.cpp adapter now sends
-`chat_template_kwargs: {"enable_thinking": false}` explicitly when the agent
-is not using thinking, rather than relying on the server startup default. This
-keeps the provider behavior stable and leaves room for a later adaptive
-orientation/mutation experiment. The deterministic suite now passes 73 tests
-with one environment-dependent skip; compilation and `git diff --check` are
-clean.
-
-### 2026-08-15 — bounded WebSocket result and sampling-control smoke test
-
-The post-FSM WebSocket run reached real mutation and independent artifact
-success: first mutation at 110.6s, first validation at 186.7s, 4 mutations,
-4 validations, and an artifact grader pass in 312.5s. It did not call
-`finish_task`, so the benchmark exposed a completion-contract bug: the runner
-previously marked a correct partial artifact as `passed` whenever the child
-process exited normally.
-
-`agentic_benchmark.py` now requires all three conditions for a pass: artifact
-grader success, clean process completion, and the actor's explicit finish
-signal. The same run is therefore correctly classified as incomplete rather
-than fully passed. This preserves useful artifact evidence while preventing a
-false capability claim.
-
-A small direct llama.cpp A/B probe compared baseline sampling, explicit
-`repetition_penalty: 1.0`, and Qwen's suggested
-`presence_penalty: 1.5` plus `repetition_penalty: 1.0`. All three produced the
-same valid required `write_file` call in 3.61–3.88s; the 0.27s difference is
-too small to claim a real gain. No immediate tool-schema damage was observed.
-The next tuning test should use repeated multi-turn repair prompts and measure
-first mutation, invalid tool calls, and finish rate before adopting the
-penalties as defaults.
-
-The deterministic suite now passes 74 tests with one environment-dependent
-skip.
-
-### 2026-08-15 — command-plane mutation enforcement during validation
-
-The latest trace exposed a remaining generic bypass. After `write_file` was
-correctly unavailable during validation, the actor issued
-`bash -c 'cat > index.html'` and `bash -c 'cat > package.json'` through
-`run_command`. The ledger classified these as mutations, but dispatch did not
-enforce the validation/setup plane or protect the files before execution.
-
-The command classifier now handles both argv and string command forms and
-recognizes redirects, `tee`, inline Python/Node writes, and common file-copy or
-in-place edit forms. During ordinary validation and setup recovery, dispatch
-rejects mutation-shaped shell commands with a specific command-plane message;
-behavior-repair turns may still use shell mutation when the task genuinely
-requires it. This preserves shell-based dependency installation and repair
-while preventing a validation-only command from silently becoming a product
-edit.
-
-The deterministic suite passes 76 tests with one environment-dependent skip.
-The next live run should verify that the shell writes are rejected and that the
-actor is redirected to an assertion-bearing behavioral check, then either
-finish or enter the normal repair state.
-
-### 2026-08-15 — validation contract rejects source dumps as evidence
-
-The next live run showed a validator failure independent of the command
-guard. The actor used `run_command` to print `server.js` and `index.html`.
-Because the printed source contained words such as `WebSocket` and `message`,
-the text heuristic treated the file dump as a successful behavioral exchange
-and the orchestrator called completion. The independent grader correctly
-failed the unchanged frontend.
-
-`ValidationContract.assess()` now rejects recognized read-only commands before
-examining their output. The inspection classifier unwraps `bash/sh/zsh/fish
--c` wrappers, recognizes version/help probes, and preserves compound commands
-as potentially behavioral. This prevents source listings, file dumps, and
-environment metadata from becoming validation evidence while retaining real
-client/test commands. The deterministic suite passes 77 tests with one
-environment-dependent skip.
-
-### 2026-08-15 — deterministic preflight gate before expensive runs
-
-The validator fix was verified with 77 deterministic tests, but the broader
-lesson is procedural: a real-model run should not be the first place a parser
-quirk is discovered. `agentic_benchmark.py` now runs
-`python -m unittest tests.test_agent_tools` before launching any task. A
-preflight failure exits immediately and reports the failure; `--skip-preflight`
-exists only for debugging the benchmark harness itself.
-
-This gate is intentionally cheap and model-independent. It catches command
-classification, validation-plane, completion-score, context, and dispatch
-regressions before consuming a long llama.cpp run. It does not replace the
-real-model benchmark, because tool selection and convergence still require a
-live actor.
-
-### 2026-08-15 — adversarial model-free preflight matrix
-
-The short smoke run timed out at the Qwen mutation call under the 45-second
-smoke cap, but it did not reach a false completion. Rather than immediately
-spending another expensive model run, the preflight was expanded with an
-adversarial matrix covering:
-
-- direct and wrapped file readbacks (`cat`, `bash -c`, inline Python/Node);
-- version/help and compound-command distinctions;
-- redirects, `tee`, inline writes, `sed -i`, and copies;
-- source text containing misleading words such as `WebSocket`, `message`, and
-  `pong`;
-- genuine client evidence;
-- FSM illegal transitions and recovery transitions;
-- the artifact/finish/process completion truth table.
-
-The benchmark preflight now runs both `tests.test_agent_tools` and
-`tests.test_adversarial_preflight`. The combined model-free gate passes 84
-tests with one environment-dependent skip in 0.13 seconds. This should be the
-first check before every long real-model cycle; model calls remain necessary
-only for actor action selection and convergence.
-
-### 2026-08-15 — dependency-free function-test fallback and cache isolation
-
-The first cascading-loop run after the preflight work found a real runner
-contract defect: after the actor repaired the syntax error, the workspace's
-valid `test_metrics.py` used a top-level `test_calculation()` function. Since
-pytest is not installed in this environment, `run_tests` returned
-`Ran 0 tests: no tests discovered` and prevented the actor from seeing the
-second, real TypeError.
-
-`workspace/run_tests_tool.py` now has a dependency-free fallback for ordinary
-top-level `test_*` functions. It loads matching test modules, executes the
-functions through unittest's result machinery, and reports bounded assertion
-or exception evidence. It does not pretend to implement pytest fixtures or
-plugins; unsupported behavior fails visibly. The runner also evicts stale
-temporary test and project modules after collection, preventing repeated
-validation calls from observing an earlier workspace's code.
-
-Regression coverage now passes 85 deterministic tests. This is model-agnostic
-runner behavior, not a special case for the cascading benchmark. The next
-real-model run should expose the TypeError after the syntax repair and allow a
-second product mutation instead of misclassifying the workspace as empty.
-
-The repeated Qwen3.8-27B run confirmed that behavior: the first validation
-reported the original SyntaxError, the first mutation repaired it, and the
-dependency-free fallback then reported the real `int / str` TypeError. The
-actor made the second repair and independent validation passed. The run used 7
-model turns, with first mutation at 35.1s, first validation at 45.7s, 2
-mutations, 3 validations, and an explicit finish. The artifact and workflow
-were correct, but the benchmark scorecard remained false because its separate
-iteration target is 3. This is now a turn-efficiency problem, not a context or
-test-discovery failure; do not loosen the scorecard or alter the frozen task
-to make it pass.
-
-### 2026-08-15 — cascading validation replay and project-module isolation
-
-The new model-free cascade replay initially caught one more cache defect. A
-previous temporary workspace had left `target` in `sys.modules`; the next
-workspace imported that stale module and reported an unrelated ImportError
-instead of its current SyntaxError. The runner now evicts matching Python
-modules for the whole target project, including non-test modules, before
-discovery and after function-style collection.
-
-The preflight now replays a three-stage generic cascade without a model:
-syntax failure, repaired syntax exposing a TypeError, and final passing
-repair. It verifies that each stage reports the current failure and never
-falls back to “no tests discovered.” The combined deterministic suite passes
-86 tests. This gives us a cheap regression gate for both context evidence and
-the validation runner before another real-model call.
-
-### 2026-08-15 — initial failure enters the repair FSM
-
-The live cascade completed correctly but spent three turns orienting before
-the first patch. The cause was structural: the initial `run_tests` failure was
-recorded as evidence, but the lifecycle remained in `ACT`, so the next actor
-turn could list the workspace instead of repairing the failure already in
-hand.
-
-`LifecycleFSM` now permits the explicit `ACT -> REPAIR` transition for a failed
-initial executable check. The loop promotes that failure into the same
-validation/repair policy used after a mutation. Setup failures still remain on
-the setup plane and cannot unlock product mutation. This is a generic
-failure-driven transition, not a benchmark-specific hint.
-
-The deterministic suite passes 87 tests, including the new FSM transition
-assertion. The next live cascade will measure whether this removes the wasted
-orientation turns without weakening evidence or mutation safety.
-
-The live measurement exposed a second interaction bug: during initial repair,
-`list_workspace` was marked as the one permitted inspection. The following
-targeted `read_file` was then rejected, and the actor exhausted its repair
-budget without seeing the source. The policy now distinguishes inventory from
-evidence: `list_workspace` and `list_dir` do not consume the repair-inspection
-allowance; focused readers such as `read_file`, `find_files`, and
-`search_file` do. This keeps exploration available without allowing inventory
-to starve failure diagnosis.
-
-The deterministic suite passes 88 tests, including the new classification
-contract. The next live run should compare first-mutation time and repair-turn
-count against the prior 101.3-second / 6-repair-turn trace.
-
-The comparison run confirmed the first fix: the actor read the implicated
-files, repaired both defects, and independently passed the task. First
-mutation improved to 64.1 seconds, with 2 mutations, 3 validations, and an
-explicit finish. It still spent one turn on `list_workspace`, so the frozen
-scorecard remained false at 7 turns, but the artifact was correct.
-
-### 2026-08-15 — behavior repair removes broad inventory
-
-Behavioral repair now removes `list_workspace` and `list_dir` from the offered
-tool surface while preserving `read_file`, focused search, mutation, and
-validation. This is not a hard-coded file or benchmark rule: once an
-assertion-bearing failure identifies the product plane, broad inventory is
-lower-value than targeted evidence. Setup-plane recovery retains the broader
-inspection tools because the missing fact may be environmental.
-
-The deterministic suite passes 89 tests. The next live run should show a
-targeted read on the first repair turn and reduce the turn count without
-weakening setup recovery.
-
-The next live run showed that `find_files` has the same distinction as
-inventory: it locates candidate paths but does not expose implementation
-contents. Counting it as the one inspection allowance again blocked the
-subsequent `read_file`, and the actor eventually patched only after recovery,
-leaving the second defect unresolved within the budget.
-
-`find_files` is now classified as localization rather than repair inspection.
-Only tools that return source evidence consume that allowance. The
-deterministic suite remains green at 89 tests. This is the third preflight
-edge case found through the test cycle: inventory, localization, and actual
-source inspection are separate control-plane events.
-
-The following live run reached the intended targeted path and completed the
-task correctly: `find_files` on turn 2, `read_file` on turn 3, first mutation
-at 64.5 seconds, then the second repair and passing validation. It still used
-7 model turns because the actor chose localization before reading. The
-artifact passed and `finish_task` was called; only the frozen 3-turn efficiency
-target remained unmet.
-
-### 2026-08-15 — preserve traceback file locations in failure evidence
-
-The remaining avoidable localization came from the validation summary itself.
-The runner retained exception names and source lines but discarded traceback
-frames such as `File .../target.py, line N`. The actor therefore had to search
-for a file whose location was already known to the test runner.
-
-Failure summaries now preserve bounded `File ...` frames for both unittest and
-function-style fallback results. This is generic error evidence, not a
-benchmark hint, and the cascade preflight asserts that the implicated source
-filename survives. The deterministic suite remains green at 89 tests.
-
-The live verification confirmed the improvement. Qwen used `read_file`
-directly on turn 2, patched on turn 3, exposed the second TypeError on turn 4,
-patched again on turn 5, and passed on turn 6. First mutation fell to 49.4
-seconds; the artifact passed and the orchestrator completed honestly. The
-frozen 3-turn scorecard remains unmet because the current outer loop permits
-one model response/action phase per iteration. The remaining optimization is
-therefore multi-action turn handling, not more orientation suppression or
-weaker validation.
-
-### 2026-08-15 — separate failed validation from setup failure
-
-The first harder WebSocket run exposed a multi-file workflow problem. After
-repairing `server.js`, the actor tried `ls` and `node --version`; those commands
-correctly produced no behavioral evidence, but `_is_validation_setup_failure`
-classified that absence as setup failure. Product mutation then stayed locked,
-so the actor could not repair `index.html` and spent the remaining turns
-working around its own tool restrictions.
-
-Setup classification is now limited to actual execution-plane failures:
-missing runners/dependencies, import or permission failures, test discovery
-failures, and unavailable processes. A command that runs successfully but
-proves nothing remains a validation failure in the product plane; the actor
-can choose a real probe or continue a related product repair. Function-style
-test modules that silently run as scripts remain setup failures. The
-deterministic suite passes 89 tests.
-
-The repeat WebSocket run confirmed the classification change but exposed a
-recovery precedence bug. The actor reached product repair, yet after a
-rejected `write_file` call the recovery policy re-added `write_file`; the model
-retried the same rejected call until the bounded run ended. Recovery now keeps
-the rejected mutation method removed and explicitly directs the actor to the
-remaining `patch_file` path. Deterministic coverage passes 90 tests.
-
-The next WebSocket run confirmed that recovery could now reach `patch_file`:
-the actor repaired `index.html`, but the run ended before a behavioral check
-and the independent grader still found stale protocol code. The trace shows
-the deeper workflow issue: the first `server.js` mutation was forced through
-validation before the related `index.html` mutation could land. The actor then
-had too little budget to recover from a partial first patch.
-
-### 2026-08-15 — bounded multi-file change batch
-
-The validation policy now permits one additional related product mutation
-after a successful write, while keeping executable validation mandatory before
-any further edits. The allowance is consumed once, is not available after a
-failed validation, and remains separate from shell mutation guards and test
-path protection. This gives multi-file tasks a coherent change point without
-opening an unrestricted edit loop. Setup recovery and behavior repair rules
-remain unchanged.
-
-The deterministic suite passes 91 tests. The next WebSocket run is the live
-verification of this batch contract.
-
-The batch run reached the second mutation as intended: it wrote both
-`server.js` and `index.html` before validation. That live run exposed a missing
-FSM edge: `VALIDATE -> mutation` was not legal, so the orchestrator crashed
-before the behavioral check. The FSM now accepts this one bounded batch event
-and remains in `VALIDATE`, where executable evidence is still required. The
-deterministic suite passes 92 tests. The grader also identified the next
-product/setup requirement for this harder task: the workspace needs a
-`package.json` declaring `ws`; the next live run will verify how the actor
-handles that dependency contract.
-
-The batch run reached `server.js` and `index.html` as intended, then exposed
-that the WebSocket task also explicitly requires a third artifact,
-`package.json`. The bounded batch allowance is now two follow-up mutations
-after the first successful write, enough for an implementation, client, and
-dependency manifest while still forcing validation immediately afterward. The
-deterministic suite remains green at 92 tests.
-
-The next live run successfully produced all three required artifacts and the
-independent grader passed them. It stopped before `finish_task` because the
-successful `npm install` command was incorrectly treated as a failed
-behavioral check, consuming a repair turn and leaving the final smoke call to
-time out.
-
-Dependency installation is now an explicit setup event. Successful npm/pnpm/
-yarn/pip installation is never accepted as behavioral evidence, but it also
-does not enter product repair; the next turn remains focused on the required
-smoke test. Deterministic coverage passes 93 tests.
-
-The final WebSocket handoff run confirmed all three artifacts and a passing
-independent grader, but the actor returned prose for five consecutive turns
-while saying it would write a smoke test. The validation tool surface contained
-only executable checks, while the novelty worker continued recommending
-`patch_file`; this mismatch prevented the model from selecting `run_command`
-and calling `finish_task`.
-
-No-action recovery is now lifecycle-aware. It receives the legal tool names for
-the current turn, recommends validation commands during validation, and
-recommends mutation only during repair. Its generic directive no longer names
-an unavailable tool. The deterministic suite passes 95 tests, including the
-novelty-context tests.
-
-### 2026-08-15 — make temporary validation probes executable without file mutation
-
-The next live WebSocket run reproduced a separate, model-independent tool
-contract edge case. After the actor had repaired all three artifacts and
-installed `ws`, it correctly decided that a real client/server smoke test was
-needed. It then repeatedly said it would write a temporary smoke-test file.
-Validation intentionally exposes only executable checks and forbids product
-file mutation, so the actor had no legal way to carry out that plan. The
-recovery directive recommended `run_command`, but did not explain that an
-inline `node -e` or `python -c` probe was the intended replacement.
-
-Validation prompts now explicitly direct temporary probes through an inline
-shell command and forbid creating helper files during validation. This keeps
-the setup/product/evidence boundary intact while making the existing shell
-surface sufficient for short-lived probes. The preflight now also includes the
-novelty-context test module, so changes to the worker/recovery layer cannot
-skip the cheap deterministic suite. The full targeted suite passes 96 tests
-and the benchmark preflight passes before any model call.
-
-The interrupted live run still had a correct artifact and an independent
-passing grader, but no `finish_task`; it is recorded as incomplete rather than
-counted as a success. The next run should verify whether the actor converts
-the same smoke-test plan into an inline command and then completes the
-handoff.
-
-### 2026-08-15 — bound transient model-provider disconnect recovery
-
-The verification rerun followed the intended path through the combined
-application repair, dependency installation, server launch, and process
-status check. The MLX endpoint then closed one HTTP connection before the next
-actor turn. A direct provider health request succeeded afterward, and the
-same failure repeated on the next run at the same boundary. This is distinct
-from context overflow: the request was within the measured context budget and
-the model server stayed alive.
-
-The actor loop now retries only the specific transient disconnect signatures
-(`RemoteDisconnected`, a remote end closing without a response, or a peer
-reset) once, with a one-second delay. Refused connections, DNS failures, and
-the second disconnect remain terminal, so a dead provider cannot create an
-overnight retry storm. The deterministic suite passes 97 tests. The next live
-run verifies whether this recovers the final smoke-test turn.
-
-### 2026-08-15 — prevent malformed multiline shell tool calls at the provider boundary
-
-The bounded retry correctly caught the transient disconnect, but the retry
-failed for the same underlying reason. The MLX server log showed that Qwen's
-tool parser received a `run_command` argument containing literal newlines in a
-multiline `node -e` smoke test. Its parser raised `SyntaxError: unterminated
-string literal` while converting the tool call, closed the HTTP connection,
-and left the model server healthy. This was a serialization failure, not a
-context-size failure.
-
-The command tool contract now rejects literal newline characters in argv
-tokens and explains that short probes must be one-line commands. Validation
-guidance carries the same rule, while retaining the option to create a proper
-helper during product mutation when that is actually part of the task. The
-deterministic suite adds coverage for the command boundary and passes 98
-tests. This is model/provider agnostic at the agent layer: any provider that
-cannot safely encode multiline tool arguments gets a bounded, explicit error
-instead of crashing its transport.
-
-### 2026-08-15 — allow only dependency manifests during setup recovery
-
-After the multiline parser fix, the live run reached the dependency phase
-without an HTTP crash. It discovered `node_modules/ws` was absent and correctly
-classified the check as setup, but the setup-plane mutation freeze also hid
-`write_file`/`patch_file`. The actor therefore could not create the missing
-`package.json`; it spent the remaining turns retrying an illegal product/setup
-path and the grader eventually passed only because the source artifacts were
-already correct.
-
-Setup recovery now exposes mutation tools with a narrow deterministic path
-allowlist. It may create or update conventional dependency manifests
-(`package.json`, `requirements*.txt`, `pyproject.toml`, `Cargo.toml`, and the
-equivalent ecosystem lock/manifests), while dispatch rejects product code,
-tests, and lookalike files. Shell commands remain mutation-blocked in setup
-recovery. The full deterministic suite passes 99 tests, and the next live run
-will verify the intended sequence: manifest mutation, dependency install,
-behavioral smoke test, and explicit completion.
-
-### 2026-08-15 — give validation a safe helper-file lane
-
-The next run showed a second setup/validation interaction. The model emitted a
-single-line command, but the command was too deeply nested for the MLX parser's
-Python-literal fallback: embedded JavaScript quotes and arrays made the tool
-argument invalid. The model could have avoided this entirely by writing a
-small probe file, but ordinary validation exposed no write tool.
-
-Validation now offers `write_file` only as a temporary-probe capability. The
-dispatch allowlist permits it only below `.agentic/`; dependency setup may
-also write only an approved dependency manifest. A helper write does not count
-as a product mutation or reopen the product-edit FSM, so the next legal action
-remains execution of the helper. Product code, supplied tests, and arbitrary
-paths remain frozen. The deterministic suite remains green at 99 tests.
-
-### 2026-08-15 — feed independent verifier failures back into the agent
-
-The helper lane enabled a complete live runtime check: dependency installation,
-server launch, ping/pong, message broadcast, peer disconnect, and server
-survival all passed. The actor called `finish_task`, but the independent grader
-still rejected the unchanged client artifact. This exposed a validation-layer
-gap: an agent can satisfy its own behavioral probe while missing a static
-acceptance condition.
-
-The benchmark harness now performs one bounded external-verifier repair pass
-when a clean actor run is rejected. It reuses the same workspace, injects the
-verifier's exact failure text as evidence, runs the normal agent/FSM again, and
-regrades the artifact. It does not interpret the task, synthesize a
-task-specific patch, or modify the grader, and it never retries the verifier
-indefinitely. This is the generic handoff contract needed for any independent
-test harness. Deterministic coverage is now 100 tests and preflight passes.
-
-The first verifier-repair run fixed the stale client artifact and passed the
-grader, but the repair actor did not issue a second `finish_task`; the harness
-had incorrectly inherited the first run's finish signal. The scorecard now
-requires the repair pass itself to finish whenever verifier feedback starts a
-repair. Its prompt also tells the actor not to invoke the generated grader
-directly—the harness runs it after handoff—keeping the repair budget focused on
-the reported evidence.
-
-### 2026-08-15 — expand model-free adversarial preflight coverage
-
-The deterministic sweep found four command-plane edge cases without using a
-model call: `sed -i` and shell redirection could be mistaken for inspection,
-JavaScript `writeFileSync` was missed by a case-sensitive mutation check,
-`perl -pi` was missed, and `readFileSync` was incorrectly treated as a write
-because it shares a substring with `writeFileSync`. It also found that
-`echo "assert passed"` and `printf "connected"` could look like behavioral
-validation merely because their text contained assertion words.
-
-The command classifiers now reject obvious writes from the inspection path,
-recognize common interpreter writes case-insensitively, preserve interpreter
-reads as observation, and classify output-only commands as non-evidence. New
-adversarial preflight cases cover these combinations. The targeted deterministic
-suite and benchmark preflight pass 104 tests. This is the intended fast gate:
-probe control-plane invariants and representation boundaries locally first,
-then spend real-model calls only on behavior that cannot be simulated safely.
-The shared output-only classification lives in `lifecycle_policy.py` so the
-action governor and validation contract cannot silently drift apart.
-
-### 2026-08-15 — preserve completion after accepted evidence
-
-The WebSocket run exposed a completion-plane edge case. The actor produced a
-real smoke-test result with every client/server assertion passing, but a later
-blocked attempt to inspect the generated grader was treated as a new product
-repair failure. The repair policy then removed `finish_task`, so the actor
-could not hand off the already-verified workspace and spent its bounded turns
-on an irrelevant grader loop.
-
-The validation policy now carries whether accepted behavioral evidence already
-exists. If a subsequent failure is only a tool-plane restriction, `finish_task`
-remains legal and the prompt directs the actor to hand off rather than rewrite
-product code. Rejected validation evidence is also logged with its reason and
-next action, making this boundary diagnosable in the live monitor. The
-deterministic suite and preflight pass 105 tests.
-
-### 2026-08-15 — keep package-manager setup separate from file mutation
-
-The first live confirmation of the previous change found a false positive:
-the mutation regex treated the word `install` in `npm install ws` as a file
-write. That blocked the normal dependency setup path before the WebSocket
-smoke test could run. The classifier now recognizes only the Unix `install`
-file-copying utility as a mutation; npm, pip, and similar package-manager
-commands remain setup commands. A regression matrix covers both forms. The
-deterministic suite and preflight now pass 106 tests. The interrupted live run
-was discarded because its failure was fully explained by this deterministic
-classifier bug.
-
-### 2026-08-15 — ignore verifier traceback paths during contract extraction
-
-The next confirmation found a separate parser edge. Independent verifier
-feedback included an absolute temporary path such as
-`/private/var/.../.agentic_grader.py`. The task-derived validation contract
-mistook that filesystem path for a required application endpoint, so a passing
-WebSocket smoke test was rejected while the actor chased a nonexistent HTTP
-interface.
-
-Endpoint extraction now excludes conventional temporary/home/workspace paths
-and `.agentic` artifacts, including method-prefixed forms. A regression test
-replays verifier traceback text and confirms that it creates no endpoint. The
-deterministic suite and preflight pass 107 tests.
-
-### 2026-08-15 — distinguish JavaScript arrows from shell redirects
-
-The handoff-recovery probe found one more command-plane representation bug:
-the shell mutation regex saw the `>` in JavaScript arrow functions (`=>`) as
-a file redirect. That blocked a legitimate inline Node behavioral probe even
-though it never wrote a file. The redirect pattern now ignores `=>` and other
-operator contexts while retaining real `> file` and `>> file` writes. A
-regression case covers an inline `setTimeout(() => ...)` command. The
-deterministic suite and preflight pass 108 tests.
-
-### 2026-08-15 — reconcile verifier-confirmed provider termination
-
-The final live attempt repaired the artifact and the independent grader passed,
-but the model provider disconnected twice before the repair actor could call
-`finish_task`. The benchmark previously recorded that as a total failure even
-though the only authoritative artifact check was green.
-
-The scorecard now records `finish_called` separately from
-`handoff_reconciled`. It accepts the narrow combination of: independent
-verifier pass, clean actor-process termination, and an explicit provider-loss
-signature. It never treats a missing artifact, timeout, or ordinary model
-stall as reconciled, and it does not pretend the model called `finish_task`.
-The deterministic suite and preflight pass 109 tests.
-
-### 2026-08-15 — require a tool call after repeated prose-only turns
-
-The first harder `real_app` run revealed a generic action failure: Qwen
-returned three consecutive long responses with no tool call, no mutation, and
-no validation. The engine appended increasingly explicit prose reminders, but
-that remained advisory and consumed roughly five minutes without touching the
-workspace.
-
-The loop now counts consecutive no-action turns and, after two, sends the
-llama.cpp request with `tool_choice: "required"`. The counter resets after any
-real tool call; it is independent of model name and task wording, and applies
-only at the provider boundary that supports this structured control. The
-deterministic suite and preflight pass 110 tests. The interrupted real_app run
-is retained as evidence of the failure, not counted as a product result.
-
-### 2026-08-15 — give forced tool turns enough generation headroom
-
-The next real_app attempt showed that `tool_choice: "required"` alone did not
-solve the no-action stall. Qwen's llama.cpp server log reported a truncated
-tool-call parse, and the actor repeatedly returned at the output limit without
-an executable call. Forced-action requests now use a 4096-token response
-reserve, while ordinary turns keep their existing budget. This changes only
-the transport envelope for recovery/action-first turns; it does not encode the
-Todo task or a model name. The deterministic suite and preflight remain green
-at 110 tests.
-
-### 2026-08-15 — recover command-plane failures without patching the product
-
-The following real_app run found a generic FSM error. A valid `/health` probe
-was correctly rejected as incomplete evidence, but the actor then emitted a
-malformed or currently unavailable `run_command` call. Because that dispatch
-error was treated as a product validation failure, repair recovery narrowed the
-tool surface to `patch_file`, `diff_files`, and `finish_task`; the actor then
-made an unnecessary behavior-preserving patch to `server.py` and repeated the
-stale repair checkpoint.
-
-The validation contract now classifies unavailable-tool, bad-argument, and
-unknown-tool errors as command-plane failures. The loop reopens executable
-validation tools, clears product-repair mode, and explicitly tells the actor to
-use the declared command schema without changing product code. A regression
-test covers both malformed-tool errors and real assertion failures, so only the
-former take this path. The deterministic suite and model-free adversarial
-preflight pass 111 tests. The affected real_app run was stopped after the
-failure was isolated; its workspace and monitor remain evidence, not a score.
-
-### 2026-08-15 — do not treat printable arrows as shell redirects
-
-The next confirmation reached the new command-plane recovery correctly, then
-found another deterministic guard false positive. A legitimate inline Python
-behavioral probe printed `PASS: ... -> ...`; the shell mutation detector saw
-the arrow's `>` as a file redirect and blocked the entire verification command.
-
-The redirect pattern now ignores `->` in addition to JavaScript `=>`, while
-continuing to classify real `> file` and `>> file` writes as mutations. A
-regression test covers a Python probe containing the printable arrow. The
-interrupted live run is not scored; the model-free preflight will be rerun
-before the next real-model attempt.
-
-### 2026-08-15 — parse redirects instead of scanning raw command text
-
-Static adversarial probing found two more guard false positives: `assert 2 > 1`
-and HTML such as `<div>ok</div>` were classified as file writes. The common
-cause was treating every `>` character in a command as a shell redirect,
-including characters inside quoted Python/JavaScript code.
-
-The command classifier now tokenizes shell punctuation with `shlex`. It sees
-real `> file` and `>> file` operators, ignores quoted comparisons/markup/arrows,
-and retains interpreter write detection such as `open(..., 'w')`. Regression
-coverage now includes comparisons, markup, JavaScript strings, and a genuine
-redirect. The model-free preflight is the required gate before the next live
-run.
-
-### 2026-08-15 — recover malformed command arguments as transport errors
-
-The next live confirmation exposed one more instance of the same class: the
-actor sent a multi-line argv argument and the execution tool rejected it before
-launching anything. The command-plane classifier now also recognizes
-single-line/schema/option errors as transport failures, so they reopen the
-validation surface without entering product repair. A regression test covers
-the multi-line argument rejection.
-
-One follow-up check caught an interaction between the new parser and the
-output-only shortcut: `echo ok > result.txt` was initially recognized as
-output-only before the redirect guard ran. Output-only classification now
-defers to the shared file-mutation detector, so redirected `echo`/`printf`
-commands remain mutations. The deterministic suite and preflight are the gate
-for the next live attempt.
-
-### 2026-08-15 — allow multiline argv probes safely
-
-The next live run showed that the model could produce a valid multiline Python
-probe, but `run_command` rejected it and returned the actor to repair. That
-restriction was unnecessary: `run_command` executes an argv list without a
-shell, so newlines inside one argument cannot become redirects or shell code.
-
-The command boundary now accepts multiline interpreter arguments while keeping
-the shell-free argv semantics. Guidance still prefers short one-line probes for
-provider compatibility, but a valid multiline probe is no longer converted into
-a false product/validation failure. The deterministic suite and preflight are
-the gate for the next live attempt.
-
-### 2026-08-15 — separate weak probes from product failures
-
-The final live confirmation built a working app and exercised health, HTML,
-creation, and collection behavior, but the probe did not explicitly assert the
-required JSON response shapes. The validator correctly rejected that evidence;
-the old repair packet nevertheless told the actor to mutate the implementation,
-and the actor spent turns checking process status instead of strengthening the
-probe.
-
-The contract now has a deterministic probe-quality classification. Missing
-response-shape/assertion evidence reopens behavioral validation without entering
-product repair, and process-status/cleanup tools are removed from ordinary
-validation turns once execution is underway. Real assertion failures still use
-the product-repair path. This prevents correct artifacts from being rewritten
-because the test itself was too weak.
-
-### 2026-08-15 — keep partial evidence valid after a repair turn
-
-The last live confirmation exposed a strict-FSM crash: one executable probe
-produced partial evidence while the lifecycle was still `REPAIR`, and the loop
-attempted `REPAIR -> validation_partial`, a transition the FSM did not define.
-The run terminated with `InvalidTransition` even though the app was healthy.
-
-The FSM now routes partial evidence from `REPAIR` back to `VALIDATE`. In the
-same state, deterministic validation policy also restores an executable
-validation tool if escalation had removed it; governor restrictions may reduce
-exploration, but cannot remove the active verification plane. A regression test
-covers the transition.
-
-### 2026-08-15 — preserve repair state after a wrong-phase tool call
-
-The next live run found a repair-loop edge. After the API POST timeout, the
-actor replayed a historical `run_command` call even though the FSM had entered
-product repair. Dispatch correctly rejected that call, but the generic
-command-plane recovery cleared `repair_required`, reopened validation, and let
-the same stale call repeat indefinitely.
-
-Recovery now distinguishes a malformed command during validation from a valid
-tool used in the wrong lifecycle phase. The latter preserves product-repair
-state and explicitly directs the actor to inspect and patch; the bounded repair
-budget can then force a mutation. This prevents a failed tool call from
-silently changing the FSM phase.
-
-### 2026-08-15 — localize blocked state-changing requests
-
-The live app run confirmed a useful product-level failure: health returned 200,
-but a POST request timed out. The small model repeatedly treated the healthy
-health response as proof that the failure was false and edited `/health`, even
-though the likely defect was in the state-changing handler or its lock/I/O path.
-
-Timeout repair feedback now distinguishes a reachable service whose
-state-changing request blocks. It tells the actor to inspect that handler for a
-deadlock, blocking lock, or I/O wait, preserve the passing health behavior, and
-make one targeted repair. This is a generic request-lifecycle heuristic, not a
-hardcoded Todo fix.
-
-### 2026-08-15 — make deterministic repair evidence outrank stale worker advice
-
-The live repair trace showed the 4B worker repeatedly calling a passing health
-check a false alarm and steering the actor toward `/health`, while the
-deterministic evidence identified a different request that timed out. The
-worker is advisory, but its stale diagnosis still influenced the actor's target.
-
-Repair prompts now append a deterministic authority clause after worker output:
-a failed or timed-out check cannot be dismissed because another check passed;
-the actor must preserve unrelated passing behavior and inspect the endpoint or
-artifact named by the failure packet. This is a general precedence rule, not a
-Todo-specific instruction.
-
-### 2026-08-15 — keep inspection-only checks in validation, not repair
-
-The next live confirmation found that a health-only check was correctly
-rejected as insufficient evidence, but the rejection entered product repair and
-removed `run_command`. The actor therefore could not perform the required
-full behavioral probe and kept replaying a blocked command.
-
-Inspection-only, output-only, zero-assertion, and setup-only results are now
-classified as probe-quality failures. They keep the FSM in validation, reopen
-an executable validation tool, and do not authorize product mutation. Actual
-assertion failures continue to enter repair.
-
-### 2026-08-15 — force a tool call at repair-recovery entry
-
-The latest real_app run localized the genuine POST timeout and reached the
-bounded repair-recovery state, but the actor spent its remaining turns in
-prose before emitting the targeted patch. Repair recovery already has a narrow
-mutation/finish registry, so waiting for the general no-action threshold adds
-no useful choice.
-
-When the FSM enters repair recovery under llama.cpp, the transport now requires
-an executable tool call immediately and gives it the same 4096-token reserve as
-the initial-action path. This is provider-boundary control, independent of task
-or model name; ordinary repair turns remain unchanged.
-
-### 2026-08-15 — frozen real_app passes end to end
-
-After the validation-plane and repair-authority fixes, the Qwen3.8-27B live
-run completed the frozen `real_app` task in four iterations and 254 seconds.
-The actor wrote one `server.py`, started it, and ran three executable checks.
-The checks covered health, HTML, POST creation, empty-title rejection, a second
-POST, and GET collection behavior. Independent grading passed, the lifecycle
-ended in `COMPLETE`, `finish_task` was called, and the scorecard was fully green:
-artifact passed, run completed, and handoff completed.
-
-This is the first clean end-to-end result for the harder multi-endpoint app
-workflow. The next task should be a different artifact shape rather than
-another Todo variation; `wifi_simulator` is next because it stresses a larger
-single-file UI, interactive controls, safety constraints, and static/runtime
-validation without external dependencies.
-
-### 2026-08-15 — wifi_simulator exposes a large-artifact capacity boundary
-
-The first live run on `wifi_simulator` timed out before the actor's first
-mutation. Its bounded verifier-repair pass read the grader and README, entered
-mutation recovery, but still produced no file before the provider timeout. The
-independent grader consequently found no `wifi-simulator.html`.
-
-This is not counted as a context or validation failure: the task asks a local
-27B model to emit a large polished single-file UI in one response, and the
-actor never reached a product mutation. The result establishes a useful
-capacity boundary. We are advancing to the smaller `3d_scene` artifact to
-separate artifact complexity from the generic orchestration path.
-
-### 2026-08-15 — model-free adversarial preflight catches control-plane edge cases
-
-We added offline adversarial cases so common orchestration failures are found
-without spending a real-model call. The corpus now covers diagnostic redirects
-(`2>/dev/null`, `2>&1`, and `>&2`), dynamic JavaScript filesystem writes,
-bracketed write methods, inline interpreter assertions, and fake evidence such
-as `python -c "print('assert passed')"`. The deterministic suite passes 120
-tests and `_run_preflight()` is green.
-
-The fixes are deliberately model-agnostic: argv boundaries are preserved at
-the classifier boundary, harmless diagnostic redirects are not mutations,
-dynamic write APIs are treated as mutations, and output-only interpreter calls
-cannot satisfy behavioral validation merely because their printed text contains
-words such as “assert” or “passed”. Use this preflight corpus before another
-long actor run; reserve live calls for cases that pass the control-plane checks.
-
-### 2026-08-15 — classify unreachable validation services as setup recovery
-
-The live `3d_scene` run wrote a valid `scene.html`, but the harness stopped its
-stale server after the mutation. The next validation received
-`ConnectionRefusedError`. The actor was entering product repair even though no
-request reached the artifact, which removed the process/command surface needed
-to restore validation.
-
-Connection-refused, failed-to-connect, URL-open connection, and explicit
-server-down signals now enter the setup plane. The actor may restore the
-validation target before changing product code. This preserves the artifact
-and keeps the rule generic: an unreachable validation target is an
-execution/setup failure, while a reachable target returning a bad result is a
-product failure.
-
-### 2026-08-15 — separate malformed inline probes from product syntax errors
-
-The final `3d_scene` trace exposed another generic boundary: the actor emitted
-a Python inline validation command containing `try:` after semicolons. Python
-reported `SyntaxError` against `File "<string>"`, so no application request
-was made. The old loop treated that as a product validation failure and could
-send the actor into unnecessary artifact repair.
-
-Tool-plane classification now recognizes syntax errors whose traceback target
-is `<string>` as malformed probe construction. It reopens validation and tells
-the actor to use a valid one-line command or a temporary multiline helper under
-`.agentic/`. Syntax errors naming an actual product file remain product
-failures. This keeps the distinction evidence-based rather than tied to the
-3D task or a particular application artifact.
-
-### 2026-08-15 — proactively execute validation helpers
-
-The longer `3d_scene` run produced a passing artifact and then wrote
-`.agentic/verify_scene.py`, but its 900-second budget expired before the actor
-could spend another model turn calling that helper. This was orchestration
-latency, not a reasoning requirement: the helper path and interpreter were
-already explicit.
-
-The engine now executes a newly written `.agentic/` helper immediately when it
-has a recognized safe extension (`.py` via `python3`, `.js`/`.cjs` via `node`,
-or `.sh` via `bash`). The generated command is fixed by the orchestrator and
-uses argv semantics; unknown extensions remain model-controlled. The helper's
-result flows through the normal validation contract, FSM, evidence ledger, and
-completion check, so this shortcut cannot declare success without accepted
-behavioral evidence. This removes one actor turn while preserving the generic
-validation boundary.
-
-### 2026-08-15 — keep weak web probes in validation recovery
-
-The first validation in the fresh `3d_scene` rerun fetched `scene.html` and
-returned HTTP 200, but it did not exercise an interaction. The contract
-correctly rejected it as “no interaction evidence”; the recovery classifier
-did not recognize that reason phrase, so the FSM escalated to product repair
-and blocked `run_command` while the actor still needed to run a real probe.
-
-`no interaction evidence` is now explicitly a probe-quality failure. It keeps
-the FSM in validation, preserves the artifact, and reopens the executable
-validation surface. This is a wording-independent plane rule: a successful
-readback is not a failed product behavior, regardless of whether the artifact
-is HTML, an API, a CLI, or a library.
-
-### 2026-08-15 — treat explicit checker failures as behavioral failures
-
-The next live `3d_scene` probe made a real HTTP request, but its checker caught
-the failed assertions and printed `checks: 15 failed: []` while returning exit
-code 0. The contract saw a clean process exit and categorized the result as
-weak evidence, so it did not produce a targeted repair packet.
-
-Validation now recognizes explicit checker-failure summaries (`AssertionError`,
-`tests failed`, `N failed`, and `checks: N failed`) even when the wrapper exits
-zero. Those results enter product repair; file readbacks and genuinely weak
-probes remain in validation recovery. The distinction is based on the observed
-failure shape, not on the task or model.
-
-### 2026-08-15 — avoid confusing HTTP `urlopen` with filesystem inspection
-
-The failed-check rerun also exposed a classifier false positive: the
-inspection heuristic looked for the substring `open(`, which appears inside
-`urllib.request.urlopen(`. A real HTTP probe could therefore be downgraded to
-file inspection before its response was assessed.
-
-The inline-reader rule now requires a function-boundary match for Python's
-filesystem `open`, while preserving `readFileSync`, `read_text`, and the other
-file-read forms. A standard-library HTTP `urlopen` probe is classified as
-validation. The adversarial suite now passes 124 tests.
-
-### 2026-08-15 — parse empty checker failure lists as success
-
-The next live 3D run found a grader parsing bug rather than an artifact bug.
-The checker output used the common summary form `checks: 15 failed: []`:
-fifteen checks were performed and the failure list was empty. A broad `N
-failed` match incorrectly treated that as a product failure, causing the actor
-to edit a working scene and consume recovery turns.
-
-The validation contract now removes the explicit empty-list form before looking
-for failure markers. A non-empty list still enters product repair. Checker
-summaries also count as interaction evidence for web artifacts when they report
-an HTTP status/content type. Regression tests cover both cases, the focused
-suite passes 124 tests, and the offline adversarial preflight remains green.
-
-### 2026-08-15 — verify the fix with a fresh Qwen3.8 real-model run
-
-The post-fix `3d_scene` benchmark passed with Qwen3.8-27B-4bit through the
-local MLX OpenAI-compatible server. The actor wrote the complete `scene.html`
-artifact in one mutation, started the local server, produced an initial HTTP
-200 readback, and was correctly required to run a stronger behavioral checker.
-The checker reported `ALL PASS` and the orchestrator completed the task without
-any repair mutation.
-
-Run metrics: 4 iterations, 4 tool calls, 1 mutation, 3 validations, 0
-validation failures, 0 repair entries, first mutation at 177.9 seconds, and
-297.6 seconds total. This verifies the engine's generic plane separation and
-completion behavior on a real model; it is not evidence that the 4B worker is
-contributing useful guidance here because the run recorded zero worker calls.
-
-### 2026-08-15 — reopen validation after a blocked validation call
-
-The WebSocket benchmark then exposed a lifecycle error. Qwen3.8 wrote correct
-server, browser, and dependency files, but its first generated smoke helper ran
-before a server had been started. When the actor attempted to recover, it used
-an invalid `run_command` argument shape. The engine correctly rejected that
-call, but incorrectly preserved product-repair mode and narrowed the next tool
-surface to `patch_file`/`write_file`. The actor consequently kept editing its
-helper instead of restoring validation; the repair counter also printed values
-past `3/3`.
-
-The controller now treats a rejected validation call as a distinct
-control-plane event. It clears product-repair mode, freezes product mutation,
-reopens `run_command`/`run_shell`, and requires a real behavioral check before
-any product edit is legal. The centralized FSM has an explicit
-`tool_plane_recovery` transition from ACT, VALIDATE, and REPAIR into VALIDATE.
-The deterministic suite now passes 125 tests and the offline preflight is green.
-The interrupted WebSocket trace is retained as the regression case; rerun it
-from the latest commit before evaluating the next failure.
-
-### 2026-08-15 — WebSocket rerun passes through tool-plane recovery
-
-The unchanged WebSocket benchmark was rerun from `b9e71da` with Qwen3.8-27B
-through the local MLX server. The actor initially made two orientation reads,
-wrote the repaired `server.js`, `index.html`, and `package.json`, installed
-`ws`, and generated a smoke helper. The first helper invocation failed because
-the server had not been started. The actor then attempted a malformed
-background command; the new FSM reopened validation, and the next correctly
-shaped command started the server.
-
-The first real probe exposed a race in the actor-generated helper, not in the
-server: its one-shot listener could be registered after the sender's own
-message arrived. The actor changed only `.agentic/smoke.js`, reran it, and the
-final checker reported all checks passed, including ping/pong, JSON message
-contract, XSS-safe text preservation, peer disconnect, malformed payload
-stability, and server survival. The independent grader completed successfully.
-
-Run metrics: 16 iterations, 16 tool calls, 5 total mutations (product files
-plus helper), 8 validations, 2 validation failures, 0 repair mutations, 6
-worker calls, 19 stale worker judgments, 760 seconds of engine time, and 764
-seconds wall time. This is a functional pass, but not yet an efficiency pass:
-the stale 4B advisory stream and repeated model turns remain the next generic
-optimization target. The worker did not control the final decision; the
-deterministic validation ledger did.
-
-### 2026-08-15 — make asynchronous 4B advice freshness-safe
-
-The WebSocket trace showed why the asynchronous worker was not helping: a
-delayed 4B diagnosis for an earlier event was rendered into later actor
-prompts. In that run the stale diagnosis said the server was still broken or
-that validation tools were unavailable even after newer deterministic events
-showed progress. The actor spent turns responding to the old diagnosis.
-
-The context manager now treats freshness as a hard boundary. If a worker
-judgment's event id is older than the latest event, the prompt receives only a
-deterministic local judgment for the latest event. The stale result is still
-counted for observability, but it cannot inject a failure class, target, or
-action. Synchronous triage checkpoints remain available when the orchestrator
-explicitly asks the 4B to classify a current failure. The stale metric now
-counts distinct stale event pairs rather than every repeated render.
-
-The focused deterministic suite remains at 125 passing tests and preflight is
-green. This change deliberately reduces the 4B's prompt authority to increase
-correctness; it does not remove the worker or its current-event advisory role.
-
-### 2026-08-15 — confirm freshness change on the real WebSocket benchmark
-
-The same WebSocket task was rerun from `3f98a88` with the same Qwen3.8-27B
-actor and MLX server. It passed with the unchanged independent grader. The
-actor wrote the three product/dependency files, generated a helper, recovered
-from the missing server and a blocked `process_status` call, then ran a real
-client exchange that passed connect, ping/pong, sender/peer broadcast,
-disconnect safety, malformed-payload stability, and final completion.
-
-The run completed in 11 iterations and 399 seconds, compared with 16
-iterations and 764 seconds for the immediately preceding run. It made 4
-mutations, 6 validations, and 1 validation failure; the 4B made 3 worker calls
-and produced 6 stale-result observations, but stale diagnoses were not placed
-in the actor prompt. This is a measured improvement in both reliability and
-latency, while preserving the worker as an advisory current-event component.
-
-### 2026-08-15 — allow one bounded process-status check
-
-The freshness-safe run still showed one avoidable control-plane rejection: the
-actor tried `process_status` after starting a managed server, but ordinary
-validation policy had removed that tool to prevent status-looping. The engine
-now exposes exactly one `process_status` call when it knows a managed
-background process is alive. The capability is removed after that call and is
-reset only when a later mutation causes a service restart.
-
-This keeps readiness inspection separate from behavioral evidence while
-removing a predictable false tool failure. The focused suite now passes 126
-tests and preflight remains green. Rerun the WebSocket task from the new commit
-to measure whether the bounded status capability removes a turn without
-reintroducing status loops.
-
-### 2026-08-15 — bounded status check verified live
-
-The WebSocket benchmark was rerun from `4f230f8` with the same actor and task.
-The actor received one legal `process_status` call, observed `RUNNING` and the
-server startup log, then ran the smoke helper. All six behavioral checks passed
-and the independent grader completed successfully.
-
-The run remained at 11 iterations and 399 seconds, so this change removed a
-false tool rejection but did not reduce model-turn latency. It reduced worker
-calls from 3 to 2 and kept stale-result observations at 6. The dominant cost
-is now the actor's first mutation at about 111 seconds and the subsequent
-Qwen3.8 calls, not context growth or recovery looping.
-
-### 2026-08-15 — distinguish zero-count test summaries from failures
-
-The frozen cascading repair run found another generic evidence-parser edge.
-After the actor fixed both code defects, the local runner returned the success
-summary `(True, 'Ran 1 function-style tests: 1 passed, 0 failed, 0 errors')`.
-The contract's broad `N failed` pattern interpreted `0 failed` as a failure and
-prevented completion even though the independent artifact was correct.
-
-The parser now removes only zero-count `0 failed` and `0 errors` terms before
-looking for positive failure markers. A positive error count still fails the
-contract. The focused suite now passes 127 tests and preflight is green. The
-cascading fixture remains unchanged and must be rerun from the new commit to
-verify the full two-repair/clean-exit workflow.
-
-### 2026-08-15 — cascading repair succeeds; strict iteration score remains open
-
-The unchanged cascading fixture was rerun from `354997e` with Qwen3.8-27B.
-The actor ran the broken test, inspected both supplied files, repaired the
-missing parenthesis, reran the test, repaired the string divisor, reran the
-test, and reached a clean `1 passed, 0 failed, 0 errors` result. The independent
-grader accepted the final artifact and `finish_task` was called. No supplied
-test file was changed.
-
-The run used 6 model iterations, 7 tool calls, 2 product mutations, and 3
-validations in 116 seconds. The benchmark record is intentionally marked
-`passed: false` because this fixture's strict workflow score requires raw
-iterations `<= 3`; the artifact and handoff themselves passed. Do not weaken or
-rewrite that fixture to make the metric green. The remaining engineering work
-is reducing turns for sequential failures through generic orchestration or
-better action batching, while preserving the visible cascading evidence.
-
-### 2026-08-15 — real Todo app finds a genuine deadlock and reaches a valid artifact
-
-The harder `real_app` workflow was run with the unchanged task and grader. The
-actor created a substantial 7.8 KB standard-library Todo app, served health and
-HTML correctly, and exposed a real POST deadlock: `create_task()` acquired a
-non-reentrant lock and called an ID helper that acquired the same lock again.
-The actor localized this from the POST timeout and patched the server twice;
-the final preserved workspace passes the independent grader, including health,
-HTML, POST creation, and GET collection behavior.
-
-The run nevertheless timed out at 900 seconds before the actor could restart
-the freshly patched service and receive final accepted evidence. This is a
-legitimate workflow failure, not a grader failure: artifact correctness is
-true, but handoff completion is false. The next generic optimization should
-make service restart and repeat-validation deterministic after a product
-mutation, so a valid final artifact is not stranded behind a slow model turn.
-
-### 2026-08-15 — deterministic managed-service refresh after mutation
-
-The service lifecycle now retains the exact argv, shell mode, and confined cwd
-used to start each managed background process. When product mutation succeeds,
-the orchestrator refreshes the live process automatically with that same
-command and tells the actor to run validation; it does not claim the behavior
-passed and does not invent a new startup command. If refresh fails, the actor
-receives the existing manual-restart recovery path.
-
-This directly addresses the Todo timeout's final stranded state while keeping
-process control generic and bounded. The deterministic suite remains at 127
-passing tests and preflight is green. The next real-app run should measure
-whether automatic refresh leaves enough model budget for the final HTTP check.
-
-### 2026-08-15 — bound repeated tool-plane recovery
-
-The first automatic-refresh rerun exposed a separate loop: after a timed-out
-POST check, the actor repeatedly submitted the same validation command while
-the FSM alternated between REPAIR and validation recovery. Each blocked retry
-reset repair mode, so the model never reached `patch_file`.
-
-The controller now grants one tool-plane recovery grace transition. If a second
-validation call is blocked or malformed, the FSM preserves REPAIR, removes
-command/process tools, and explicitly requires inspection followed by a
-targeted mutation. Successful mutation resets the grace counter. This is a
-model-agnostic convergence bound, not a task-specific rule. The deterministic
-suite remains at 127 passing tests; rerun the real Todo task from this commit
-to verify the deadlock repair can no longer be hidden by repeated probes.
-
-### 2026-08-15 — reset stale repair actions after blocked inspections
-
-The next Todo run exposed a more precise failure. After the POST timeout, the
-actor successfully read the empty process log once, then kept requesting the
-same `read_file` call after the repair policy had removed that tool. The engine
-rejected every replay, but the old assistant/tool tail remained in the actor
-context, so a forced tool call did not produce a mutation.
-
-The repair controller now detects engine-level rejection markers on inspection
-calls and enters the bounded recovery checkpoint immediately. That checkpoint
-keeps the original task, the last accepted mutation, the structured state, and
-the latest executable failure packet, while dropping stale action-selection
-messages. It offers only the legal targeted mutation surface and explicitly
-preserves supplied tests and validation artifacts. This is a generic context
-boundary, not a Todo-specific repair.
-
-Two regression tests cover the rejection classifier and stale-tail removal.
-The focused `tests/test_agent_tools.py` suite passes 106 tests. A repository-wide
-pytest collection is not currently a valid signal because the frozen SymPy
-13878 fixture is Python-legacy code (`collections.Mapping`) and fails during
-collection on Python 3.14; the engine suite remains green when selected
-explicitly. The next step is a fresh real Todo run to measure whether the
-checkpoint produces a patch instead of another rejected read.
-
-### 2026-08-15 — checkpoint verified; preserve managed-service handles
-
-The fresh Todo rerun verified the stale-action fix: after the POST timeout,
-the actor made a targeted `patch_file` mutation on the next repair turn. The
-orchestrator automatically stopped the old server and relaunched it, but the
-restart allocated a new public process handle. The actor still had the old
-handle in its context and a later status call therefore observed the expected
-stopped predecessor, creating a false validation failure.
-
-Managed service restart now preserves the original handle identity while
-replacing the underlying process record. Existing actor context remains valid,
-and a status call after restart observes the refreshed process rather than a
-stale predecessor. This is a generic process-lifecycle invariant. The focused
-suite passes 107 tests and the modified modules compile cleanly; rerun the
-unchanged Todo task to verify the full repair-to-validation path.
-
-### 2026-08-15 — broaden stale-action checkpoint to rejected commands
-
-The handle-preserving rerun removed the false process-handle diagnosis, but
-the actor then replayed the original POST validation command while the FSM was
-in product repair. Because `run_command` was intentionally unavailable in that
-state, the engine rejected it and the actor spent another repair turn on the
-same stale action.
-
-The checkpoint detector now covers all engine-rejected non-mutation actions,
-including commands, shell probes, process checks, and file inspections. A
-normal product failure or missing-file error still follows the ordinary
-repair path; only explicit lifecycle/tool-plane rejection triggers the fresh
-checkpoint. The focused suite remains at 107 passing tests. Rerun the
-unchanged Todo task to verify that the actor reaches the patch surface after a
-rejected validation replay.
-
-### 2026-08-15 — preserve repair intent across tool-plane recovery
-
-The generalized detector initially observed the rejected `process_status`,
-but the older tool-plane recovery branch cleared `repair_required` before the
-new checkpoint condition ran. The event was therefore logged correctly but
-still reopened ordinary validation instead of building the fresh mutation
-context.
-
-The detector now uses the immutable pre-dispatch repair snapshot when deciding
-whether a rejected non-mutation action occurred during repair. This preserves
-repair intent across FSM bookkeeping and keeps the checkpoint authoritative.
-The focused suite remains 107/107 and both modified modules compile. Run the
-unchanged Todo benchmark again; the expected trace is a checkpoint immediately
-after the first rejected status/command replay.
-
-### 2026-08-15 — allow recovery after a reopened validation state
-
-The next live run reached the new checkpoint detector, but the strict FSM
-raised an invalid transition: the earlier one-time tool-plane recovery had
-already moved the lifecycle from `REPAIR` to `VALIDATE`, while the preserved
-repair snapshot correctly requested bounded recovery.
-
-The FSM now explicitly permits `VALIDATE -> RECOVER` for this event. This does
-not open a new general transition; it preserves a repair intent that survived
-a temporary validation-plane reopen and routes it to the existing targeted
-mutation surface. The focused suite passes 108/108 and the modified modules
-compile cleanly. Rerun the unchanged Todo benchmark; the prior run stopped at
-the FSM guard before the actor could receive the checkpoint.
-
-### 2026-08-15 — retain repair flags when checkpointing after a blocked action
-
-The FSM transition fix allowed `VALIDATE -> RECOVER`, but the subsequent live
-turn showed that the older tool-plane branch had also cleared the boolean
-`repair_required`. `repair_recovery_mode` was true without its companion flag,
-so policy construction reopened the validation tools and the actor replayed
-the failed POST probe.
-
-When a rejected non-mutation action is detected using the pre-dispatch repair
-snapshot, the controller now restores both `validation_required` and
-`repair_required` before the next loop. The recovery mode therefore reaches the
-fresh checkpoint builder and its mutation-only tool surface. The focused suite
-remains 108/108 and compilation is clean. Rerun the unchanged Todo benchmark
-to verify the actor receives the checkpoint rather than another probe.
-
-### 2026-08-15 — preserve rejected mutation evidence in fresh checkpoints
-
-The next run reached the mutation-only checkpoint and forced `patch_file`, but
-the actor's proposed patch had invalid Python syntax. The engine rejected it
-without writing, then the actor repeated the same invalid patch because the
-fresh checkpoint retained only the last accepted mutation and the older POST
-failure; it had discarded the new syntax error.
-
-Rejected mutation results are now promoted into the current repair packet with
-an explicit instruction to change the patch. This keeps the checkpoint bounded
-while preserving the newest evidence needed to correct a malformed edit. The
-focused suite remains 108/108 and compilation is clean. Rerun the unchanged
-Todo task to verify malformed repair attempts converge instead of repeating.
-
-### 2026-08-15 — clean Todo benchmark passes end to end
-
-After freeing the verifier's reserved port, the unchanged Todo benchmark passed
-with Qwen3.8-27B through the MLX/llama.cpp-compatible endpoint. The actor made
-one initial product mutation, ran the managed service, executed the required
-HTTP checks, improved the probe after the deterministic response-shape guard,
-and reached independent completion.
-
-Measured result: 5 model iterations, 5 tool calls, 1 mutation, 4 accepted
-validations, 308.9 seconds, artifact grader pass, `finish_task` pass, and clean
-run completion. The asynchronous 4B made zero calls because this trajectory did
-not produce a repeated-action signal; it did not add latency or authority.
-The earlier failed verifier result was environmental contamination from the
-scene preview occupying port 18765, not a product or engine failure. The next
-benchmark should use a fresh isolated port policy before testing another task.
-
-### 2026-08-15 — WebSocket recovery regression passes
-
-The unchanged WebSocket chat benchmark was rerun after the repair-checkpoint
-changes. The actor first inspected the two supplied files, created the server
-and browser fixes, installed the declared `ws` dependency, and wrote a smoke
-helper. Its first smoke invocation ran before the server was started; the
-resulting blocked start attempt exercised the new rejected-action checkpoint.
-The actor then rewrote the server, started it, inspected the managed process,
-and ran the complete smoke suite.
-
-All required checks passed: two clients connected, ping/pong worked, sender and
-peer received the shared payload, malformed input did not crash the server, and
-broadcast survived a peer disconnect. The benchmark passed independently in
-12 model iterations, 15 tool calls, 1 repair mutation, 6 accepted validations,
-455.7 seconds, with 3 asynchronous 4B calls and 7 stale-judgment observations.
-This is a capability pass, not a speed improvement over the earlier 11-turn /
-399-second run; the extra time came from the actor's setup-before-server-smoke
-mistake. The important evidence is that the generic checkpoint recovered it
-without altering the fixture or grader.
-
-### 2026-08-15 — cascading repair rerun confirms artifact capability
-
-The frozen cascading dependency test was rerun after the checkpoint changes.
-The actor repaired the missing parenthesis, reran the supplied test, repaired
-the string divisor, reran it again, and reached `1 passed, 0 failed, 0 errors`.
-The independent artifact check and `finish_task` both passed. The run used 6
-model iterations, 7 tool calls, 2 product mutations, 3 accepted validations,
-and 123.9 seconds; no asynchronous 4B call was needed because the trajectory
-did not repeat an action.
-
-The benchmark remains `passed: false` only because its deliberate strict
-workflow score requires no more than 3 raw model iterations. This is an
-efficiency miss, not an implementation or completion failure. The fixture was
-left unchanged. Reducing the two-repair sequence below that threshold is the
-next optimization problem, but any change must remain generic and preserve
-fresh failure evidence between sequential defects.
-
-### 2026-08-15 — source-backed repair and test-first convergence pass
-
-The next optimization cycle targeted wasted control-plane turns rather than
-the cascading fixture. The validation contract now extracts a small source
-excerpt around a traceback location, after resolving and confining the path to
-the agent workspace. That excerpt is included in the bounded repair packet.
-When it has trustworthy source evidence, the repair policy removes read,
-diff, and status detours and leaves a mutation surface. A per-turn tool
-contract is appended after all lifecycle restrictions so a stale tool name in
-the original prompt cannot override the current FSM state. Recovery uses the
-same mutation-only surface.
-
-After a failed `run_tests` call, the engine retains its exact invocation and
-reruns it automatically after a successful product mutation. This is a
-bounded deterministic validation hook; it does not invent a command or edit
-the workspace. The `--action-first` policy now chooses `run_tests` first when
-conventional test artifacts are present, while workspaces without tests keep
-their normal discovery surface. Absolute provider/runtime paths such as
-`/opt/.../test_metrics.py` are excluded from API endpoint extraction, and the
-model-free runner assertion accepts either pytest or the dependency-free
-function-test fallback.
-
-Deterministic evidence after these changes: 135 focused tests pass, the
-adversarial preflight passes, and compilation is clean. A live Qwen3.8-27B
-MLX run against the unchanged cascading fixture then met the strict scorecard:
-3 actor iterations, 3 reported tool calls, one product mutation, automatic
-revalidation, independent artifact pass, `finish_task` pass, and 32.0 seconds.
-The model emitted one stale `read_file` request; dispatch rejected it, the FSM
-entered bounded recovery, and the next forced mutation repaired both defects.
-This is the first strict `passed: true` cascade record, not a grader or fixture
-change. The monitor is
-`state/benchmark/agentic/monitor-cascading_loop-novelty-1786820299319808000.jsonl`.
-
-During the cycle the MLX server log showed Metal out-of-memory failures after
-long repeated runs. The known server was restarted with `--prompt-cache-size
-1`; the endpoint recovered and the passing run completed. If generation
-timeouts recur, inspect the server log for GPU memory before changing agent
-logic. The 4B worker made zero calls on this short trajectory because the
-deterministic local recovery signal was sufficient.
-
-The next generic capability to evaluate is actor-critic test generation: the
-actor may propose a focused test, deterministic policy must reject weak or
-self-serving tests, the 4B may critique coverage, and an independent grader
-must remain authoritative. Do not let generated tests replace supplied tests
-or become the sole proof of correctness.
-
-### 2026-08-15 — make the frozen SymPy runner executable on modern Python
-
-The SymPy 13878 source is from a Python-legacy commit and imports ABC names
-removed from `collections`. The first preflight confirmed that the code
-collects correctly under the host pytest only when the existing compatibility
-shim is loaded. The runner already used that shim in its independent grader,
-but the actor's own focused commands did not inherit it; this could turn a
-valid repair into a setup failure before the model reached product behavior.
-
-`swebench_runner.py` now creates the same shim in an external temporary
-directory and prepends that directory to the actor subprocess's `PYTHONPATH`.
-The candidate workspace remains a clean copy of the frozen repository; the
-shim is not an agent mutation and is never included in the official-style
-grader artifact. A direct preflight now collects `test_arcsin` successfully.
-This is verification-environment compatibility, not a SymPy-specific branch
-in NoveltyEngine's control loop.
-
-### 2026-08-15 — SymPy 13878 live run exposes a generic convergence stall
-
-The first live Qwen3.8-27B run against the unchanged SymPy 13878 fixture was
-stopped after it became unresponsive at actor iteration 18. The candidate had
-only two mutations, both irrelevant duplicate import edits; none of the twelve
-requested `_cdf` implementations had changed. It had recorded 13 validations,
-5 asynchronous 4B calls, and 13 stale-judgment observations. The runner and
-actor were idle with an open model HTTP connection, so this was a real
-transport/convergence stall rather than useful model computation. The exact
-candidate and `status.json` were preserved at
-`/var/folders/6t/fr_n2v_n7zb6nd_nq74t38240000gn/T/sympy-13878-novelty-1786820466-m3y0xgo0`.
-
-The trace also confirms that actor-critic test generation should not be the
-immediate next feature. First make repair convergence reliable when the actor
-has executable evidence: synchronous 4B triage must be a bounded gate, stale
-advice must never steer the actor, and irrelevant or duplicate mutations need
-generic quality checks. Generated tests can follow as a proposal/critique
-capability only after the independent verifier remains authoritative.
-
-### 2026-08-15 — supersede stale asynchronous worker calls at repair gates
-
-The SymPy trace showed why asynchronous advice was ineffective: a repair
-checkpoint could arrive while an older 4B process was still evaluating a prior
-event. The old implementation returned a local fallback but left the old
-worker and its coalesced event alive, so the next turns accumulated stale
-judgments.
-
-`NoveltyContext.synchronous_triage()` now cancels the obsolete killable worker
-and drops its pending older event before starting the current failure
-checkpoint. If the fresh worker exceeds the bounded triage timeout, the
-orchestrator cancels it as well and keeps the deterministic local diagnosis.
-In-process test callables remain non-interruptible and continue to use the
-safe fallback path. This changes scheduling only; it does not make a model
-name, task, or benchmark authoritative.
-
-Focused deterministic regression: 114 tests pass after this change.
-
-The real-model cascading regression also passed unchanged: Qwen3.8-27B
-completed the two-defect fixture in 3 iterations and 36.9 seconds, with one
-mutation, two accepted validations, an independent artifact pass, and a valid
-completion signal. The 4B made one call with no worker failure. This short run
-did not have an overlapping live worker at the repair boundary
-(`worker_busy_drops=0`), so it validates compatibility of the new scheduler
-but not the cancellation branch itself. Its monitor is
-`state/benchmark/agentic/monitor-cascading_loop-novelty-1786821348050935000.jsonl`.
-
-### 2026-08-15 — bounded SymPy rerun confirms a validation-only plateau
-
-After the stale-worker scheduler change, a second real Qwen3.8-27B run was
-allowed 20 iterations with action critic/gate enabled. It reached iteration 13
-before the actor request stalled. The candidate had two irrelevant import
-mutations and zero of the twelve requested `_cdf` implementations. The six
-`_cdf` methods visible in the file were pre-existing methods for unrelated
-distributions, not work produced by the actor. Independent grading of the
-preserved candidate passed 19 of the 20 selected tests; only the intended
-`test_arcsin` remained failing. This is a convergence failure, not substantial
-SymPy implementation progress.
-
-The run then stopped while waiting on an established llama.cpp HTTP request;
-the actor had not regained control after more than the configured 60-second
-turn boundary. The next generic repair is now in `agent.py`: llama.cpp calls
-retain their transport timeout and also run under a hard `SIGALRM` wall-clock
-guard, converting a stalled generation into the existing bounded model-error
-path. This does not assume a particular model or task. The candidate and
-status are preserved at
-`/var/folders/6t/fr_n2v_n7zb6nd_nq74t38240000gn/T/sympy-13878-novelty-1786821405-duozmkqs`.
-
-Deterministic regression after the timeout guard: 136 focused tests pass, 35
-subtests pass, and all edited modules compile.
-
-The bounded verification run proved the timeout behavior: it exited cleanly in
-154.5 seconds at iteration 7 with the explicit `llama.cpp chat exceeded 30.0s`
-error. Before that boundary, the actor had one import mutation and zero new
-`_cdf` methods; its setup probe used the host `python` and reported missing
-`mpmath`. The independent grader still passed 19/20 selected tests because
-the base checkout already passed those tests. This is a runner environment
-mismatch, not product evidence.
-
-`swebench_runner.py` now prepends the interpreter directory of the configured
-agent Python to `PATH` and sets `VIRTUAL_ENV` for the actor subprocess. That
-makes ordinary `python` and `pip` tool calls resolve to the same environment
-used by the agent and grader, while retaining the external legacy compatibility
-shim. This is a generic execution-contract repair, not a SymPy-specific rule.
-
-The first verification caught an implementation detail: using
-`Path(sys.executable).resolve()` followed the virtualenv symlink back to the
-host Python directory, so the actor still found the wrong `python`. The runner
-now preserves the configured executable's own `bin` directory with
-`Path(sys.executable).absolute().parent`; this keeps the virtualenv tools first
-even when its interpreter is symlinked. The same short run exercised stale
-worker cancellation (`worker_busy_drops=1`) but produced no requested method
-implementation before the bounded timeout.
-
-### 2026-08-15 — short environment-contract verification
-
-A six-iteration real-model check after the symlink correction confirmed the
-runner starts the unchanged SymPy checkout normally and the independent grader
-still reports 19/20 selected tests on the unchanged/irrelevantly edited base
-candidate. The
-actor issued one workspace inspection, then its second Qwen request exceeded
-the deliberately short 20-second turn limit before it could issue a Python
-dependency probe. This is a clean bounded timeout and does not invalidate the
-environment correction; the direct contract probe above confirms that the
-actor environment resolves the configured `python`, `pip`, and `mpmath`.
-
-### 2026-08-15 — cascade remains a strict real-model pass after runner fixes
-
-The frozen cascading repair benchmark was rerun with Qwen3.8-27B through
-llama.cpp, the asynchronous qwen3.5:4b worker, action critic, and action gate.
-It passed unchanged in 3 iterations and 37.1 seconds: one product mutation,
-two accepted validations including the deterministic automatic retest, an
-independent artifact pass, and a valid completion signal. The monitor is
-`state/benchmark/agentic/monitor-cascading_loop-novelty-1786822609902261000.jsonl`.
-The worker produced stale advisory observations on this short run, but the
-deterministic FSM and completion verifier remained authoritative.
-
-After the validation-only gate change, the same cascade still passed strictly
-in 3 iterations and 38.2 seconds. This run exercised the stale-worker
-cancellation path (`worker_busy_drops=1`) while preserving one mutation, two
-accepted validations, independent artifact grading, and completion. Its
-monitor is
-`state/benchmark/agentic/monitor-cascading_loop-novelty-1786823689670615000.jsonl`.
-### 2026-08-15 — bound independent grading of hanging candidates
-
-The 20-iteration SymPy run reached its budget with no requested `_cdf`
-implementation, but the independent grader then hung in `test_arcsin`: that is the
-known behavior being repaired, and the candidate had not implemented Arcsin's
-CDF. The runner previously allowed the grader subprocess 900 seconds, making a
-single failing/hanging test dominate the entire cycle.
-
-`swebench_runner.py` now gives grading its own configurable wall-clock budget
-(`--grade-timeout`, default 120 seconds), catches `TimeoutExpired`, and records
-`timed_out`, `timeout_seconds`, and return code 124 in the report. This keeps
-the agent and grader failure planes separate and is generic harness behavior,
-not a SymPy-specific verdict.
-
-### 2026-08-15 — close validation-only progress loops
-
-The completed 20-iteration trace showed one import mutation followed by 16
-validation events and no requested product change. `NoveltyContext.requires_progress()`
-had treated any recent validation as an exemption, which was correct for
-avoiding premature edits but also allowed endless checking after an irrelevant
-mutation.
-
-The policy now requires a mutation or explicit completion after the bounded
-event window; validation is evidence, not state-changing progress. The legal
-progress surface still includes `finish_task`, so verification-only tasks can
-complete without editing code. Deterministic coverage is now 137 focused tests
-and 35 subtests.
-
-The same trace exposed a metrics defect: the frozen SymPy runner requested
-public names such as `Arcsin`, while the source defines implementation classes
-such as `ArcsinDistribution`; the status file therefore showed every target as
-false even when a method existed. `status_report.classes_with_method()` now
-resolves that conventional suffix generically, with a regression test. Full
-deterministic coverage is now 138 tests and 35 subtests.
-
-The next 12-turn SymPy run showed the remaining control gap: after the first
-irrelevant mutation, the actor repeated the identical non-asserting
-`run_command` four times. The event-window gate could not fire until the next
-turn because the old mutation was still inside its eight-event window.
-
-`NoveltyContext.requires_progress()` now interrupts two identical validation
-calls immediately when no mutation separates them, while retaining the
-bounded-window behavior for broader exploration/validation loops. The
-progress surface still permits a focused mutation or `finish_task`; no model
-or task name is involved. Full deterministic coverage is now 139 tests and 35
-subtests.
-
-The follow-up 12-turn SymPy run confirmed that the first repeated-probe fix
-triggered, but the actor then substituted a different inspection command
-(`git diff`) rather than editing. The novelty gate now detects the repeated
-validation state before building the per-turn tool list and removes validation,
-inspection, and recall tools entirely; only `patch_file`, `write_file`, and
-`finish_task` remain. This makes the control-plane boundary enforceable rather
-than advisory. Deterministic coverage remains 139 tests and 35 subtests.
-
-The next verification showed why that boundary still did not fire: internal
-`repair_checkpoint` events were interleaved between the actor's repeated tool
-events, so adjacency over the raw ledger hid the duplicate validation. The
-detector now compares adjacent actor tool events while ignoring internal
-checkpoint records. The regression suite includes this interleaving case.
-
-The following live trace still reported the worker's deterministic
-`duplicate_action: true` signal while the stricter validation classification
-did not consistently match the full provider argument shape. The gate now also
-uses identical event fingerprints for adjacent non-mutating actor actions,
-while never treating a mutation as a duplicate-progress failure. This closes
-the provider-format loophole without inspecting model names or task text.
-
-The next frozen SymPy run completed cleanly in 318.5 seconds with the bounded
-10-second independent grader. It still made one irrelevant mutation, added zero
-of the twelve requested `_cdf` methods, and graded 19/20 selected tests. The
-trace confirmed a small implementation mismatch: `requires_progress()` saw the
-duplicate fingerprint, but the method used by the tool gate still required an
-explicit validation label. `repeated_validation_loop()` now uses the same
-fingerprint rule as `requires_progress()`, and a regression test covers an
-unlabeled repeated command. The deterministic suite is 140 tests and 35
-subtests. This is a generic consistency fix; it does not encode SymPy names or
-formulas. The next live run must use the new commit before judging whether the
-tool surface now forces a mutation.
-
-### 2026-08-15 — make the progress gate final
-
-The next 16-turn run used commit `89f687b` and still made one irrelevant
-mutation, zero requested `_cdf` additions, and eleven validations. The novelty
-gate had correctly detected the exhausted no-mutation window, but a later
-validation-policy branch rebuilt `tools_for_call` and restored `run_command` and
-`run_tests`. The model therefore continued validating even though the earlier
-gate had narrowed the surface. The independent grader was bounded correctly
-and timed out after 10 seconds on the unchanged Arcsin behavior; this is not a
-grader hang.
-
-`agent.py` now applies the novelty progress restriction after all lifecycle and
-validation policies, immediately before the authoritative current-tool
-contract is rendered. Once the context window is exhausted, validation is not
-counted as progress: only `patch_file`, `write_file`, and `finish_task` remain.
-Targeted reads remain available only inside the orientation window, unless a
-duplicate non-mutating action already occurred. This is a final-assembly
-invariant, independent of model, provider, or task. A regression test covers
-the mutation-only surface, and deterministic coverage is now 141 tests and 35
-subtests. The next real SymPy run must verify that the actor can no longer
-escape the gate by selecting another validation command.
-
-The following 16-turn run demonstrated that enforcement change: after the
-stale validation window, validation stopped and the actor made a second
-mutation. However, the mutation was a self-authored `.agentic/validate_cdf.py`
-helper rather than a product method. Its first execution failed with
-`ModuleNotFoundError: sympy` because Python sets a nested script's import path
-to `.agentic/`, not the workspace root. The run ended cleanly after 641.8
-seconds with two mutations, eight validations, zero requested `_cdf` methods,
-and an independent 19/20 grade. This is a useful partial result: the final
-gate now forces action, but the execution environment prevented the helper from
-producing useful failure evidence soon enough.
-
-`kernel/exec_tools.py` now gives agent-launched direct commands, shell commands,
-and managed background restarts a project-local `PYTHONPATH` containing both
-the workspace root and requested working directory. A regression test executes
-a helper below `.agentic/` that imports a package from the workspace. This is
-language/tooling infrastructure, not a SymPy exception. Deterministic coverage
-is now 142 tests and 35 subtests. Rerun the unchanged frozen benchmark before
-making another policy change.
-
-The rerun from `c107436` confirmed the command-environment repair. The
-actor-authored `.agentic/validate_cdf.py` imported the workspace SymPy source;
-the previous `ModuleNotFoundError` disappeared. The helper then failed on its
-own assertion expression (`S.pi` instead of `pi`), which the independent trace
-correctly classified as a behavioral checker failure rather than setup. The
-run ended at the 16-turn budget after 692.6 seconds with two mutations, seven
-validations, one stale-worker cancellation, zero requested `_cdf` methods, and
-a 19/20 independent grade. The final repair call hit the explicit 90-second
-llama.cpp wall-clock guard, so the process terminated cleanly.
-
-This separates two concerns: workspace imports are fixed; the actor still
-spends its forced mutation on a large self-authored checker and then has too
-little effective repair time to reach product code. The next generic change
-should make source-backed repair packets smaller and prioritize the exact
-failing source expression, while preserving the independent grader and frozen
-fixture. Do not add SymPy formulas or special-case `S.pi`.
-
-The next generic repair change is now implemented. When a trustworthy
-traceback already supplies a safe source excerpt, `agent.py` replaces the full
-historical action transcript with a compact source-backed repair checkpoint.
-It keeps the stable task foundation, bounded failure packet, and mutation
-contract, while dropping stale validation plans and old tool results that can
-consume the actor's context and attention. The normal fallback checkpoint is
-unchanged for failures without safe localization. A regression test covers the
-new prompt boundary; deterministic coverage is now 143 tests and 35 subtests.
-Run the frozen benchmark from the resulting commit before changing the policy
-again.
-
-The rerun from `9b34f4d` validated the compact repair path. The source-backed
-repair prompt was 2,207 tokens (down from 7,085), and the actor made a
-targeted repair instead of timing out. It still repaired only its temporary
-`.agentic/validate_cdf.py` helper, then exhausted the 16-turn budget before a
-product mutation; the independent grade remained 19/20 with zero requested
-`_cdf` methods. The run took 619.5 seconds, with three recorded mutations and
-seven validations. This is a latency/context improvement, not yet a capability
-pass.
-
-The next generic guard is now implemented: when the novelty progress gate is
-active, a successful write or patch below the reserved `.agentic/` validation
-area cannot count as product progress. Dispatch returns a clear rejection and
-the novelty ledger ignores rejected/helper mutations when deciding whether the
-actor has progressed. Helper files remain legal during ordinary validation,
-so this does not remove useful test construction; it only prevents a temporary
-checker from satisfying a mutation-required boundary. Deterministic coverage
-is now 144 tests and 35 subtests. The next live run must verify this guard with
-the unchanged fixture.
-
-The rerun from `777bed9` confirmed that the helper guard itself is correct:
-the actor's `.agentic/verify_cdf.py` writes were rejected on iterations 14–16,
-and the novelty ledger recorded only one real mutation. The actor nevertheless
-replayed the stale `write_file` call, so the run ended at 16 turns with eight
-validations, zero requested methods, and a bounded 19/20 grade (the grader
-timed out at its 10-second limit). This is now a tool-selection recovery
-problem, not silent helper progress.
-
-The engine now remembers rejected helper paths while the run is active. On the
-next gated turn it removes `write_file` from the current contract, leaves
-`patch_file` available for the product source, and adds an explicit recovery
-message. The ledger already ignores rejected/helper mutations. Deterministic
-coverage is now 145 tests and 35 subtests. Rerun the unchanged benchmark from
-the new commit; success evidence is a product-path mutation or an honest
-completion attempt after the helper capability disappears.
-
-The next recovery refinement is committed and pushed as `7fcb89e` (`Use explicit product mutation recovery tools`). After a validation-helper mutation is rejected, the novelty gate now removes both generic `patch_file` and `write_file` from the active contract and offers `patch_product_file` / `write_product_file` instead. These aliases are ordinary mutations to the governor, but reject `.agentic/` helper paths themselves. This addresses the observed failure mode where the actor ignored the warning and replayed `patch_file` against the same helper. The aliases remain in the trusted registry but are not offered during ordinary turns. Deterministic coverage remained `145 passed, 35 subtests passed`.
-
-The unchanged real SymPy run from `7fcb89e` was started with Qwen3.8-27B through the local MLX OpenAI-compatible server, the qwen3.5:4b worker, action critic/gate, and a 16-iteration budget. It reached iteration 11/16 with one mutation, seven validations, four worker judgments, and no requested `_cdf` methods. At iteration 11 the actor call remained connected to the model server beyond the configured 90-second wall-clock limit; the status file stopped advancing. The benchmark was terminated after approximately seven minutes to avoid leaving a stale request running. No independent grader result was produced, so this is an incomplete run, not a capability pass. The next generic repair target is timeout observability/enforcement and clean recovery from a stalled provider call; do not change the SymPy fixture or add task-specific formulas.
-
-The follow-up correction is committed and pushed as `35b8e63` (`Defer product recovery tools until needed`). The product-scoped aliases are no longer present in the ordinary registry: the initial real-model run reported the expected 17 tools, and the aliases are injected only after the novelty gate records a rejected helper mutation. The deterministic suite remained `145 passed, 35 subtests passed`.
-
-The real-model cascading repair benchmark was rerun after this correction with Qwen3.8-27B through MLX, qwen3.5:4b novelty worker, action critic/gate, and action-first mode. It passed in `3` iterations and `29.1s`: the actor made one product mutation, the proactive hook reran the failed test, independent validation passed, and `finish_task` completed the run. This confirms the deferred recovery surface does not regress the frozen multi-step repair workflow. SymPy 13878 remains unresolved; the next live test should use a bounded timeout and inspect the provider-call stall before changing product-repair policy.
-
-The next generic recovery change is committed and pushed as `adb590e` (`Escalate weak probes to the test runner`). After a successful executable probe produces no assertion or behavioral evidence in a workspace containing test artifacts, the engine now offers only `run_tests` and `finish_task`. This prevents repeated print/version probes from consuming the remaining repair budget. The unchanged cascading benchmark still passed in 3 iterations and about 29.9 seconds; deterministic coverage was `146 passed, 35 subtests passed`.
-
-The following runner correction is committed and pushed as `12c8f7f` (`Preserve project imports during test discovery`). `run_tests` now adds the active project root during nested-package discovery, normalizes macOS `/var` symlinks, and avoids evicting loaded packages merely because they contain `__init__.py`. Deterministic coverage is `147 passed, 35 subtests passed`.
-
-The short SymPy verification run from `12c8f7f` was intentionally stopped before completion to keep the cycle lean. The earlier false `ModuleNotFoundError: sympy` did not recur; the runner reached real validation. The actor made one mutation and reached iteration 7 with three validations, one 4B judgment, and no requested `_cdf` methods. It then exposed a separate generic command-boundary error: `path escapes the sandbox root` caused by an actor-issued command resolving to `/`. This run is incomplete and is not a SymPy capability result. Do not add SymPy- or NumPy-specific code; if this benchmark is resumed, first fix the generic relative-path/command validation contract or use a shorter cascading benchmark to validate that change.
-
-### 2026-08-15 — add a host-controlled multi-file transaction buffer
-
-The dirty worktree now contains a model-free `TransactionBuffer`. It tracks
-accepted root-relative product mutations in a private set, excludes supplied
-tests, dependency manifests, temporary `.agentic` helpers, and cache paths,
-and exposes only bounded metrics plus a short host-generated status block to
-the actor. It does not write files, call a model, or create a second FSM.
-
-The buffer opens on the first accepted product mutation, preserves that edit
-when the next validation fails, permits one bounded follow-up repair turn, and
-clears only after authoritative validation succeeds. Expiration enters the
-existing recovery path without automatically deleting product work; the
-existing `RiskLayer` remains the only component with rollback capability.
-Normal failed product validation still does not roll back. Protected supplied
-test edits and destructive rewrites retain their existing narrow rollback
-guards.
-
-The repair checkpoint was also corrected to preserve the latest focused
-`read_file`/inspection results when broad history is compacted. A test-only
-pytest traceback no longer counts as product source evidence, and successful
-commands whose output is only a file listing are rejected as behavioral
-validation. These are generic evidence and context fixes, not benchmark- or
-model-specific rules.
-
-Deterministic evidence after these changes: `156 passed, 35 subtests passed`.
-The explicit offline two-file transaction test now requires removal of the old
-property, addition of the new property, alignment of the dependent module,
-preservation through the intermediate failure, and buffer cleanup after the
-final pass.
-
-The clean real-model run used Qwen3.8-27B-4bit through the local MLX server,
-qwen3.5:4b as the asynchronous worker, and action critic/gate mode. The actor
-read the files, changed `core_math.py`, received a failed validation, the
-transaction buffer preserved that edit and reported `core_math.py`, then the
-actor changed `matrix_solver.py` and passed the final test. Artifact and
-completion evidence passed in 7 iterations with 2 product mutations and 3
-validations. The benchmark workflow score was intentionally recorded as
-false because its fixed six-iteration target was missed by one; do not lower
-or rewrite that threshold merely to manufacture a pass. The result proves the
-transaction behavior works, but not yet that it meets the benchmark's speed
-budget.
-
-The preceding stale run, started before the final verifier correction, is not
-evidence against the new buffer: it never made a product mutation and was
-fooled by a file-listing helper. The clean run is the authoritative behavioral
-evidence for this change. Next work should be a generic way to measure and,
-if justified, reduce unnecessary orientation/validation turns without
-injecting the expected two-file patch or changing the fixture.
-
-The implementation checkpoint is commit `65bc175` (`Validate completed
-multi-file transactions immediately`), following the transaction
-implementation in `2266a44`. The benchmark result JSONL and historical
-monitor logs remain local evidence rather than source changes.
-
-### 2026-08-15 — narrow proactive-validation deferral
-
-The transaction hook initially used `validation_required and repair_required`
-as its deferral condition. That was too broad: it suppressed the fast
-validate-after-mutation hook for ordinary single-file repairs as well as
-multi-file transactions. `_transaction_window_open()` now defers only when a
-host transaction is already active or an explicit related-mutation batch has
-more than one remaining mutation. A normal first repair mutation retains
-proactive validation.
-
-The regression test covers both sides of this boundary. The full deterministic
-suite is now `157 passed, 35 subtests passed`. Two post-change cascading runs
-completed the artifact correctly through bounded verifier repair but missed
-the strict three-iteration workflow target; this is an honest timing/model
-trajectory miss, not evidence that the product repair failed. The next clean
-multi-file run should verify that the narrower hook still preserves File A
-through its intermediate failure and allows File B to complete the repair.
-
-### 2026-08-15 — validate immediately after the second transaction file
-
-The transaction deferral predicate now considers the current turn's pending
-product paths. It continues to defer validation while a transaction has only
-one known product file, but once the current mutation adds a second distinct
-product file, it immediately replays the known failed test in the same turn.
-This removes the unnecessary extra actor turn after the transaction bridge is
-complete. It is based only on host path state and applies to any language or
-task.
-
-Deterministic evidence remains `157 passed, 35 subtests passed`. The clean
-real-model run used Qwen3.8-27B-4bit, qwen3.5:4b, action critic/gate, and a
-60-second per-call model ceiling. It changed `core_math.py`, preserved it
-through the intermediate failure, changed `matrix_solver.py`, immediately
-reran the failed test after that second mutation, and passed in **5
-iterations** against the strict target of 6. Metrics: 2 product mutations, 3
-validations, 3 worker calls, 5 stale judgments, 95.6 seconds. The transaction
-buffer ended inactive with an empty file set. This is a full workflow pass,
-not merely an artifact pass.
-
-### 2026-08-15 — progress-gate regression run after `f13d82a`
-
-After restoring the local MLX server, the frozen cascading benchmark reached a
-different and informative path. On repair iteration 2 the actor replayed a
-stale `read_file` call; the dispatcher rejected it because the current
-contract was mutation-only. The host then entered bounded repair recovery, and
-the llama.cpp provider-level `tool_choice=required` boundary forced a legal
-`patch_file` call on the next turn. The actor corrected both defects and the
-independent artifact grader passed.
-
-The run used 4 iterations and therefore missed the strict 3-iteration
-workflow target; `finish_task` was not reached before the budget ended. This is
-an artifact pass and workflow miss, not a benchmark pass. Metrics were 2
-mutations, 2 validations, 7 novelty events, 2 worker calls, 4 stale
-judgments, 1 worker-busy drop, and 66.7 seconds. The result confirms the new
-boundary prevents stale inspection from executing, but it does not yet reduce
-the model's repair latency enough to guarantee the tight cascade budget.
-
-The subsequent run after the bounded-recovery counter fix produced the same
-artifact-pass/workflow-miss pattern: 4 iterations, 2 mutations, 2
-validations, 4 stale worker judgments, 1 worker-busy drop, and 67.4 seconds.
-The new counter is correct for orientation recovery, but this cascade's stale
-read occurs in the source-backed repair phase, so it remains a separate
-repair-turn economy problem. The actor corrected the syntax and type defects;
-it simply reached the iteration limit before the final check and completion
-handoff.
-
-The clean multi-file rerun after the server was restored passed end to end in
-5 iterations and 97.3 seconds. It used 2 product mutations, 3 validations,
-and 3 worker calls; the worker produced 5 stale judgments but no busy drop.
-The actor preserved `core_math.py` through the intermediate failure, changed
-`matrix_solver.py`, and the host immediately replayed the known failed test.
-The independent grader passed, the engine reached its own `DONE` state, and
-the transaction buffer ended inactive with no tracked files. This is the
-authoritative real-model evidence for the transaction design after `f13d82a`.
-
-### 2026-08-15 — retry stale tool calls inside the same turn
-
-The MLX server accepts a required-tool request but does not enforce the tool
-name. The actor therefore sometimes emitted a remembered `read_file` even
-when the host contract (the currently allowed tool list) contained only
-mutation tools. The dispatcher correctly rejected it, but waiting for the next
-iteration wasted a full model decision cycle.
-
-The agent now performs one bounded in-turn contract retry: it tells the actor
-which emitted name was unavailable and asks for exactly one name from the
-current host list. The invalid call is neither executed nor added to the
-conversation history. This is provider- and task-agnostic; it is a host
-recovery mechanism, not a prompt hint or a task answer.
-
-Deterministic evidence: `161 passed, 35 subtests passed`. In the real frozen
-cascading run, the stale `read_file` was retried inside iteration 2, the actor
-made both product fixes, the artifact grader passed, and `finish_task` was
-called. The run still used 4 iterations against the strict target of 3, so it
-is an artifact and clean-exit pass but a workflow-budget miss. Metrics: 2
-mutations, 3 validations, 4 stale worker judgments, 2 worker calls, 86.8
-seconds. The next optimization target is the remaining repair/validation turn,
-not the transaction semantics.
-
-### 2026-08-15 — validation-gap review after SymPy runs
-
-The host now runs one nearby conventional Python test target after a product
-mutation and preserves both the beginning and end of pytest output. The 4B
-fallback no longer treats the word `pytest` by itself as a setup failure; an
-executed pytest assertion failure is classified as a behavior failure.
-
-Deterministic evidence after these changes: `161 passed, 35 subtests passed`.
-The real run `sympy-13878-novelty-1786844158` delivered the actual
-`ArcsinDistribution`/`_cdf` traceback to the actor. It still failed the
-independent grader, made 3 mutations and 5 validations, and timed out on the
-eighth actor turn. One mutation touched unrelated
-`sympy/polys/agca/modules.py` before the actor returned to
-`sympy/stats/crv_types.py`; this is evidence of a failure-attribution problem,
-not a transaction-buffer failure.
-
-The current validation gap is therefore narrower and more precise:
-
-1. The host can produce behavioral evidence, but noisy suites can contain
-   unrelated failures and the actor may repair the wrong file.
-2. Automatic validation currently may run both a prior failed target and a
-   nearby target, which can duplicate evidence and increase context noise.
-3. Hidden benchmark tests remain invisible by design, so visible tests cannot
-   guarantee the final fix.
-
-Research-backed options considered:
-
-1. Evidence bundle and failure provenance: one authoritative test target per
-   mutation, bounded first-failure plus summary output, changed-file/source
-   overlap, and explicit setup/behavior/unknown classification. This is the
-   recommended next implementation because it strengthens every task without
-   naming a model or benchmark.
-2. Reproduction-test gate: require a temporary host-owned reproducer to fail
-   before the repair and pass after it, then run regression tests. This follows
-   SWT-Bench's test-generation approach, but needs safeguards against weak or
-   overfit generated tests.
-3. Shadow-grader feedback: after each candidate mutation, run an isolated
-   holdout grader and return only a sanitized failure location/summary. This
-   most directly closes the hidden-test gap, but is an evaluation-harness
-   feature rather than a universal agent capability.
-
-Do not implement the next change by adding SymPy formulas, exposing the hidden
-test patch, or allowing the 4B to decide lifecycle state. The preferred order
-is evidence provenance first, reproducer fallback second, and shadow-grader
-feedback only for benchmark experiments.
-
-### 2026-08-15 — evidence provenance and test-only context checkpoint
-
-The validation plane now emits a bounded `FailureProvenance` record containing
-the executed tool/command, plane classification, failed test identifiers,
-source and test paths, changed paths, direct path overlap, and a compact
-diagnostic. Test-only context is included separately and explicitly marked
-`do not edit`, so imports and assertions can guide localization without
-turning the supplied test into a mutation target.
-
-Automatic validation now runs at most one test target per mutation turn. A
-previous failed test takes precedence over nearby-test discovery; nearby
-discovery is only used when no automatic test was already scheduled. Helper
-file writes do not count as product mutations for this hook.
-
-One regression was caught and fixed during the cycle: labeling test context as
-"dependency context" caused the deterministic setup classifier to freeze
-product edits on ordinary assertion failures. The label is now neutral and a
-test locks this boundary.
-
-Deterministic evidence: `165 passed, 35 subtests passed`.
-
-Real-model evidence with Qwen3.8-27B-4bit actor, qwen3.5:4b asynchronous
-worker, MLX/llama.cpp backend, action critic and gate enabled:
-
-- Frozen cascading task: full pass, strict 3/3 iterations, 2 product
-  mutations, 3 validations, clean completion.
-- Frozen multi-file transaction task: full pass, 5 iterations against a
-  strict target of 6, 3 product mutations, 4 validations, clean completion;
-  the transaction preserved `core_math.py` through the intermediate failure
-  and cleared after final validation.
-- Two earlier multi-file attempts reached the correct artifact but missed the
-  workflow target; one was invalidated by the setup-label bug and was not
-  treated as evidence against the corrected implementation.
-
-The next hard-task run is SymPy 13878. Do not add SymPy-specific repair logic;
-use it only to measure whether the generic evidence bundle reduces unrelated
-mutations and improves source attribution.
-
-### 2026-08-15 — review of the validation gap and latest SymPy evidence
-
-The latest unchanged SymPy run was `sympy-13878-novelty-1786845580`. The
-actor exited cleanly, but the independent grader timed out after 120 seconds
-with no passing result. The actor did receive a real behavior failure and made
-two product mutations, but it did not complete a repair. It issued a first
-`patch_file` against `sympy/stats/crv_types.py` whose search text was not
-present, then issued two more failed searches; the final duplicate was
-detected as stagnation. The transaction expired after two validation
-failures. This means the validation signal is now reaching the actor, but the
-generic repair loop still needs a deterministic response to a rejected patch:
-inspect the current file once, then produce a fresh mutation or recover.
-
-The review considered three model-agnostic plans:
-
-1. Evidence bundle and failure provenance: keep host-owned records for the
-   command, test IDs, source/test paths, changed paths, overlap, and compact
-   diagnostics; after a rejected mutation, require a fresh bounded inspection
-   before another mutation. This is the recommended plan.
-2. Host-owned reproduction gate: generate or select a minimal reproducer,
-   require it to fail before mutation and pass afterward, then run regression
-   tests. This gives stronger causal evidence but can create weak or overfit
-   tests and adds another execution phase.
-3. Sanitized shadow-grader feedback: run an isolated holdout grader after a
-   candidate patch and return only a bounded failure summary. This is useful
-   for benchmark experiments, but it gives the general engine access to
-   evaluation infrastructure that normal coding tasks do not have.
-
-The decision is to continue with Plan 1, adding a generic rejected-mutation
-recovery contract before adopting Plan 2. Plan 3 remains benchmark-only. The
-next test cycle is: deterministic rejected-patch tests, unchanged cascading
-and multi-file regression runs, then a bounded SymPy rerun. No benchmark
-fixture, hidden test, model name, or SymPy formula may be added to the engine.
-
-### 2026-08-16 — rejected mutation recovery checkpoint
-
-The generic repair loop now treats a failed product mutation as a possible
-source-synchronization problem (the actor's copied source does not match the
-file currently on disk). The host opens a read-only surface containing only
-focused readers (`read_file`, `search_file`, `list_symbols`, and `grep_dir`)
-for one turn. After that attempted inspection, the read surface closes and
-the next turn must make a fresh mutation or enter recovery. The actor is not
-allowed to validate, browse broadly, finish, or replay the rejected patch in
-the inspection turn. The novelty progress gate also preserves this temporary
-read surface instead of removing it.
-
-Deterministic evidence: `172 passed, 35 subtests passed`.
-
-The unchanged Qwen3.8-27B/4B frozen regressions both passed after the change:
-
-- Cascading task: `3` iterations, `2` mutations, `3` validations.
-- Multi-file transaction task: `5` iterations, `2` mutations, `3` validations;
-  the transaction preserved the first file until the second file was aligned.
-
-The first post-change SymPy replay reached iteration 5, produced the expected
-rejected `patch_file` search in `sympy/stats/crv_types.py`, and entered the
-new recovery state at iteration 6. It was manually stopped before the
-configured provider timeout completed, so it is explicitly incomplete and is
-not a SymPy capability result. A full-duration replay is required before
-attributing any improvement to this change.
-
-Source checkpoint: `ffb8ebb` (`Recover from rejected mutations with one
-focused read`).
-
-### 2026-08-16 — reject exact replay of a failed product mutation
-
-The next unchanged SymPy replay reached two product mutations and then
-repeated the same stale `patch_file` request after the bounded reread. The
-host had detected the failed patch, but the actor could still issue the same
-request after recovery. That is a generic convergence failure (the loop keeps
-trying an action that has already failed), not a SymPy-specific behavior.
-
-The engine now records rejected product-mutation signatures for the duration
-of a run. If the actor emits the exact same mutation again, dispatch rejects
-it before touching the workspace and requires a different targeted mutation or
-recovery. Temporary `.agentic/` helper mutations remain exempt because they
-are controlled validation artifacts rather than product edits.
-
-Deterministic evidence: `175 passed, 35 subtests passed`.
-
-The frozen cascading regression was started after this change but was stopped
-before its final score while the grader design review took priority. It
-reached a real product mutation and validation, so it is incomplete evidence;
-the guard is not declared regression-free until the cascading and multi-file
-regressions are rerun to completion.
-
-This change does not add model-, repository-, or formula-specific behavior.
-The next generic validation improvement should come from the missing
-`validation_pipeline_spec.md` review and the research-backed grader plan,
-not from adding another SymPy exception.
-
-Source checkpoint: `4143813` (`Reject replayed failed mutations`).
-
-### 2026-08-16 — move independent grading outside the actor workspace
-
-The benchmark grader previously wrote `.agentic_grader.py` into the same
-workspace the actor could inspect. A prompt told the actor not to read or edit
-that file, but that was only a convention, not an enforcement boundary.
-
-`independent_grader.py` now writes checker source into a host-owned temporary
-directory outside the actor workspace, runs it as a subprocess with the
-candidate workspace as its current directory, and records a SHA-256 checker
-hash plus bounded output. It distinguishes `PASS`, `FAIL`, `TIMEOUT`, and
-`ENVIRONMENT_INVALID`. Optional preflight checks run before acceptance checks;
-failed preflight is not misclassified as a product defect.
-
-Deterministic evidence: `178 passed, 35 subtests passed`.
-
-Frozen real-model evidence with Qwen3.8-27B actor, qwen3.5:4b worker, and
-MLX/llama.cpp:
-
-- Cascading: grader `PASS`, exact `3/3` iteration target, 2 mutations, 3
-  validations.
-- Multi-file transaction: grader `PASS`, 5 iterations against a target of 6,
-  2 mutations, 3 validations; the first file remained intact until the second
-  file was aligned.
-
-This is a grader foundation, not the complete production-grade pipeline yet.
-The next generic additions are immutable baseline checks, fail-to-pass and
-pass-to-pass evidence, protected hidden/shadow tests, and a tamper/integrity
-check for supplied tests. The missing `validation_pipeline_spec.md` must be
-reviewed before claiming those requirements are complete.
-
-Source checkpoint: `78c757c` (`Isolate independent benchmark graders`).
-
-### 2026-08-16 — enforce supplied-test integrity at the grader boundary
-
-The benchmark now snapshots hashes of supplied test artifacts before the actor
-starts and compares them after the actor and any verifier-repair pass. If a
-supplied test is deleted or changed, the result is
-`UNSAFE_WORKSPACE_CHANGE`, the independent product grader is not allowed to
-turn that run into a pass, and verifier repair is skipped. New actor-authored
-tests are not blocked; only tests supplied by the benchmark are protected.
-
-Deterministic evidence: `179 passed, 35 subtests passed`.
-
-Post-change frozen real-model regressions:
-
-- Cascading: `PASS`, exact `3/3` iteration target, 2 mutations, 3
-  validations, `test_metrics.py` unchanged.
-- Multi-file transaction: `PASS`, 5 iterations against a target of 6, 3
-  mutations, 4 validations, `test_solver.py` unchanged, intermediate edits
-  preserved.
-
-The grader is now independent in two concrete ways: its source is outside the
-actor workspace, and the supplied acceptance tests are integrity-checked. The
-remaining production-grade grader work is baseline/fail-to-pass evidence,
-pass-to-pass regression evidence, and a separate hidden/shadow acceptance
-layer. These must remain benchmark-owned and unavailable to the actor.
-
-Source checkpoint: `820b4bf` (`Protect supplied tests during grading`).
-
-### 2026-08-15 — host validation packet, preconditions, and advisory-only 4B
-
-The host now builds a strict, dependency-free `FailedValidationPacket` from
-raw execution output. It selects one first actionable failure, confines paths
-to the candidate workspace, bounds all strings, records an evidence digest,
-and keeps the complete stream in host telemetry instead of copying it into the
-actor context. This is a compact fact packet (a small machine-readable report),
-not a model-generated diagnosis.
-
-The reusable benchmark now supports host-owned `fail_to_pass` preconditions
-(the initial checker must genuinely fail) and optional `pass_to_pass` checks
-(unrelated behavior must remain good). Timeout and invalid-environment results
-are not accepted as a valid baseline failure. Frozen cascading and multi-file
-tasks both record valid baseline `FAIL` evidence before the actor starts.
-
-The 4B worker is now explicitly advisory. Its suggestions are logged but can no
-longer remove tools or change lifecycle state. The deterministic host policy
-still restricts unsafe paths, including allowing only dependency manifests in
-the setup plane. This fixed a WebSocket deadlock where the worker's stale setup
-judgment removed the only path to create a root `package.json`.
-
-The worker request is also guided by a strict Ollama JSON Schema with thinking
-disabled, temperature `0`, seed `0`, and repetition penalty `1.0`. A live
-`qwen3.5:4b` call returned a schema-valid JSON object. This makes the format and
-sampling repeatable, not the semantic judgment correct; the host remains the
-authority.
-
-Research findings and sources are recorded in
-[`VALIDATION_GRADER_RESEARCH.md`](VALIDATION_GRADER_RESEARCH.md). The research
-supports independent execution, hidden/shadow checks, mutation-strength tests,
-and separate trajectory metrics. It also warns that a passing visible suite
-can accept a plausible but wrong patch, so this checkpoint is not the final
-grader design.
-
-Deterministic evidence after these changes: `185 passed, 37 subtests passed`.
-
-Real-model evidence before the advisory-only rerun:
-
-- Cascading: `PASS`, 3 iterations, valid fail-to-pass baseline, 2 mutations,
-  3 validations, supplied test unchanged.
-- Multi-file transaction: `PASS`, 5 iterations, valid fail-to-pass baseline,
-  2 mutations, 3 validations, supplied test unchanged.
-- WebSocket: independent acceptance eventually passed through one bounded
-  verifier-repair pass, but the first actor run stalled on setup/behavior plane
-  handling and did not call `finish_task`. This is evidence that the grader can
-  recover a correct artifact, not proof that the actor loop is solved.
-
-Source checkpoint: pending the full deterministic suite and the next unchanged
-WebSocket regression after making the 4B advisory-only.
-
-### 2026-08-15 — pause checkpoint: worker authority, advice telemetry, and ablation
-
-Implementation is intentionally paused at the user's request. No benchmark
-child process is running. The Ollama/MLX model servers are separate managed
-services and were not stopped.
-
-The 4B is now advisory-only in the live orchestration path. Its synchronous
-triage output is logged as `4B advisory only`; it cannot remove tools or change
-the FSM. Host policy and dispatch remain authoritative. The worker still
-appears in the actor context as a recommendation, so it can influence the
-35B's choice indirectly; that influence is now measured rather than trusted.
-
-The worker output request uses Ollama guided JSON generation: a closed JSON
-Schema, thinking disabled, temperature `0`, seed `0`, and repetition penalty
-`1.0`. A live `qwen3.5:4b` call returned a valid structured object. This
-improves format repeatability, not diagnosis correctness.
-
-New advice telemetry records:
-
-- `advice_issued`
-- `advice_followed`
-- `advice_successful`
-- `advice_failed`
-- `advice_regression_signals`
-- followed and successful rates
-
-The first paired ablation on the frozen cascading task found:
-
-| Condition | Result | Iterations | Mutations | Elapsed |
-| --- | --- | ---: | ---: | ---: |
-| 4B novelty | PASS | 3 | 2 | ~64.7 s |
-| 4B disabled baseline | PASS | 3 | 2 | ~49.0 s |
-
-The novelty run issued 2 synchronous advisories; the actor followed 1, which
-succeeded, and no followed advice produced a regression. However, the outcome
-was identical and novelty was about 15.7 seconds slower. This is not enough
-for a universal conclusion, but it is evidence that synchronous advice is not
-worth paying for on this simple cascading task.
-
-The latest generic optimization therefore defers synchronous 4B triage until
-setup failure, repeated failure, or a multi-file transaction. The deterministic
-local path handles the first ordinary behavior failure. This final optimization
-has a corrected unit test but has not been rerun after that correction because
-the implementation loop was paused.
-
-Latest confirmed verification before the pause: `187 passed, 37 subtests`
-with one warning. The last complete cascading novelty run passed with a valid
-fail-to-pass baseline and independent grader `PASS`. The last WebSocket run
-after the advisory-only change passed the independent grader through one
-bounded verifier-repair pass, but the actor did not call `finish_task`; the
-handoff was reconciled because the verifier had already accepted the artifact.
-That is useful recovery evidence, not proof of fast actor convergence.
-
-Known incomplete work:
-
-- Rerun the final corrected deterministic test after resuming.
-- Rerun cascading and multi-file after the triage deferral.
-- Run a paired multi-file/WebSocket ablation with and without the 4B.
-- Add hidden/shadow acceptance checks to the remaining frozen task shapes
-  (the generic mechanism is now present and wired for the feature task).
-- Add mutation-guided grader-strength tests.
-- Decide whether the verifier-repair handoff should count as success in the
-  primary score or as a separate recovery score.
-
-The research summary is in
-[`VALIDATION_GRADER_RESEARCH.md`](VALIDATION_GRADER_RESEARCH.md). The next
-agent should read this section first, run the pending deterministic test, then
-resume the paired ablation cycle. Do not add task-specific hints or let the
-4B regain tool authority.
-
-### 2026-08-15 — hidden/shadow acceptance layer
-
-The benchmark now has a model-agnostic hidden/shadow acceptance layer. A
-`Task` can carry a `shadow` checker that is separate from its visible
-`grade` and `pass_to_pass` evidence. The checker is written and executed by
-`independent_grader.py` outside the actor workspace, is not present in
-`task.prompt`, and is never included in the verifier-repair prompt. Its only
-effect is to reject a plausible artifact that satisfies the visible checks but
-fails a held-out behavioral assertion.
-
-`agentic_benchmark.py` runs the shadow layer after visible acceptance and any
-bounded verifier-repair pass. A failing shadow result sets `artifact_passed`
-to false and records `shadow_passed` plus `shadow_grader` telemetry, but the
-actor receives only the generic “hidden acceptance evidence failed” signal
-when the visible artifact had otherwise passed. If visible acceptance already
-failed, the shadow result is recorded but does not replace the visible
-failure detail.
-
-The frozen `feature` task now has a hidden shadow check with a different input
-set, so an implementation that hardcodes the visible example cannot pass.
-This is benchmark-owned evidence, not an engine hint.
-
-Deterministic evidence after this change:
-
-```text
-python3 -m py_compile agentic_benchmark.py
-python3 -m unittest discover -s tests -v
-```
-
-The full unittest discovery passes `189` tests. The targeted adversarial
-preflight includes new coverage that the shadow source is not embedded in the
-prompt, that a shadow failure is not converted into visible repair detail, and
-that a visible failure is not overwritten by a shadow failure.
-
-The next real-model check should run the frozen `feature` task with and
-without the novelty worker after the local actor is available. Do not feed
-shadow detail back to the actor and do not weaken the new hidden check.
-
-### 2026-08-15 — mutation-guided grader-strength tests
-
-The benchmark can now prove that a checker is strong enough to reject a
-plausible-but-wrong implementation before spending a model call. A `Task`
-optionally declares `strength_mutations`, each a host-owned Python script plus
-the expected visible/shadow statuses. `agentic_benchmark.py` applies each
-mutation to a private copy of the workspace, never to the actor workspace,
-then runs the visible grader and hidden shadow checker against that copy.
-
-A mutation is valid only when its expected statuses match and at least one
-grading layer rejects it. The frozen `feature` task now includes a
-`hardcoded_visible_example` mutation that passes the visible check but fails
-the new shadow check, proving the shadow layer catches an implementation that
-merely memorizes the visible example.
-
-This is benchmark-owned evaluator hardening, not an actor hint. The mutation
-scripts and expected outcomes are not part of `task.prompt`.
-
-Deterministic evidence:
-
-```text
-python3 -m py_compile agentic_benchmark.py
-python3 -m unittest discover -s tests -v
-```
-
-The full unittest discovery passes `189` tests. The adversarial preflight now
-iterates every task with `strength_mutations` and verifies each mutation is
-rejected by at least one grader layer. The next generic step is extending this
-mutation corpus to additional frozen task shapes; do not feed mutation detail
-back to the actor.
-
-### 2026-08-15 — initial successful validation must not complete a code-change task
-
-The first real `feature` run exposed a generic FSM completion bug. With
-`--action-first`, the actor correctly selected `run_tests` first, and the
-existing pass-to-pass test passed. The validation loop treated that successful
-check as authoritative completion while the lifecycle was still `ACT`, then
-called `validation_passed` and crashed with `InvalidTransition`.
-
-The completion path now calls the existing `_completion_ready` predicate before
-transitioning to `validation_passed`. If the task requires a product edit but no
-accepted `write_file`/`patch_file` has occurred, the engine records the passing
-evidence and tells the actor to continue implementing the required behavior.
-Verification-only tasks still complete without a mutation. This is a generic
-code-change contract rule; it does not name a model, provider, or task.
-
-Deterministic evidence:
-
-```text
-python3 -m py_compile agent.py
-python3 -m unittest discover -s tests -v
-```
-
-The full unittest discovery passes `189` tests, including a new regression that
-`_completion_ready` rejects initial pass evidence for a task that asks to add a
-function.
-
-Real-model evidence with Qwen3.8-27B-4bit through the local MLX
-OpenAI-compatible server:
-
-- `feature` novelty: `PASS`, 6 iterations, 1 mutation, 3 validations,
-  `shadow_passed=true`.
-- `feature` baseline: `PASS`, 6 iterations, 1 mutation, 2 validations,
-  `shadow_passed=true`.
-
-Both runs reached `COMPLETE` and the new hidden shadow grader passed. The
-remaining feature-benchmark observation is that the actor spent four turns in
-orientation before the forced mutation; this is a convergence-efficiency
-signal, not an artifact failure.
-
-The frozen `cascading_loop` novelty regression also passed after the
-completion guard: `PASS`, exact 3/3 iteration target, 2 mutations, 3
-validations, 2 validation failures, and clean completion. This confirms the
-new completion predicate does not regress the sequential-repair workflow.
-
-### 2026-08-15 — WebSocket manifest-root invariant and clean-provider-loss reconciliation
-
-The live WebSocket cycle exposed two generic control-plane defects:
-
-1. The actor wrote a dependency manifest below `.agentic/`, which is a
-   temporary validation lane. A dependency manifest is a project-root
-   contract, not a probe. `lifecycle_policy` now distinguishes the manifest
-   basename from its path: manifest names under `.agentic/` are rejected, and
-   dispatch tells the actor to write the root manifest instead.
-2. A clean actor run could produce a correct artifact but end on a provider
-   disconnect before calling `finish_task`. `agentic_benchmark.py` now
-   reconciles that narrow case when the independent artifact passes, the actor
-   process exits cleanly, and the trace has the explicit provider-loss
-   signature. This does not turn timeouts, nonzero exits, or ordinary stalls
-   into passes.
-
-The `read_file` tool now normalizes `limit <= 0` to “read the whole file.”
-This is a generic tool-contract normalization; a zero-length read window
-produced no useful evidence and wasted orientation turns.
-
-Deterministic evidence:
-
-```text
-python3 -m py_compile agent.py agentic_benchmark.py kernel/io_tools.py lifecycle_policy.py
-python3 -m unittest discover -s tests -v
-```
-
-The full unittest discovery passes `189` tests.
-
-Real-model evidence with Qwen3.8-27B-4bit through the local MLX
-OpenAI-compatible server:
-
-- `websocket_chat` novelty: `PASS`, 9 iterations, 3 mutations, 2 validations,
-  artifact passed, clean provider-loss handoff reconciled.
-- `websocket_chat` baseline: `PASS`, 7 iterations, 3 mutations, 1 validation,
-  artifact passed, clean provider-loss handoff reconciled.
-
-The manifest-root guard is now covered by the deterministic path checks and
-is independent of model or task wording.
-
-### 2026-08-15 — non-web data-pipeline validation fix
-
-The live `data_report` run exposed an over-broad task-category inference: any
-prompt mentioning `json` was classified as `web`, so a successful data-pipeline
-check was rejected as “no interaction evidence.” `from_task()` no longer treats
-the word `json` by itself as web/API evidence, and the generic executable
-evidence vocabulary now recognizes explicit `validation` success markers.
-
-These are generic validation-plane corrections, not task- or model-specific
-hints. Deterministic coverage was added for a JSON data-pipeline prompt and
-successful `VALIDATION OK` output.
-
-Real-model results with Qwen3.8-27B-4bit:
-
-- `bug_repair` novelty: `PASS`, baseline: `PASS`.
-- `recovery` novelty: `PASS`, baseline: `PASS`.
-- `data_report` novelty: `PASS`, baseline: `PASS`.
-
-The full deterministic suite remains `189 tests OK`.
-
-## 2026-08-15 — reproducible handoff and phased implementation plan
-
-This is the operating manual for the next frontier model. The implementation
-loop is paused. Reproduce the method below, preserve the frozen benchmarks,
-and change one generic control at a time.
-
-### Current architecture in plain English
-
-NoveltyEngine is a host-controlled coding agent. The 27B/35B-class model is
-the actor (the model that reads the task, uses tools, changes product files,
-and tries to finish). The 4B model is the worker (a small helper that formats
-or summarizes evidence). The Python host is the control plane (the part that
-owns rules, runs commands, decides which tools are legal, and decides whether
-the work is actually correct).
-
-The actor proposes tool calls; it does not directly decide that its code is
-correct. The host validates each call, executes it in an isolated task
-workspace, records the event, and runs verification at controlled points. A
-bounded factual packet is sent back instead of an unlimited raw transcript.
-
-The layers are:
-
-1. Benchmark/workspace: agentic_benchmark.py creates a fresh temporary
-   workspace from a frozen task, snapshots supplied-test hashes, runs a
-   baseline checker, starts the actor, and invokes an independent grader.
-2. Actor/tools: agent.py exposes shell, reads, writes/patches, verification,
-   and finish_task. A tool call is a request, not an unrestricted command;
-   host dispatch checks names, paths, state, budgets, repeated failed
-   mutations, and context size.
-3. Lifecycle/FSM: lifecycle_policy.py and the lifecycle state machine track
-   setup, orientation, act, validate, repair, recover, and complete. An FSM
-   (finite-state machine, meaning fixed legal states and transitions) makes
-   the next legal actions explicit.
-4. Validation/grading: the host records PASS, FAIL, TIMEOUT, or
-   ENVIRONMENT_INVALID. A model claim or finish_task call is not proof. The
-   grader also rejects changes to benchmark-supplied tests.
-5. Failure packet: validation_packet.py selects one bounded first actionable
-   failure, confines paths to the task root, records command, exit code,
-   primary error, transaction overlap, and evidence digest. This is
-   provenance (where a fact came from), not an LLM diagnosis.
-6. Transaction/recovery: product mutations and failed mutation signatures
-   are tracked. A multi-file change may remain temporarily broken while
-   dependent files are aligned; exact replay of a rejected product mutation
-   is refused. Recovery is bounded and does not blindly erase user changes.
-7. 4B worker: novelty_context.py uses guided JSON, thinking disabled,
-   temperature 0, seed 0, and repetition penalty 1.0. The worker is advisory
-   only: it cannot remove tools, transition the FSM, or declare success. It
-   is deferred on a simple first failure and used for setup failure, repeated
-   failure, or multi-file ambiguity.
-8. Telemetry: each run writes to
-   state/benchmark/agentic/results.jsonl; monitors use
-   state/benchmark/agentic/monitor-<task>-<condition>-*.jsonl. Metrics include
-   iterations, mutations, validations, first-mutation time, worker calls,
-   advice followed/successful/failed, timeout, grader status, test integrity,
-   and verifier-repair use.
-
-Authority is deliberately ordered:
-
-    host evidence and dispatch rules
-      > deterministic FSM and grader
-      > actor tool proposal
-      > 4B suggestion
-      > actor's natural-language success claim
-
-The 4B is not a second judge. Its value must be established with paired
-ablation (the same run with and without it), not a single successful run.
-
-### Frozen benchmark paths and meanings
-
-Definitions are in agentic_benchmark.py; the independent checker is in
-independent_grader.py; deterministic coverage is in tests/.
-
-| Task | What it tests |
-| --- | --- |
-| cascading_loop | Two sequential defects; the first repair reveals the second. |
-| multi_file_transaction | A cross-file refactor with a broken intermediate state. |
-| websocket_chat | Server/browser protocol, payload, process setup, and recovery. |
-| 3d_scene | Short real application generation and artifact inspection. |
-| real_app | Broader end-to-end application workflow. |
-| wifi_simulator | Offline GUI artifact and interaction checks. |
-
-SymPy 13878 is the long-horizon capability target, not a replacement for the
-short regression suite. A timeout or manually stopped SymPy run is incomplete
-evidence, not a capability pass.
-
-### Reproduction procedure
-
-After resuming, use this bounded sequence:
-
-    cd /Users/digitialchameleon/noveltyEngine
-    git status --short
-    git log -1 --oneline
-    python3 -m py_compile agent.py agentic_benchmark.py novelty_context.py validation_packet.py
-    python3 -m pytest -q tests
-
-The paused checkpoint has not rerun the corrected triage-deferral test, so the
-older 187 passed, 37 subtests result is not proof of the current tree.
-
-Check services without starting duplicates:
-
-    pgrep -fl 'agentic_benchmark.py|agent.py|llama-server|ollama'
-    curl -fsS http://127.0.0.1:8080/health
-
-Use the already-running Qwen3.8-27B 4-bit MLX/llama.cpp-compatible actor at
-http://127.0.0.1:8080/v1 only if healthy. The local Ollama qwen3.5:4b is the
-worker. A dead endpoint is an environment result, not model-quality evidence.
-
-Run novelty and baseline on the same frozen task:
-
-    python3 agentic_benchmark.py --task cascading_loop --condition novelty --iterations 6 --chat-timeout 45 --run-timeout 300 --backend llama-cpp --base-url http://127.0.0.1:8080/v1 --action-critic --action-gate --action-first
-
-    python3 agentic_benchmark.py --task cascading_loop --condition baseline --iterations 6 --chat-timeout 45 --run-timeout 300 --backend llama-cpp --base-url http://127.0.0.1:8080/v1 --action-first
-
-Repeat for multi_file_transaction, then websocket_chat. Inspect:
-
-    tail -n 3 state/benchmark/agentic/results.jsonl
-    tail -f state/benchmark/agentic/monitor-cascading_loop-novelty-*.jsonl
-
-Use the exact monitor_log from the JSON result for automation. The
-authoritative fields are passed, grader.status, validation_evidence,
-test_integrity, timed_out, and verifier_repair. Never judge from a partial
-monitor file or from finish_task alone.
-
-### Methodology for every future change
-
-1. State one generic failure mode.
-2. Change one model-agnostic host mechanism.
-3. Add a deterministic regression test that fails before the change.
-4. Run deterministic preflight before any model call.
-5. Run a frozen task with the change.
-6. Run the same task with the component disabled.
-7. Compare useful progress per second: outcome, iterations, first mutation,
-   validations, total time, retries, and recovery cost.
-8. Repeat on a second task shape.
-9. Record verified and unverified evidence in this file and telemetry.
-10. Commit only coherent source/docs; exclude transient monitor logs and
-    results.jsonl unless deliberately preserving a fixture.
-
-### Phased plan
-
-Phase 0 — resume safely. Read this handoff, telemetry, and
-VALIDATION_GRADER_RESEARCH.md. Inspect the working tree. Run the pending
-deterministic suite; repair generic failures before model calls.
-
-Phase 1 — close the evidence gap. Rerun cascading and multi-file after the
-triage deferral. Run paired WebSocket novelty/baseline. Treat verifier-repaired
-success as a separate recovery score from direct actor convergence.
-
-Phase 2 — finish the grader. Add hidden/shadow checks (tests the actor cannot
-see), pass-to-pass checks for unrelated behavior, explicit environment-invalid
-outcomes, checker integrity, and mutation-guided checker-strength tests. A
-visible weak test must not be enough for a pass.
-
-Phase 3 — make transactions explicit. Add a host transaction record with
-touched paths, pre-mutation hashes, validation attempts, dependent-file
-evidence, and a bounded repair window. Preserve intermediate edits only when
-the host sees a credible transaction; do not make every failure immune to
-rollback.
-
-Phase 4 — improve context economics. Measure tokens before every actor
-request. Use percentage-based budgets and compact facts rather than fixed
-event-count assumptions. Measure pruning (removing old detail) separately
-from compaction (replacing old detail with a shorter summary).
-
-Phase 5 — optimize the worker contract. Keep the 4B advisory-only. Test
-worker-on, worker-off, and worker-delayed conditions. Optimize useful progress
-per second, not worker call count.
-
-Phase 6 — long-horizon validation. Only after short regressions are green,
-run the unchanged SymPy 13878 fixture with strict timeouts, preserved logs,
-independent checking, and full run metadata. Do not add issue-specific hints.
-
-### Stop and reporting rules
-
-Stop at provider timeout, total timeout, iteration limit, stale process, or a
-user stop request. Kill the benchmark process tree, not unrelated model
-servers. Report TIMEOUT, ENVIRONMENT_INVALID, FAIL, or PASS exactly as
-observed. After every material change record changed files, generic reason,
-deterministic result, real-model result, benchmark paths, unverified items,
-and the next safe action.
-
-### 2026-08-16: discovery-tool failure found in the LRU run
-
-The LRU benchmark exposed a generic discovery failure. The actor requested
-`find_files(pattern="**/*.py", path=".")`, but the host returned `No files
-matched` even though the workspace contained a root-level `cache.py`. Python's
-`fnmatch` treats the `**/` part as literal text and therefore requires a
-directory; it does not implement the usual glob meaning of “zero or more
-directories.” The actor consequently spent turns repeating discovery instead
-of reading and repairing the project.
-
-The fix stays in the existing bounded `find_files` tool. It now also tests the
-pattern with recursive `**/` segments removed, so both `**/*.py` and
-`src/**/*.py` match files directly at the relevant root as well as deeper
-files. It still confines paths, skips dependency/build noise, sorts results,
-and caps output at 200 entries. A second discovery tool was deliberately not
-added: duplicate tools increase model choice load and create inconsistent
-semantics. The deterministic regression covers root recursive globs, nested
-recursive globs, ignored directories, and the result cap.
-
-Targeted verification after this change: `158 passed, 1 warning` across
-`tests/test_agent_tools.py` and `tests/test_run_monitor.py`. The earlier LRU
-real-model run remains a valid failure diagnosis: its child process loaded the
-old discovery implementation, so it is not evidence against this fix. Rerun
-the unchanged LRU fixture before judging capability improvement.
-
-### Pydantic V2 adoption decision
-
-Pydantic V2 is recommended at JSON/model boundaries, not as a blanket
-replacement for internal dataclasses. The first migration targets are strict
-tool-argument models, the 4B judgment packet, failed-validation packets, grader
-records, and persisted monitor events. Use `strict=True` and `extra="forbid"`
-after the host's narrow alias-normalization step. Keep internal FSM/event
-objects and process/callable holders as dataclasses. This preserves simple,
-fast host state while making model-facing contracts explicit.
-
-### Second-pass toolset decision
-
-The current registry is a capable internal inventory but too broad as one
-27B-facing surface: 16 non-network tools and roughly 10,000 serialized schema
-characters before `finish_task`. Research on SWE-agent, Claude Code, and the
-OpenAI Agents SDK converges on a compact read/search/edit/write/execute core,
-with optional tools revealed by lifecycle phase.
-
-Recommended actor core:
-`find_files`, `read_file`, `grep_dir`, one multi-file-capable `apply_patch`,
-new-file-only `write_file`, argv-based `run_command`, and `finish_task`.
-`process_status`/`stop_process`, review tools, structural symbol lookup,
-network tools, and broad inventory should be conditional. `run_tests` should
-be a validation-phase shortcut or host-triggered check rather than a globally
-visible duplicate of `run_command`.
-
-The next change is an A/B experiment for a standard multi-file `apply_patch`
-editor against the existing `patch_file`. It must use the unchanged frozen
-cascading and multi-file benchmarks. Do not permanently expose both mutation
-tools; select one after measuring convergence, patch failures, first mutation,
-validation count, and hidden-grader outcome.
-
-### 2026-08-16: atomic editor A/B and llama.cpp runtime measurements
-
-The new `apply_patch` editor is implemented as a host-controlled atomic
-multi-file operation. It parses all file operations, checks patch context,
-confines paths, validates Python syntax in memory, and writes only after all
-files pass those checks. A stale patch is rejected without partially applying
-earlier files. The actor sees either `patch_file` or `apply_patch`, selected by
-the benchmark's `--editor` flag; both are never exposed together for this
-experiment.
-
-Deterministic verification after the implementation and integration changes:
-`205 passed, 38 subtests passed, 1 warning`.
-
-The paired real-model test used the unchanged `multi_file_transaction` task,
-Qwen3.8 27B Q4_K_M through llama.cpp, MTP enabled, Flash Attention enabled,
-32K context, and the same iteration/time budgets. Ollama was not used for the
-actor. The 4B novelty worker was not enabled in this clean editor comparison
-because this checkout only has its worker adapter wired to Ollama and no 4B
-GGUF is present; the run therefore isolates the actor/editor interaction.
-
-| editor | result | artifact | iterations | first mutation | elapsed | observation |
-|---|---|---|---:|---:|---:|---|
-| `patch_file` | PASS | PASS | 6 | 41.8s | 86.2s | Directly converged after 3 repair mutations and 3 validation failures. |
-| `apply_patch` | scorecard FAIL; artifact PASS | PASS | 12 + verifier repair | 38.7s | 177.9s total | Actor made one atomic edit, then repeated a stale patch and `finish_task`; bounded verifier repair changed the remaining file and passed. |
-
-Interpretation: `apply_patch` is technically sound and preserves the
-transaction, but this single A/B does not justify replacing `patch_file` for
-this model. It exposed a generic completion/recovery weakness rather than
-improving convergence. The next engineering step is not to teach the model
-the benchmark answer. It is to make the host handle repeated completion
-requests and stale multi-file intent more efficiently, then rerun the same
-frozen pair. Keep the raw monitor logs and exact result records referenced by
-the benchmark output for audit; do not edit the fixture.
-
-### llama.cpp context and decoding observations
-
-The active server was started with GPU offload (`--n-gpu-layers 99`), Flash
-Attention, batch and micro-batch 2048, Q8 KV cache, `--load-mode mlock`, and
-`--spec-type draft-mtp`. The older `--mlock` spelling is deprecated but has the
-same meaning. The model log confirmed MTP draft acceptance, so this was not
-an assumed setting.
-
-With the tuned flags, two large-prompt samples averaged approximately 181.4
-prompt-prefill tokens/sec and 15.6 decode tokens/sec, with about 74% MTP
-acceptance. The earlier MTP+Flash configuration was approximately 180–186
-prefill and 16–18 decode tokens/sec. The extra flags therefore reduced memory
-pressure potential but did not demonstrate a speed increase in this sample.
-
-Using the same 3,017-token prompt under the tuned flags:
-
-| max context | prefill | decode |
-|---:|---:|---:|
-| 8K | 185.7 tok/s | 16.4 tok/s |
-| 16K | 185.2 tok/s | 16.4 tok/s |
-| 32K | 185.2 tok/s | 14.7 tok/s |
-
-The practical lesson is that a larger maximum context is capacity, not a
-speed feature. Use 16K when the task fits; use 32K only when the agent needs
-the room. The 32K result had lower MTP acceptance in this single sample, so
-it is not proof that 32K intrinsically slows every request.
-
-### A/B replication: `apply_patch` behavior is repeatably inefficient
-
-The `apply_patch` arm was rerun unchanged after the first comparison. It
-reproduced the same trajectory: the actor applied a correct first edit to
-`core_math.py`, emitted a stale second patch for that file, then repeated
-`finish_task` while validation still failed. The host rejected false
-completion, and the bounded verifier repair subsequently changed
-`matrix_solver.py` and passed the grader.
-
-Replication result: artifact PASS, workflow scorecard FAIL, 12 primary
-iterations, 147.3 seconds total, 63.4 seconds in verifier repair. This makes
-the interaction failure repeatable enough to act on. Do not conclude that
-`apply_patch` is defective; conclude that the current actor-facing contract
-does not prevent stale patch replay or repeated completion requests.
-
-The proposed `patch_file` names `find_exact_block` and `replace_with_block`
-are a reasonable contract improvement. If adopted, describe it as replacing
-one exact block in one existing file, require reading first, reject stale
-context, forbid accidental file creation/overwrite, and set
-`additionalProperties: false`. Do not claim it manages the transaction buffer
-unless the host actually does so. This should be a separate contract A/B,
-not mixed into the current editor result.
-
-### 2026-08-16: `patch_file` contract checkpoint
-
-The single-file editor now exposes `find_exact_block` and
-`replace_with_block` instead of the vague `search` and `replace` names. The
-host still accepts the old names when replaying an older transcript, then
-normalizes them before dispatch. This preserves compatibility without
-advertising two schemas to the actor.
-
-The full tool inventory is in [TOOL_CONTRACTS.md](TOOL_CONTRACTS.md). The
-most important current contracts are: exact reads through `read_file`,
-targeted single-file mutation through `patch_file`, new/full-file mutation
-through `write_file`, argv execution through `run_command`, bounded process
-inspection through `process_status`, and host-gated completion through
-`finish_task`. Search, inventory, review, and network surfaces are
-conditional. The inventory also records two known contract issues for later
-cleanup: `write_file` can overwrite existing files, and generated schemas
-for `git_status`/`git_diff` mark their default path as required.
-
-Deterministic verification after this isolated contract change:
-`207 passed, 38 subtests passed, 1 warning`. No benchmark fixture was edited.
-
-### 2026-08-16: strict contract and prompt implementation
-
-The current implementation supersedes the compatibility wording in the
-earlier checkpoint above. `patch_file` now rejects legacy `search`/`replace`
-fields at dispatch. `write_file` rejects an existing target and directs the
-actor to `patch_file`. Pydantic v2 models in `tool_contracts.py` enforce strict
-types and unknown-field rejection; llama.cpp receives schemas with
-`additionalProperties: false`.
-
-The model-facing registry now exposes `find_files`, `read_file`, and
-`list_symbols` for focused discovery. `apply_patch`, `list_workspace`,
-`list_dir`, `search_file`, and `grep_dir` are host-only/legacy surfaces and
-are not offered to the model. The base prompt treats native tool calls as
-already structured, permits discovery when evidence is missing, and tells the
-actor to correct rejected calls instead of replaying them. Dynamic phase
-prompts identify exploration/implementation, recovery, repair, and
-verification; host dispatch remains authoritative.
-
-The maintained deterministic suite is **209 passed, 38 subtests passed, 1
-warning** with `./.venv-swebench/bin/python -m pytest -q tests`. Bare `pytest`
-also collects the frozen old SymPy fixture under `assets/benchmarks/sympy-13878`,
-which is incompatible with Python 3.14 (`collections.Mapping`); that fixture
-is excluded from the maintained suite.
-
-### Real-model contract benchmark after hardening
-
-The unchanged `multi_file_transaction` task was run with the same Qwen3.8 27B
-Q4_K_M llama.cpp server, MTP/Flash Attention, 32K context, and 12-turn cap.
-The actor used the new exact-block fields and the independent artifact grader
-passed. The workflow scorecard failed because the run needed 10 iterations
-instead of the target 6.
-
-| Metric | Prior `patch_file` reference | Hardened contract run |
-|---|---:|---:|
-| Artifact grader | PASS | PASS |
-| Workflow scorecard | PASS | FAIL |
-| Iterations | 6 | 10 |
-| Total elapsed | 86.2s | 121.0s |
-| First tool | not recorded | 7.5s |
-| First mutation | 41.8s | 41.9s |
-| Mutations | 3 | 3 |
-| Validations | 3 | 4 |
-| Validation failures | 3 | 3 |
-
-Interpretation: correctness was preserved and first mutation latency was
-unchanged, but this sample was about 40% slower overall and added four
-iterations. This is not yet an efficiency improvement. The likely cost is
-recovery after the actor's first wrong edit, not schema generation itself.
-Keep this as a regression checkpoint until another paired task shape confirms
-the change.
-
-Monitor log:
-`state/benchmark/agentic/monitor-multi_file_transaction-novelty-1786935713091859000.jsonl`
-
-### Additional real-model checks after the strict-contract change (2026-08-16)
-
-These runs used the same Qwen3.8 27B Q4_K_M llama.cpp server and unchanged
-benchmark fixtures. They are follow-up evidence, not fixture edits or answers
-given to the actor.
-
-* `cascading_loop`: independent artifact grader **PASS** and workflow
-  **PASS** in 3 iterations / 49.8 seconds. It used 5 tool calls, 2
-  mutations, and 3 validations. The historical comparison was 3 iterations /
-  49.0 seconds, so this is effectively unchanged within run noise.
-* `websocket_chat`: independent artifact grader **PASS** after the bounded
-  verifier-repair pass. The primary actor used all 12 allowed iterations;
-  the repair pass used 5 more, for 17 total and 452.2 seconds. The primary
-  made the server mutation, installed the missing `ws` dependency, and then
-  failed a real WebSocket smoke check because the browser-side payload was
-  not escaped. The verifier patched the frontend and the final real smoke
-  check passed. This run exposed recovery cost, not a correctness failure.
-
-The honest conclusion is mixed: the stricter contracts preserve correctness,
-but they currently make some wrong first tool choices more expensive. In the
-WebSocket run, rejecting `write_file` on an existing file was correct, but the
-actor spent an extra turn recovering from that rejection. The next fix should
-be a deterministic rejected-mutation handoff (immediately provide the target
-file and require `patch_file`), not weakening the safety boundary.
-
-Monitors:
-
-* `state/benchmark/agentic/monitor-cascading_loop-novelty-1786935962311775000.jsonl`
-* `state/benchmark/agentic/monitor-websocket_chat-novelty-1786936025475669000.jsonl`
-* `state/benchmark/agentic/monitor-websocket_chat-novelty-1786936344702478000-repair.jsonl`
+- Do not reset, checkout, or delete existing worktree changes without
+  understanding what they are.
+- Do not commit benchmark output blindly without inspecting what changed, and
+  do not commit unless asked.
+
+**Definition of a useful improvement.** A change is useful only if it
+improves independently verified completion, repair convergence, or context
+efficiency across more than one task shape — not one lucky run. Minimum
+evidence is a deterministic regression test (that fails before the fix) plus
+a paired benchmark comparison (same fixture, change on vs. off). Record
+iterations, mutations, validations, repair transitions, duplicate actions,
+elapsed time, and the independent grader outcome — not just pass/fail.
+
+**Methodology for every change** (condensed from the 2026-08-15 phased plan,
+still the right discipline): state one generic failure mode → change one
+model-agnostic host mechanism → add a regression test that fails before the
+change → run the deterministic preflight → run a frozen task with the change
+→ run the same task with the component disabled → compare outcome,
+iterations, first-mutation time, validations, total time → repeat on a second
+task shape → record verified vs. unverified evidence here.
+
+### llama.cpp server tuning (current actor backend)
+
+The Qwen3.8-27B Q4_K_M GGUF actor server should run with GPU offload
+(`--n-gpu-layers 99`), Flash Attention, MTP draft decoding (`--spec-type
+draft-mtp` — confirm draft acceptance in the server log, don't assume it),
+Q8 KV cache, and `--load-mode mlock` (the older `--mlock` spelling means the
+same thing). Measured on the M4 Max with these flags: ~181-186 prefill
+tok/s and ~15-18 decode tok/s, with roughly 74% MTP acceptance on large
+prompts. Context size is capacity, not a speed lever in this setup — 8K,
+16K, and 32K measured within ~1 tok/s of each other on the same prompt; use
+16K when a task fits and 32K only when the agent actually needs the room. A
+pure-CPU server (`--device none`) is much slower (~90s/turn observed) and
+should be avoided.
+
+## Architecture, plain English
+
+NoveltyEngine is a host-controlled coding agent, not a model given a free
+shell. The actor (currently the single Qwen3.8-27B baseline model) proposes
+tool calls; it does not get to decide its own code is correct. The Python
+host is the control plane: it validates each call, executes it in an
+isolated task workspace, records the event, and runs verification at
+controlled points. A bounded factual packet is sent back to the actor instead
+of an unbounded raw transcript.
+
+Authority is deliberately ordered: **host evidence and dispatch rules >
+deterministic FSM and grader > actor tool proposal > actor's natural-language
+success claim.** (A 4B advisory worker used to sit between the actor and its
+own claim; it is not part of the current condition.)
+
+Layers, and the module that owns each:
+
+1. **Benchmark/workspace** — `swebench_runner.py` (current) creates an
+   isolated instance workspace from dataset metadata, applies the base
+   commit, and invokes the independent grader; `agentic_benchmark.py` (older
+   harness) does the same for its own frozen fixtures.
+2. **Actor/tools** — `agent.py` exposes read/edit/write/execute/finish tools
+   with strict Pydantic contracts (`tool_contracts.py`, `extra="forbid"`).
+   A tool call is a request, not an unrestricted command; `dispatch.py`
+   checks names, paths, lifecycle state, budgets, and repeated/rejected
+   mutations before anything executes.
+3. **Lifecycle/FSM** — `lifecycle_fsm.py` / `lifecycle_policy.py` track
+   `ORIENT → ACT → VALIDATE → REPAIR → RECOVER → COMPLETE/FAILED` as an
+   explicit table of legal transitions; invalid transitions raise
+   `InvalidTransition` instead of silently falling through. Setup/dependency
+   failures and genuine product/behavior failures are a first-class separate
+   plane: a missing runner or dependency can never unlock speculative product
+   mutation, and only an actual assertion/behavioral failure enters repair.
+4. **Validation/grading** — `validation_contract.py` derives a task-grounded
+   acceptance contract (interfaces, typed fields, method+path-aware coverage)
+   from the task text; `independent_grader.py` records `PASS`, `FAIL`,
+   `TIMEOUT`, or `ENVIRONMENT_INVALID` and is the sole authority — a model
+   claim or `finish_task` call is never proof by itself.
+5. **Failure evidence** — `validation_packet.py` / the test runner
+   (`workspace/run_tests_tool.py`) select one bounded, actionable failure with
+   confined paths, exit code, primary error, `File:line` frames, and
+   assertion diff operands — provenance, not an LLM diagnosis.
+6. **Transaction/recovery** — `transaction_buffer.py` and `risk_layer.py`
+   track in-flight multi-file changes and snapshot pre-mutation content;
+   destructive rewrites (>65% of an existing file's lines removed) are rolled
+   back automatically; a rejected mutation cannot be replayed byte-for-byte.
+7. **Working memory** — `working_memory.py` (opt-in, `--working-memory`) is
+   the current failure-tracking state machine: see the 2026-08-17 section
+   below.
+8. **Telemetry** — each run writes to `state/benchmark/agentic/results.jsonl`
+   and `state/benchmark/agentic/monitor-<task>-<condition>-*.jsonl`; the
+   swebench runner additionally writes a full actor transcript to
+   `state/benchmark/runs/<run_id>.log`.
+
+Key files: `agent.py` (actor loop + lifecycle), `swebench_runner.py` (current
+SWE-bench entrypoint/instance registry), `agentic_benchmark.py` (older
+fixture harness), `dispatch.py` / `tool_contracts.py` (tool surface and
+validation), `lifecycle_policy.py` / `lifecycle_fsm.py` (state machine),
+`validation_contract.py` / `validation_packet.py` (task-derived acceptance
+and failure evidence), `independent_grader.py` (grading, isolated from the
+actor workspace), `working_memory.py` (failure state board),
+`kernel/io_tools.py` / `kernel/exec_tools.py` (read/write/execute
+primitives), `workspace/run_tests_tool.py` (test execution and evidence
+extraction), `registry.py` (tool registry/manifest).
+
+## 2026-08-17 — line-anchored editor and reproduce-first phase
+
+### `edit_range`: batched line-anchored editing
+
+New model-facing editor addressing the largest measured waste source in the
+django series: block-mismatch rejections started on turn 2 of every run
+(before any drift existed) and consumed ~40-45% of all iterations across
+222 logged turns (45 mismatches x ~2 turns each).
+
+`edit_range(path, edits=[{start_line, end_line, replacement, expect?}])`:
+
+- line anchors come from read_file's window headers — no verbatim quoting;
+- edits apply bottom-up atomically, so all line numbers stay valid within
+  one batch (kills multi-section drift and micro-edit ping-pong);
+- an optional short `expect` token verifies the region; on drift the whole
+  batch is rejected with the actual region text (a self-correcting
+  re-read);
+- a range may span a whole function — cohesive rewrites stay one move.
+
+Registered in the model surface via `--editor edit_range` (registry swaps
+patch_file out; both stay host-callable). Strict Pydantic contract with
+`extra=forbid`. Kernel coverage: batch merge, expect rejection, stale
+bounds, syntax rejection, atomicity. Deterministic suite: `252 passed`.
+
+### `--reproduce-first` (TDD red phase)
+
+Product mutations on existing files are locked until a genuinely failing
+execution demonstrates the bug (a passed check or rejected tool call is not
+evidence; creating the reproduction script itself stays legal). The control
+block shows the REPRODUCE phase contract; evidence unlocks mutations with a
+transcript marker. Off by default; the swebench runner exposes
+`--reproduce-first`.
+
+### Delivery-nudge dead code revived
+
+The probe runs exposed that `completion_nudge_pending` was never armed
+anywhere (render+consume only), so models with accepted validation evidence
+could re-validate until budget instead of being told to finish. It now arms
+when a passing validation covers all task-required evidence; the COMPLETE
+control block outranks a still-open validation phase, and the nudge message
+is no longer suppressed while validation is open.
+
+### Research-backed editor refinements
+
+Probe findings plus the literature review produced five refinements:
+
+- Snapshot-hash anchoring (Hashline pattern): read_file headers carry a
+  `[snapshot <hash12>]` token; edit_range accepts it and rejects the whole
+  batch if the file changed since the read; responses carry the new
+  snapshot so chained edits stay anchored.
+- patch_file ambiguity guard: a block occurring more than once is rejected
+  with occurrence count and line numbers instead of silently replacing the
+  first match (the corruption risk documented in the field).
+- Shell side-channel closed: python -c writes via shutil.copy/copyfile/
+  copy2/move, os.replace/rename, and write_bytes now classify as MUTATE.
+- write_file rejection names both editors instead of a hard-coded
+  patch_file.
+- swebench_runner accepts `--editor` for the same A/B surface.
+
+Deterministic suite: `252 passed, 38 subtests passed, 1 warning`.
+
+## 2026-08-17 — working memory Phase 1 (failure state machine)
+
+New module `working_memory.py`, opt-in behind `--working-memory` in agent.py
+and `swebench_runner.py` (off by default; every phase stays A/B-able).
+
+Design (locked in the spec review with the user):
+
+- Failure identity = normalized content fingerprint (exception type +
+  assertion core; numbers/hex/paths stripped) scoped to a validation
+  target epoch. Locations are metadata, never identity. Target identity is
+  normalized (verbosity flags dropped); a target switch starts a new
+  comparison epoch but preserves history so switch-loops stay visible.
+- Two stagnation signals, tracked separately: `cycles_unchanged` on the
+  active fingerprint and `mutations_since_last_validation` (blind editing),
+  each with event counters for run telemetry.
+- Goals derive from the task's validation-contract interfaces when present,
+  else a single mechanical `acceptance` goal. Transitions
+  (`unverified->failing`, `failing->passing`) are recorded facts only —
+  the renderer is banned from semantic progress claims ("improved",
+  "closer", "likely").
+- Renderer: priority-ordered token budget (~900 chars) — unresolved goals
+  and current failures are lossless; edit concentration drops first. The
+  board re-renders from state every turn and after every checkpoint
+  rebuild; context surgery cannot erase it.
+- Run-end telemetry: `🧠 [working memory metrics]` with target switches,
+  per-target cycles/failures/resolved, stagnation events, blind-edit
+  events, mutation totals.
+
+Deterministic suite: `241 passed, 38 subtests passed, 1 warning`
+(15 new tests in `tests/test_working_memory.py`). Phase 2 (coverage,
+edit concentration, ranked localization, host-enforced stagnation
+inspection surface) and Phase 3 (compressed decision history) are
+deliberately not started yet.
+
+Two loop-hygiene fixes landed with the first experiment run:
+
+- The board is now printed to the transcript each turn
+  (`🧠 [working memory] ...`) in addition to the prompt message, so runs
+  are analyzable from logs.
+- One chat timeout no longer ends the run: the loop retries once inside
+  the same logical turn (the existing bounded retry policy), so a single
+  slow provider turn cannot kill a 60-iteration run. The first
+  working-memory django run died this way at iteration 5 before any
+  mutation, with zero board events accumulated.
+
+### Working memory Phase 1 experiment result (django-14034)
+
+The first full experiment run (60 iterations, 9/10 graded) produced two
+findings:
+
+1. The board worked mechanically (goals, transitions, cycles_unchanged,
+   STAGNATION from cycle 3, edit concentration) but the failure
+   fingerprint was degenerate: the delegated unittest summary carries a
+   traceback location with no extracted exception line, so every failure
+   collapsed into "Failure: traceback". `normalize_fingerprint` now falls
+   back to the runner's own summary error label so distinct failures stay
+   distinct.
+2. The model ignored the displayed stagnation signal for 40+ iterations
+   and kept the identical behavior — empirically confirming that board
+   text alone does not break fixation. Phase 2's host-enforced inspection
+   surface is the required intervention.
+
+### Working memory Phase 2 (coverage, localization, enforced stagnation)
+
+- Mechanical read telemetry: per-file `reads` and `relevant_reads`
+  (whether the read content contained the active failure's tokens — an
+  exposure claim, never a comprehension claim).
+- Ranked localization: failure-token search over bounded text files
+  (noise dirs skipped, test-owned paths excluded); identifier matches
+  rank above filename matches; capped at 5. Rendered as
+  `UNINSPECTED candidates implicated by the failure tokens` when the
+  active failure is stagnant.
+- Stagnation policy enforcement: while the same failure is unchanged,
+  a mutation on a file that already has edits is REJECTED at dispatch
+  with a policy message, and the rejected-mutation recovery mechanism
+  forces one bounded inspection before another edit. Edits to files with
+  zero edits (e.g. an uninspected candidate) remain legal — the model
+  keeps agency over which file, the host constrains the action.
+- Board additions: `STAGNATION ACTION` policy line and per-file
+  `(read Nx, relevant Mx)` coverage on the edit-concentration line.
+
+Deterministic suite: `246 passed, 38 subtests passed, 1 warning`
+(20 working-memory tests).
+
+## 2026-08-17 — single-actor classification and SWE-bench instance registry
+
+### Grader environment classification
+
+Three lru_cache runs failed at the independent grader with
+`python3.14: No module named pytest` because the benchmark was launched with the
+host interpreter instead of `.venv-swebench/bin/python`. The baseline contract
+had counted that environment failure as a valid product baseline, so the model
+burned full budgets on a doomed environment.
+
+`independent_grader.py` now classifies a checker failure whose cause is a
+missing import of a module that is not a task product file (per the task's
+setup modules or the workspace itself) as `ENVIRONMENT_INVALID` instead of
+`FAIL`. Consequences: the baseline gate refuses the run before any model call;
+the acceptance phase records `ENVIRONMENT_INVALID` honestly; `agentic_benchmark.py`
+skips the verifier-repair pass on `ENVIRONMENT_INVALID` because a host
+environment gap is not actor-repairable.
+
+Deterministic verification: `213 passed, 38 subtests passed, 1 warning`. New
+coverage is in `tests/test_adversarial_preflight.py`.
+
+### lru_cache rerun with the correct interpreter
+
+`./.venv-swebench/bin/python agentic_benchmark.py --task lru_cache
+--condition baseline ... --model qwen3.8-27b --backend llama-cpp`:
+
+- acceptance grader: PASS; 5 iterations; 7 tool calls; 2 repair mutations; 1
+  successful repair cycle; clean `finish_task`; 147.1s; iteration target met;
+- hidden shadow grader: FAIL — the actor satisfied the visible suite but did
+  not implement the eviction-hook firing or TTL cleanup semantics, which no
+  visible test exercises. By design the shadow detail never reaches the actor.
+
+Trajectory was test-first and focused. The remaining gap is hidden-semantics
+coverage, which is exactly what the shadow layer measures; no task-specific
+hint was added.
+
+### SWE-bench instance registry and django__django-14034
+
+`swebench_runner.py` is now an instance registry instead of a SymPy-only
+script. `--instance django__django-14034` is added with:
+
+- base commit `db1fc5cd3c5d36cdb5d0fe4404efd6623dd3e8fb` extracted to
+  `assets/benchmarks/django-14034`;
+- a dedicated Python 3.10 venv at
+  `assets/benchmarks/django-14034/.venv-django` (Django 4.0 does not support
+  the host 3.14) with Django installed non-editable; the runner prepends the
+  workspace to `PYTHONPATH` so the candidate source shadows the installed copy;
+- grader applies the dataset test patch to a separate copy and runs
+  `tests/runtests.py --verbosity 2` over the parsed FAIL_TO_PASS/PASS_TO_PASS
+  labels. Probe result: 10 runnable tests, base commit fails the F2P test as
+  required.
+
+The problem statement, test patch, and test lists come only from the dataset
+metadata; the harness carries no task-specific answer. `--mode baseline`
+matches the single-actor policy.
+
+### django__django-14034 loop-fix saga (condensed changelog)
+
+A first 15-iteration smoke run ended 9/10 graded: the actor fixed the
+sub-field validation semantics but the required-attribute rendering still
+failed, and ~8 of its final turns were consumed by a recovery loop — after a
+`patch_file` block-mismatch rejection, the one bounded recovery inspection
+was repeatedly satisfied by `list_symbols`, which cannot supply exact block
+text, so each following patch was guessed from memory and rejected again.
+
+Across the next several runs, each surfaced and fixed one generic loop
+defect, all still load-bearing today:
+
+- **Exact-read requirement.** A block-mismatch rejection is tracked
+  separately from other mutation rejections; the recovery surface narrows to
+  `read_file` alone (a symbol listing cannot feed another guessed block), and
+  the allowance is consumed only by an actual `read_file` of the rejected
+  path.
+- **Symbol map on rejection.** The recovery checkpoint injects a bounded
+  symbol map (kind/name/line) of the rejected file so the forced read lands
+  on the right region of a large file instead of the header (a second run
+  showed the forced read landing on offset 1 while the target class was much
+  deeper).
+- **Replay-guard parity.** `_rejection_needs_exact_read()` treats
+  replay-guard rejections (`already failed/succeeded in the current run`) the
+  same as block mismatches — otherwise a `list_symbols` call could consume
+  the recovery allowance while the same hallucinated patch replayed forever.
+- **`run_tests` delegates to the declared interpreter.** When
+  `VIRTUAL_ENV` differs from the running interpreter, `run_tests` now
+  delegates the whole check to `$VIRTUAL_ENV/bin/python`, passing the sandbox
+  root and repository `PYTHONPATH` explicitly. Without this, the actor saw
+  misleading Python-3.14 collection errors (`No module named 'asgiref'`) and
+  patched an unrelated package file.
+- **Harness-evidence classification.** `run_tests` classifies a run whose
+  errors are import failures, setUp/tearDown failures, or one repeated
+  framework-initialization traceback (zero assertion failures) as harness
+  evidence, and tells the actor to use the project's own test entry point via
+  `run_command` instead of continuing to patch product code.
+- **Runner metadata in the prompt.** The runner appends the instance's
+  supported test entry point (e.g. `tests/runtests.py --verbosity 2 <label>`
+  for Django) to the task prompt as harness metadata — naming the runner,
+  never the tests to satisfy.
+- **Thinking-mode timeout tuning.** Thinking turns are much slower (32.9s to
+  91.7s observed); forced-action turns in thinking mode are capped at
+  `THINKING_ACTION_MAX_TOKENS=1536` (~100s), and swebench_runner needs a
+  correspondingly larger `--chat-timeout` (240s worked) for thinking runs.
+  The llama.cpp adapter surfaces `reasoning_content` as `message.thinking` and
+  extracts inline `<think>...</think>` blocks.
+- **git-init per candidate.** Candidate workspaces are plain archive
+  extracts, so `git_status`/`git_diff` rejected them as "not inside a git
+  working tree" even though those tools are offered. The runner now
+  initializes each candidate as a real git repo (git init + add + commit,
+  ~5s) before the agent starts; the grader copy inherits it.
+- **Disk-full fix.** The system volume hit 100% and killed three runs
+  because `swebench_runner.py` never removed per-run temp workspaces and
+  copied the full source tree twice per run (~120MB). The runner now removes
+  both temp workspaces after the report/transcript are written, and uses
+  `_clone_tree` (APFS `cp -cR` copy-on-write clone, real-copy fallback) so a
+  116MB Django clone adds ~0 bytes to the volume. Per-run marginal disk cost
+  is now only the actor's edit deltas plus the applied test patch. The Django
+  base checkout and its venv under `assets/benchmarks/` are intentional
+  persistent assets.
+
+Deterministic suite after the full saga: `226 passed, 38 subtests passed, 1
+warning` (accumulated through the individual fixes above; `252 passed` after
+the later edit_range/reproduce-first work).
+
+## Condensed changelog: durable generic fixes from the retired novelty/4B era
+
+Everything in this section predates the single-actor baseline policy and was
+originally driven by `agentic_benchmark.py` fixtures (`cascading_loop`,
+`websocket_chat`, `multi_file_transaction`, `real_app`, `3d_scene`,
+`wifi_simulator`, `feature`, `dependency-graph`, an old `Todo` app, and a
+now-abandoned SymPy MLX/4B trajectory). The 4B worker, novelty context,
+action-critic/action-gate, and MLX backend that drove these fixes are
+retired. What follows is *not* narrative — it is the list of generic,
+model-agnostic mechanisms those hundreds of turns produced that are still
+live in the code today.
+
+**Lifecycle FSM & control plane** (`lifecycle_fsm.py`, `lifecycle_policy.py`,
+`action_governor.py`):
+
+- Explicit states `ORIENT/ACT/VALIDATE/REPAIR/RECOVER/COMPLETE/FAILED` with a
+  strict transition table; illegal transitions raise `InvalidTransition`
+  instead of silently falling through scattered conditionals.
+- Setup/dependency failures and genuine product/behavior failures are a
+  first-class separate plane. A missing runner, missing dependency, or
+  zero-test discovery never unlocks product mutation; only a real assertion
+  failure does. This one distinction fixed a long series of loops where the
+  actor rewrote correct code to compensate for a broken test harness.
+- Command-plane / tool-plane guards classify shell commands with tokenized
+  parsing (`shlex`) rather than raw regex over command text, to correctly
+  separate mutation from inspection from output-only commands across many
+  false-positive shapes: inline interpreter readbacks (`node -e`, `python -c`
+  that reads+prints a file), redirects vs. comparisons/arrows/markup inside
+  quoted code (`>`, `=>`, `->`), `sed -i`/`perl -pi`/`tee`/`writeFileSync`
+  (case-insensitively), Python's file `open()` vs. `urlopen()`, and
+  output-only commands whose printed text merely contains words like
+  "assert" or "passed".
+- Orientation gate: a bounded read-only exploration window before mutation/
+  validation tools are forced; a zero-length or `lines 1-0` read no longer
+  counts as orientation evidence; inventory tools (`list_workspace`,
+  `list_dir`, `find_files`) are distinguished from tools that return actual
+  source evidence, so inventory can't consume the one inspection allowance.
+- Repair-recovery bounded checkpoints: after repeated repair turns without a
+  mutation, context compacts to the task, last accepted mutation, and latest
+  failure packet, exposing only a narrow legal-action surface. A
+  block-mismatch or replay-guard rejection requires an exact re-read before
+  another mutation is legal (this mechanism is the direct ancestor of the
+  django-14034 exact-read/symbol-map fix above). Rejected mutation results
+  are promoted into the next repair packet so a malformed patch isn't blindly
+  repeated.
+- Protected supplied-test paths: test files present at run start are
+  snapshotted and protected; an attempted edit is restored and rejected, with
+  a path-level block preventing replay. Newly actor-created test files remain
+  editable.
+- Destructive-rewrite rollback (`risk_layer.py`): a `write_file` on an
+  existing file that removes more than 65% of its non-blank lines is
+  automatically rolled back to the pre-edit snapshot rather than accepted.
+- Multi-file transaction buffer (`transaction_buffer.py`): tracks accepted
+  product mutations, defers validation only while a transaction genuinely has
+  multiple pending files (not on every ordinary repair mutation), and
+  immediately replays the last known failing test once a transaction's
+  second file lands. It never rolls back an ordinary failed validation — only
+  `risk_layer.py`'s narrow destructive-rewrite/protected-test guards do that.
+- 4B-specific mechanisms (synchronous triage, action-critic, action-gate,
+  freshness-gated advisory judgments) were fully retired after paired
+  ablations repeatedly showed no capability or speed benefit and sometimes a
+  regression (e.g. stale advice steering the actor away from the actual
+  failing check). The deterministic FSM/policy engine was authoritative
+  throughout and remains so.
+
+**Validation contract** (`validation_contract.py`):
+
+- Task-derived acceptance extracts interfaces and typed fields from the task
+  text; coverage is method+path-aware (a `POST /api/tasks` probe no longer
+  satisfies a required `GET /api/tasks` check).
+- Three-way outcome classification — `setup` / `verification` /
+  `non_evidence` — so dependency installs, process starts, and zero-exit
+  no-assertion commands can't be mistaken for product evidence, and can't be
+  mistaken for product *failures* either (they reopen validation, not
+  repair).
+- Weak-probe detection: file dumps, source listings, version/help output,
+  npm/pip/pytest setup output, and environment metadata are recognized as
+  non-evidence so a correct artifact isn't rewritten to satisfy a bad probe.
+- Explicit checker-failure summaries (`N failed`, `checks: N failed: [...]`)
+  are recognized even when the wrapper exits 0; an empty failure list
+  (`failed: []`) and zero-count terms (`0 failed`, `0 errors`) are correctly
+  parsed as success rather than failure.
+- Endpoint/interface extraction excludes conventional temp/home/workspace
+  paths and verifier traceback text, so a grader's own file paths can't be
+  mistaken for a required application endpoint.
+
+**Test runner** (`workspace/run_tests_tool.py`):
+
+- Preserves bounded failure/error names, traceback tail, `File:line` frames,
+  and assertion diff (`+`/`-`) operands as actionable evidence instead of
+  aggregate pass/fail counts only.
+- Falls back to pytest when unittest discovers zero tests, and further falls
+  back to direct execution of top-level `test_*` functions when pytest is
+  unavailable, without pretending to implement pytest fixtures/plugins.
+- Evicts stale project modules from `sys.modules` before each run so edits
+  are re-imported instead of validating against a cached earlier version.
+- Delegates to the task's declared interpreter (`VIRTUAL_ENV`) when it
+  differs from the runner's own interpreter.
+- `find_files` glob matching handles `**/` correctly for root-level files
+  (Python's `fnmatch` otherwise treats `**/` as requiring a subdirectory).
+
+**Grader / benchmark harness** (`independent_grader.py`,
+`agentic_benchmark.py`, `swebench_runner.py`):
+
+- Grader source and execution run outside the actor's own workspace (used to
+  be an in-workspace file with only a prompt convention protecting it).
+- Supplied-test integrity check: hashes snapshotted pre-run; any actor
+  tamper on a supplied test → `UNSAFE_WORKSPACE_CHANGE`, which the grader
+  cannot turn into a pass and which skips verifier-repair.
+- `fail_to_pass`/`pass_to_pass` preconditions: the baseline must genuinely
+  fail before the actor starts; timeout/invalid-environment results are not
+  accepted as a valid baseline failure.
+- Hidden/shadow acceptance layer: a benchmark-owned held-out check the actor
+  never sees in its prompt or repair feedback; only a generic "hidden
+  acceptance evidence failed" signal reaches the actor on failure.
+- Mutation-guided grader-strength tests: the host applies known-wrong
+  mutations to a private workspace copy and asserts at least one grading
+  layer rejects each one, proving the checker isn't trivially satisfiable.
+- `ENVIRONMENT_INVALID` classification (2026-08-17, still current): see
+  above.
+- Grading has its own wall-clock budget (`--grade-timeout`, separate from the
+  run budget) so one hanging/slow test can't dominate the cycle.
+- Scorecard tracks `run_completed`/`finish_called`/`handoff_reconciled`
+  separately — a correct partial artifact without `finish_task` is not
+  silently a pass; narrow reconciliation applies only to a clean process
+  exit plus an explicit provider-loss signature plus an independent pass.
+- A deterministic, model-free adversarial preflight
+  (`tests/test_adversarial_preflight.py`) runs before every real-model
+  benchmark call and has grown into a large corpus of command-plane/
+  evidence-classification edge cases, so most regressions are caught for
+  free before spending a model call.
+- Per-run temp workspaces use `_clone_tree` (APFS copy-on-write, real-copy
+  fallback) and are deleted after the report/transcript are written.
+- Candidate workspaces are initialized as real git repos (`git init` + one
+  baseline commit) so `git_status`/`git_diff` tools work.
+
+**Provider/transport** (`agent.py`, llama.cpp adapter):
+
+- Tool-call arguments are serialized to JSON strings at the transport
+  boundary (some OpenAI-compatible servers require a string, not a dict).
+- The llama.cpp adapter translates `tool_choice` to the string `"required"`
+  form it expects, sends `enable_thinking` explicitly, surfaces reasoning as
+  `message.thinking`, and extracts inline `<think>...</think>` blocks from
+  content when the template returns reasoning inline.
+- Terminal vs. retryable provider errors are distinguished: connection
+  refused / DNS failures are terminal immediately; specific transient
+  disconnect signatures (`RemoteDisconnected`, remote-end-closed, peer reset)
+  are retried once with a short delay, then terminal — a dead provider can't
+  create an overnight retry storm.
+- A hard wall-clock guard (`SIGALRM`) wraps model calls in addition to the
+  transport timeout, so a stalled generation can't hang the run.
+- Forced/recovery-turn token budget is raised (4096 tokens; capped lower —
+  1536 — in thinking mode) so forced tool calls have enough headroom to
+  complete instead of truncating mid-call.
+- The command tool rejects literal newlines in single-line argv tokens for
+  providers that can't safely encode them; `run_command`'s own argv path (no
+  shell) safely allows genuine multiline interpreter arguments.
+- Context bounding (`_bound_live_tool_results()`) keeps raw tool output
+  within a percentage of the provider's context window (discovered via
+  `/props` or configured `NUM_CTX`), with an exact pre-request `/tokenize`
+  measurement and remeasure-and-trim loop when the provider exposes it,
+  raising `PromptBudgetError` rather than sending or retrying a doomed
+  oversized request.
+
+**Editor evolution**: `patch_file` (exact block match) → ambiguity guard
+(rejects multi-occurrence matches instead of silently replacing the first) →
+renamed/stricter fields (`find_exact_block`/`replace_with_block`, strict
+Pydantic, `additionalProperties: false`) → `apply_patch` (atomic multi-file
+editor, A/B'd twice against `patch_file` on the frozen `multi_file_transaction`
+task — technically sound and transaction-safe, but not a convergence win: the
+actor tended to make one correct edit, then replay a stale second patch and
+repeat `finish_task` instead of recovering, relying on bounded verifier-repair
+to finish the job; not adopted as default) → **`edit_range`** (current
+default, see the 2026-08-17 section above). `write_file` rejects overwriting
+an existing file and directs the actor to the active editor instead; shell
+write side-channels (`shutil.copy*`, `os.replace`/`rename`, `write_bytes`,
+`sed -i`, `perl -pi`, `writeFileSync`, `tee`, redirects) are all classified
+as MUTATE so they can't bypass the editor contract.
+
+## Registered tasks
+
+**`swebench_runner.py`** (current entrypoint): `django__django-14034`,
+`sympy__sympy-13878`.
+
+**`agentic_benchmark.py`** (older harness, mostly retired-condition test
+beds — kept only because `lru_cache`/`bug_repair` are still exercised):
+`lru_cache`, `bug_repair`, `cascading_loop`, `multi_file_transaction`,
+`websocket_chat`, `3d_scene`, `real_app`, `wifi_simulator`, `feature`,
+`data_report`, `recovery`, `dependency-graph`. The last several were single
+runs used to find and fix one generic engine defect each (folded into the
+changelog above); do not treat their individual pass/fail history as a
+current capability claim.
+
+## Open items
+
+- **django-14034 `edit_range` validation run** — in flight as of this write;
+  check `state/benchmark/runs/` and `state/benchmark/agentic/results.jsonl`
+  for the outcome before drawing conclusions about whether the turn-2
+  block-mismatch loop is actually gone under the new editor.
+- **Turn-efficiency on django-14034** remains the main open gap: even
+  successful runs used far more turns than the frozen `agentic_benchmark`
+  fixtures' strict iteration targets ever allowed. `edit_range` is the
+  current bet on reducing that; if it doesn't move the needle, look at
+  multi-action-per-turn batching rather than more orientation suppression.
+- **`apply_patch` vs. `patch_file`/`edit_range`**: not adopted as default;
+  if revisited, A/B it specifically against `edit_range` on the frozen
+  `multi_file_transaction`-equivalent case rather than assuming the older
+  `apply_patch` result still applies.
+- Working memory Phase 3 (compressed decision history) has not been started.
+- Pydantic v2 strict/`extra=forbid` migration is applied to tool-argument
+  models and is the intended pattern for any new model-facing contract;
+  internal FSM/event objects stay dataclasses by design.
