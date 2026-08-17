@@ -4206,3 +4206,25 @@ records, and persisted monitor events. Use `strict=True` and `extra="forbid"`
 after the host's narrow alias-normalization step. Keep internal FSM/event
 objects and process/callable holders as dataclasses. This preserves simple,
 fast host state while making model-facing contracts explicit.
+
+### Second-pass toolset decision
+
+The current registry is a capable internal inventory but too broad as one
+27B-facing surface: 16 non-network tools and roughly 10,000 serialized schema
+characters before `finish_task`. Research on SWE-agent, Claude Code, and the
+OpenAI Agents SDK converges on a compact read/search/edit/write/execute core,
+with optional tools revealed by lifecycle phase.
+
+Recommended actor core:
+`find_files`, `read_file`, `grep_dir`, one multi-file-capable `apply_patch`,
+new-file-only `write_file`, argv-based `run_command`, and `finish_task`.
+`process_status`/`stop_process`, review tools, structural symbol lookup,
+network tools, and broad inventory should be conditional. `run_tests` should
+be a validation-phase shortcut or host-triggered check rather than a globally
+visible duplicate of `run_command`.
+
+The next change is an A/B experiment for a standard multi-file `apply_patch`
+editor against the existing `patch_file`. It must use the unchanged frozen
+cascading and multi-file benchmarks. Do not permanently expose both mutation
+tools; select one after measuring convergence, patch failures, first mutation,
+validation count, and hidden-grader outcome.

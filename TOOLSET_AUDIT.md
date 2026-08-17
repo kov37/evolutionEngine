@@ -194,3 +194,80 @@ it rejects hallucinated argument names instead of silently ignoring them.
 The migration should be incremental: tool arguments first, then worker and
 grader packets, followed by persisted telemetry. Do not rewrite the FSM or
 the whole event ledger merely to use `BaseModel`.
+
+## Second-pass research result: the minimal multi-file surface
+
+The current registry is functionally capable but too broad as a single visible
+surface: 16 non-network tools and about 10,000 serialized schema characters
+before the completion tool. That is not automatically bad for a large model,
+but it gives a 27B model too many nearby choices and increases stale-tool
+replays.
+
+The primary implementations reviewed converge on a small primitive set:
+
+- SWE-agent documents a shell, file viewer, search, and editor as its core
+  bundle.
+- Claude Code exposes Read, Edit, Write, and Bash, with allow/deny filtering
+  and bounded turns.
+- OpenAI's current agent guidance describes shell and apply-patch as local
+  execution primitives, plus conditional tool enabling and per-tool
+  guardrails.
+
+The important pattern is progressive disclosure: the model sees only the
+tools needed for the current phase. This is also consistent with tool schemas
+being part of the input context and therefore part of the choice and token
+budget.
+
+### Recommended actor surface
+
+The recommended long-term surface is seven capabilities:
+
+```text
+find_files     # Glob: locate files and bounded project inventory
+read_file      # Read: exact source excerpts
+grep_dir       # Grep: recursive text search across files
+apply_patch    # Edit: one atomic patch that may touch multiple files
+write_file     # Write: create a new file; reject accidental overwrite
+run_command    # Bash-equivalent: argv execution, tests, services, probes
+finish_task    # Completion request, still subject to host evidence gates
+```
+
+`apply_patch` is a proposed replacement for the current single-file
+`patch_file`, not an additional permanent mutation tool. It should support a
+standard multi-file patch and be tested against the transaction buffer. Keeping
+`write_file` distinct is useful for creating a brand-new application file, but
+it should not silently rewrite an existing product file.
+
+### Conditional tools
+
+These should remain implemented but hidden from the normal initial prompt:
+
+```text
+process_status, stop_process  -> expose only after background=true
+git_diff, git_status           -> expose during review or recovery
+run_tests                      -> host shortcut or validation phase only
+list_symbols                   -> expose only when structural Python lookup helps
+diff_files                     -> recovery/review only; run_command can cover it
+list_workspace, list_dir       -> remove from normal actor surface
+search_file                    -> merge into grep_dir or expose only for a known file
+web_search, fetch              -> explicit network mode only
+```
+
+This is consolidation by visibility and semantics, not by deleting useful
+host capabilities. The host can still invoke specialized checks itself.
+
+### Decision
+
+The present set is a good internal implementation inventory, but it is not the
+best default model-facing inventory. The next tool change should be a measured
+replacement experiment:
+
+1. add `apply_patch` as a multi-file-capable editor;
+2. run the unchanged cascading and multi-file benchmarks;
+3. compare it against the current `patch_file` surface;
+4. only then remove `patch_file` from the actor surface;
+5. add the phase selector so the actor normally sees 4–7 tools, not 16+.
+
+Do not add a universal “smart repository” tool. Its broad mode parameter would
+hide several behaviors behind one schema and make a small model's decisions
+less predictable.
