@@ -23,6 +23,7 @@ import action_governor
 import adaptive_budget
 import escalation_governor
 import kernel.io_tools as io_tools
+from agent_run_state import AgentRunState
 from recovery_state import RecoveryKind, RecoveryState
 from repair_state import RepairState
 import kernel.memory as memory
@@ -1228,10 +1229,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     TASK_STATE["done"] = False
     TASK_STATE["requested"] = False
     TASK_STATE["summary"] = None
-    # Host-owned working memory: a deterministic state board the actor reads
-    # every turn. Off by default so every phase stays A/B-able against the
-    # untouched baseline loop.
-    wm = build_working_memory(task) if working_memory_enabled else None
     # Reproduce-first (TDD) gate: product mutations stay locked until one
     # genuinely failing execution demonstrates the bug. A passed check or a
     # rejected tool call is not evidence.
@@ -1246,16 +1243,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     context_summary = ""
     memory.reset_archive()
     entry_positions = {}  # entry_number -> index into `messages` of its raw tool-result message
-    state = structured_state.StructuredState(task) if structured_summary_enabled else None
-    # working_state.py: layer-3 memory MVP (pasted proposal, this session) —
-    # a restartable checkpoint rather than a conversation summary. See its
-    # module docstring for how layers 1/2 (event log, evidence archive)
-    # already exist as ledger.history/memory.ARCHIVE below; ws_since_index
-    # tracks how much of ledger.history the last checkpoint() call already
-    # saw, so each checkpoint only sends genuinely new events.
-    ws = working_state.WorkingState(
-        objective=(task if len(task) <= 300 else task[:300] + "...(truncated)"), task_type=task_type,
-    ) if working_state_enabled else None
     ws_since_index = 0
     # The full progress-governor system (action_governor + task_contract +
     # progress_governor + escalation_governor + risk_layer) — see each
@@ -1275,17 +1262,22 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # was accidentally limited to the older summary modes, so the very mode
     # intended to improve small-model recovery could still rewrite a supplied
     # test without a rollback path.
+    #
+    # All ten cross-turn subsystem handles (working memory, structured-state/
+    # working-state summaries, the progress-governor quartet, novelty
+    # context, and the lifecycle FSM) live on one AgentRunState instead of
+    # as separate loop locals — see agent_run_state.py's module docstring.
     _governed = structured_summary_enabled or working_state_enabled or novelty_context_enabled
-    ledger = action_governor.EvidenceLedger() if _governed else None
-    contract = task_contract.CONTRACTS_BY_TYPE.get(task_type, task_contract.CODE_CHANGE_CONTRACT)
-    escalation = escalation_governor.EscalationState() if _governed else None
-    risk = risk_layer.RiskLayer() if _governed else None
-    transaction = (
-        transaction_buffer.TransactionBuffer(get_root(), followup_turns=1)
-        if _governed else None
+    agent_state = AgentRunState.create(
+        task=task,
+        task_type=task_type,
+        working_memory_enabled=working_memory_enabled,
+        structured_summary_enabled=structured_summary_enabled,
+        working_state_enabled=working_state_enabled,
+        novelty_context_enabled=novelty_context_enabled,
+        novelty_worker_model=novelty_worker_model,
+        governed=_governed,
     )
-    if risk is not None:
-        risk.protect_existing_tests(get_root())
     # adaptive_budget.py's repo_size_hint — computed ONCE here (not derived
     # from the ledger, which would be circular, see adaptive_budget.py's
     # own docstring) from a cheap, non-recursive top-level listing. Real
@@ -1310,7 +1302,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     # iteration's value on turns that branch doesn't run, e.g. iteration 1).
     current_level = 0
     recent_errors = []
-    novelty_context = NoveltyContext(worker_model=novelty_worker_model) if novelty_context_enabled else None
     live_tool_char_budget, provider_context_tokens = _live_tool_result_char_budget(backend, base_url)
     print(f"📐 [context budget] provider_n_ctx={provider_context_tokens}; "
           f"raw_tool_fraction={RAW_TOOL_CONTEXT_FRACTION:.2f}; "
@@ -1359,7 +1350,6 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
     orientation_turns_without_mutation = 0
     orientation_recovery_read_used = False
     no_action_turns = 0
-    lifecycle = LifecycleFSM()
     stale_service_restart_pending = False
     stale_service_restart_note = ""
     agent_started_at = time.monotonic()
@@ -1369,7 +1359,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
 
     def repair_metrics():
         return {
-            "lifecycle": lifecycle.metrics(),
+            "lifecycle": agent_state.lifecycle.metrics(),
             "validation_failures": validation_failures_total,
             "repair_mode_entries": repair.repair_mode_entries,
             "repair_mutations": repair_mutations,
@@ -1378,7 +1368,7 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
             "orientation_turns_without_mutation": orientation_turns_without_mutation,
             "revalidation_attempts": repair.revalidation_attempts,
             "successful_repair_cycles": repair.successful_repair_cycles,
-            "transaction": transaction.metrics() if transaction is not None else None,
+            "transaction": agent_state.transaction.metrics() if agent_state.transaction is not None else None,
         }
 
     def timing_metrics():
@@ -1393,13 +1383,13 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
 
     def close_novelty_context():
         print(f"🧰 [repair metrics] {json.dumps(repair_metrics(), sort_keys=True)}")
-        if wm is not None:
-            print(f"🧠 [working memory metrics] {json.dumps(wm.metrics(), sort_keys=True)}")
+        if agent_state.working_memory is not None:
+            print(f"🧠 [working memory metrics] {json.dumps(agent_state.working_memory.metrics(), sort_keys=True)}")
         print(f"⏱️ [agent timing] {json.dumps(timing_metrics(), sort_keys=True)}")
         cleanup_background_processes()
-        if novelty_context is not None:
-            novelty_context.close()
-            print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
+        if agent_state.novelty is not None:
+            agent_state.novelty.close()
+            print(f"🧬 [novelty metrics] {json.dumps(agent_state.novelty.metrics(), sort_keys=True)}")
 
     edit_guidance = (
         "Prefer edit_range for edits: name the line ranges (as shown by read_file) and supply the new "
@@ -1439,7 +1429,7 @@ Rules:
     ]
 
     for iteration in range(1, iteration_budget + 1):
-        lifecycle.transition("turn")
+        agent_state.lifecycle.transition("turn")
         print(f"\n🌀 [Iteration {iteration}/{iteration_budget}] Calling {MODEL}...")
 
         # The summary is appended fresh here, for this call only — never
@@ -1452,7 +1442,9 @@ Rules:
         # cache matching requires an unbroken identical prefix from
         # position 0 — confirmed live: prompt-eval time grew from ~2s to
         # 87s over 15 iterations before this fix.
-        if structured_summary_enabled and (state.files_explored or state.facts_accumulated):
+        if structured_summary_enabled and (
+            agent_state.structured_state.files_explored or agent_state.structured_state.facts_accumulated
+        ):
             if ENABLE_PRUNING and entry_positions:
                 recall_note = (
                     f"\n\n(Entries 1-{len(entry_positions)} so far. Some older raw tool outputs have been "
@@ -1467,8 +1459,8 @@ Rules:
                     "present above in full, unmodified. Do NOT call read_file again for something you've "
                     "already read once; that's redundant and slow.)"
                 )
-            messages_for_call = messages + [{"role": "system", "content": state.render() + recall_note}]
-        elif working_state_enabled and ws.revision > 0:
+            messages_for_call = messages + [{"role": "system", "content": agent_state.structured_state.render() + recall_note}]
+        elif working_state_enabled and agent_state.working_state.revision > 0:
             # Only inject once at least one checkpoint has actually landed —
             # an empty just-constructed WorkingState has nothing worth
             # showing over the raw task text already in `messages`.
@@ -1480,7 +1472,7 @@ Rules:
                 f"already seen.)"
                 if entry_positions else ""
             )
-            messages_for_call = messages + [{"role": "system", "content": working_state.render(ws) + recall_note}]
+            messages_for_call = messages + [{"role": "system", "content": working_state.render(agent_state.working_state) + recall_note}]
         elif context_summary_enabled and context_summary:
             recall_note = (
                 f"\n\n(Entries 1-{len(entry_positions)} so far. Some older raw tool outputs have been "
@@ -1541,11 +1533,11 @@ Rules:
             )}]
             completion_nudge_pending = False
 
-        if novelty_context is not None:
-            if novelty_action_critic and novelty_context.requires_progress():
+        if agent_state.novelty is not None:
+            if novelty_action_critic and agent_state.novelty.requires_progress():
                 messages_for_call = _intervention_messages(messages_for_call)
             messages_for_call = messages_for_call + [{
-                "role": "system", "content": novelty_context.render_for_model(
+                "role": "system", "content": agent_state.novelty.render_for_model(
                     action_critic=novelty_action_critic),
             }]
 
@@ -1599,20 +1591,22 @@ Rules:
                 "content": initial_action_instruction,
             }]
             print(f"🎯 [initial action contract] {[t.__name__ for t in tools_for_call]}")
-        if _governed and ledger.history:
-            signal = progress_governor.evaluate(ledger, contract, task=task, repo_size_hint=repo_size_hint)
-            last_dup = next(
-                (e["scope"] for e in reversed(ledger.history) if e["is_duplicate"]), None
+        if _governed and agent_state.ledger.history:
+            signal = progress_governor.evaluate(
+                agent_state.ledger, agent_state.contract, task=task, repo_size_hint=repo_size_hint
             )
-            level = escalation.update(signal, last_duplicate_scope=last_dup)
+            last_dup = next(
+                (e["scope"] for e in reversed(agent_state.ledger.history) if e["is_duplicate"]), None
+            )
+            level = agent_state.escalation.update(signal, last_duplicate_scope=last_dup)
             current_level = level
-            if level == 5 and escalation.consecutive_no_progress >= HARD_STOP_AFTER_TURNS:
-                mutations = [e for e in ledger.history if e["capability"] == "MUTATE"]
+            if level == 5 and agent_state.escalation.consecutive_no_progress >= HARD_STOP_AFTER_TURNS:
+                mutations = [e for e in agent_state.ledger.history if e["capability"] == "MUTATE"]
                 succeeded = sum(1 for e in mutations if e["succeeded"] is True)
                 failed = sum(1 for e in mutations if e["succeeded"] is False)
                 TASK_STATE["done"] = True
                 TASK_STATE["summary"] = (
-                    f"Harness-forced stop: {escalation.consecutive_no_progress} consecutive no-progress "
+                    f"Harness-forced stop: {agent_state.escalation.consecutive_no_progress} consecutive no-progress "
                     f"turns at escalation level 5 — the model did not comply with the forced finish_task "
                     f"restriction. {succeeded} mutation(s) succeeded, {failed} failed, out of "
                     f"{len(mutations)} attempted. This summary was generated by the harness, not the model "
@@ -1630,7 +1624,7 @@ Rules:
                 return True
             if level > 0:
                 intervention_msg, restricted_names = escalation_governor.build_intervention(
-                    level, signal, contract, {t.__name__ for t in tools}, escalation
+                    level, signal, agent_state.contract, {t.__name__ for t in tools}, agent_state.escalation
                 )
                 if restricted_names is not None:
                     tools_for_call = [t for t in tools if t.__name__ in restricted_names]
@@ -1648,13 +1642,13 @@ Rules:
                         "content": f"[progress governor — level {level}] {intervention_msg}{checkpoint_note}",
                     }]
 
-        orientation_recovery_active = lifecycle.state == LifecycleState.RECOVER
+        orientation_recovery_active = agent_state.lifecycle.state == LifecycleState.RECOVER
         orientation_evidence_available = False
         setup_failure = False
         if (not repair.validation_required and not repair.repair_required
-                and lifecycle.state == LifecycleState.ACT
+                and agent_state.lifecycle.state == LifecycleState.ACT
                 and orientation_turns_without_mutation >= ORIENTATION_TURN_BUDGET):
-            lifecycle.transition("orientation_stalled")
+            agent_state.lifecycle.transition("orientation_stalled")
             orientation_recovery_active = True
             print("🧭 [FSM] ACT -> RECOVER: orientation budget exhausted")
 
@@ -1731,7 +1725,7 @@ Rules:
                 ),
             )
             validation_tools = set(validation_policy.tools if validation_policy else ())
-            worker_advisory = _consume_worker_gate(novelty_action_gate, novelty_context)
+            worker_advisory = _consume_worker_gate(novelty_action_gate, agent_state.novelty)
             # The 4B is strictly suggestive.  It may report a stale or useful
             # recommendation for telemetry, but it never removes tools and
             # never changes lifecycle state.  The host policy above remains
@@ -1766,10 +1760,10 @@ Rules:
             }]
 
         if recovery.pending and repair.repair_required and not setup_failure:
-            if structured_summary_enabled and state is not None:
-                checkpoint_state = state.render()
-            elif working_state_enabled and ws is not None and ws.revision > 0:
-                checkpoint_state = working_state.render(ws)
+            if structured_summary_enabled and agent_state.structured_state is not None:
+                checkpoint_state = agent_state.structured_state.render()
+            elif working_state_enabled and agent_state.working_state is not None and agent_state.working_state.revision > 0:
+                checkpoint_state = working_state.render(agent_state.working_state)
             else:
                 checkpoint_state = ""
             messages_for_call = recovery.checkpoint_message(
@@ -1781,10 +1775,10 @@ Rules:
             # Keep the stable task foundation and recent evidence, then force
             # a concrete mutation. This is a compact repair checkpoint, not a
             # second unbounded transcript.
-            if structured_summary_enabled and state is not None:
-                checkpoint_state = state.render()
-            elif working_state_enabled and ws is not None and ws.revision > 0:
-                checkpoint_state = working_state.render(ws)
+            if structured_summary_enabled and agent_state.structured_state is not None:
+                checkpoint_state = agent_state.structured_state.render()
+            elif working_state_enabled and agent_state.working_state is not None and agent_state.working_state.revision > 0:
+                checkpoint_state = working_state.render(agent_state.working_state)
             else:
                 checkpoint_state = ""
             messages_for_call = _repair_checkpoint_messages(
@@ -1797,10 +1791,10 @@ Rules:
             # A trusted traceback excerpt already localizes the repair. Keep
             # the next actor prompt small instead of carrying the full stale
             # validation transcript into a mutation-only call.
-            if structured_summary_enabled and state is not None:
-                checkpoint_state = state.render()
-            elif working_state_enabled and ws is not None and ws.revision > 0:
-                checkpoint_state = working_state.render(ws)
+            if structured_summary_enabled and agent_state.structured_state is not None:
+                checkpoint_state = agent_state.structured_state.render()
+            elif working_state_enabled and agent_state.working_state is not None and agent_state.working_state.revision > 0:
+                checkpoint_state = working_state.render(agent_state.working_state)
             else:
                 checkpoint_state = ""
             messages_for_call = _source_backed_repair_messages(
@@ -1815,7 +1809,7 @@ Rules:
         # ledger has declared that state-changing progress is required.
         novelty_progress_tools = (
             _novelty_progress_tool_names(
-                novelty_context,
+                agent_state.novelty,
                 helper_mutation_blocked=bool(blocked_progress_helper_paths),
                 rejected_mutation_read_pending=recovery.pending,
                 rejected_mutation_needs_read=recovery.kind == RecoveryKind.EXACT_READ,
@@ -1823,7 +1817,7 @@ Rules:
             if novelty_action_gate else None
         )
         if novelty_progress_tools is not None:
-            repeated_action = novelty_context.repeated_validation_loop()
+            repeated_action = agent_state.novelty.repeated_validation_loop()
             if blocked_progress_helper_paths:
                 # Add the recovery-only aliases at the transition itself, not
                 # at run startup. This keeps the ordinary model prompt and
@@ -1853,7 +1847,7 @@ Rules:
                     "The same non-mutating action repeated. Validation and inspection are unavailable; "
                     "make one targeted mutation or call finish_task."
                 )
-            elif novelty_context.recovery_reads_allowed():
+            elif agent_state.novelty.recovery_reads_allowed():
                 gate_message = (
                     "The bounded context window requires progress. Use one targeted read if needed, "
                     "then make a mutation or call finish_task."
@@ -1879,8 +1873,8 @@ Rules:
         # compacted prompt cannot accidentally drop the list of files that
         # must be aligned.  It is derived entirely by the host and never
         # becomes mutable model state.
-        if transaction is not None:
-            transaction_status = transaction.control_block()
+        if agent_state.transaction is not None:
+            transaction_status = agent_state.transaction.control_block()
             if transaction_status:
                 messages_for_call = messages_for_call + [{
                     "role": "system",
@@ -1973,12 +1967,12 @@ Rules:
             ),
         }]
 
-        if wm is not None:
+        if agent_state.working_memory is not None:
             # The board is re-rendered from state on every turn, including
             # after checkpoint rebuilds — never reconstructed from old
             # messages, so context surgery cannot erase it. It is also
             # printed to the transcript so runs are analyzable.
-            board = wm.render(project_root=get_root())
+            board = agent_state.working_memory.render(project_root=get_root())
             if board:
                 print(f"🧠 [working memory] {board}")
                 messages_for_call = messages_for_call + [{
@@ -2005,7 +1999,7 @@ Rules:
                     chat_kwargs["tool_choice"] = "required"
                     chat_kwargs["max_tokens"] = _forced_action_max_tokens(think)
                 if (orientation_recovery_active and orientation_evidence_available
-                        and contract.requires("MUTATE") and backend == "llama-cpp"):
+                        and agent_state.contract.requires("MUTATE") and backend == "llama-cpp"):
                     # The FSM has reduced the legal registry to mutation
                     # tools. Require one tool call at the provider boundary as
                     # well, so a plain explanation cannot consume another
@@ -2053,7 +2047,7 @@ Rules:
                     chat_kwargs["max_tokens"] = _forced_action_max_tokens(think)
                     print("🧰 [source-backed repair] requiring a targeted tool call")
                 if _progress_tool_call_required(
-                    novelty_context, novelty_action_gate, backend, tools_for_call
+                    agent_state.novelty, novelty_action_gate, backend, tools_for_call
                 ):
                     # The final tool list has already been narrowed by the
                     # deterministic gate. Enforce that the actor selects
@@ -2162,13 +2156,13 @@ Rules:
                     status_path, iteration=iteration, iteration_budget=iteration_budget,
                     last_action_classification="MODEL_TIMEOUT" if isinstance(last_error, ChatTimeoutError) else "MODEL_ERROR",
                     escalation_level=current_level,
-                    ledger_size=len(ledger.history) if _governed else None,
+                    ledger_size=len(agent_state.ledger.history) if _governed else None,
                     distributions_done=status_report.classes_with_method(
                         io_tools._resolve(distribution_target_file), distribution_names
                     ) if distribution_target_file and distribution_names else None,
                     recent_errors=list(recent_errors), task_done=False,
                     task_summary=TASK_STATE["summary"],
-                    novelty_context=novelty_context.metrics() if novelty_context else None,
+                    novelty_context=agent_state.novelty.metrics() if agent_state.novelty else None,
                 )
             close_novelty_context()
             return False
@@ -2203,13 +2197,13 @@ Rules:
             no_action_turns += 1
             print("⚠️  Model returned no tool call — nudging it to act.")
             legal_names = {t.__name__ for t in tools_for_call}
-            if novelty_context is not None:
-                novelty_context.observe_no_action(
+            if agent_state.novelty is not None:
+                agent_state.novelty.observe_no_action(
                     iteration,
                     msg.content or "",
                     legal_actions=tuple(legal_names),
                 )
-                print(f"🧬 [novelty recovery] {novelty_context.render_for_model(action_critic=True)}")
+                print(f"🧬 [novelty recovery] {agent_state.novelty.render_for_model(action_critic=True)}")
             if legal_names & {"run_command", "run_shell", "run_tests"} and not legal_names & (GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS):
                 next_action = "run_command, run_shell, or run_tests to produce the required behavioral evidence"
             elif legal_names & (GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS):
@@ -2241,7 +2235,7 @@ Rules:
             for call in turn_calls:
                 if action_governor.classify(call.function.name, call.function.arguments) == "MUTATE":
                     for rel_path in _mutation_paths(call.function.name, call.function.arguments):
-                        risk.checkpoint(rel_path, io_tools._resolve(rel_path), iteration)
+                        agent_state.risk.checkpoint(rel_path, io_tools._resolve(rel_path), iteration)
 
         # Always enforced against whatever was actually offered THIS call
         # (tools_for_call), not just during forced-edit gating — the same
@@ -2251,7 +2245,7 @@ Rules:
         # full, unrestricted registry (dispatch still needs to look up the
         # real function for whatever's actually allowed).
         allowed_names = {t.__name__ for t in tools_for_call}
-        blocked_calls = novelty_context.blocked_calls() if novelty_context is not None else None
+        blocked_calls = agent_state.novelty.blocked_calls() if agent_state.novelty is not None else None
         blocked_command_calls = set()
         blocked_command_reasons = {}
         blocked_mutation_reasons = {}
@@ -2299,7 +2293,7 @@ Rules:
                             "🧪 [reproduce-first] product mutation locked until a failing "
                             f"reproduction runs (attempted {touched[0]})"
                         )
-            if (wm is not None and wm.stagnant()
+            if (agent_state.working_memory is not None and agent_state.working_memory.stagnant()
                     and call.function.name in GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS
                     and not _has_validation_helper_path(call.function.name, call.function.arguments)):
                 # Stagnation is a search-policy signal, not advice text: a
@@ -2308,9 +2302,9 @@ Rules:
                 # bounded inspection (the rejected-mutation recovery
                 # mechanism enforces the read on the next turn).
                 touched = _mutation_paths(call.function.name, call.function.arguments or {})
-                if touched and wm.state.mutations.get(touched[0], 0) > 0:
+                if touched and agent_state.working_memory.edit_count(touched[0]) > 0:
                     key = _call_key(call.function.name, call.function.arguments or {})
-                    cycles = wm.state.epochs[wm.state.active_target].fp_cycles_unchanged
+                    cycles = agent_state.working_memory.active_epoch_cycles_unchanged()
                     if last_validation_had_harness_evidence:
                         # No product edit can change a failure that is
                         # harness evidence (test-framework initialization,
@@ -2344,9 +2338,9 @@ Rules:
                                else "one focused inspection")
                             + f" before another edit to {touched[0]}"
                         )
-        if (novelty_action_gate and novelty_context is not None
+        if (novelty_action_gate and agent_state.novelty is not None
                 and _novelty_progress_tool_names(
-                    novelty_context,
+                    agent_state.novelty,
                     helper_mutation_blocked=bool(blocked_progress_helper_paths),
                     rejected_mutation_read_pending=recovery.pending,
                 ) is not None):
@@ -2449,9 +2443,9 @@ Rules:
         for call, tmsg in zip(turn_calls, tool_messages):
             if (
                 novelty_action_gate
-                and novelty_context is not None
+                and agent_state.novelty is not None
                 and _novelty_progress_tool_names(
-                    novelty_context,
+                    agent_state.novelty,
                     helper_mutation_blocked=bool(blocked_progress_helper_paths),
                     rejected_mutation_read_pending=recovery.pending,
                 ) is not None
@@ -2481,7 +2475,7 @@ Rules:
         # bounded mutation batch is open; otherwise the proactive hook makes
         # the batch allowance unreachable by validating after every file.
         pending_product_paths = set()
-        if transaction is not None:
+        if agent_state.transaction is not None:
             for call, tmsg in zip(turn_calls, tool_messages):
                 if action_governor.classify(call.function.name, call.function.arguments or {}) != "MUTATE":
                     continue
@@ -2492,7 +2486,7 @@ Rules:
                     if normalized:
                         pending_product_paths.add(normalized)
         transaction_window_open = _transaction_window_open(
-            transaction,
+            agent_state.transaction,
             validation_required=repair.validation_required,
             repair_required=repair.repair_required,
             mutation_batch_remaining=validation_batch_remaining,
@@ -2617,12 +2611,12 @@ Rules:
                 )
             if _governed and capability == "MUTATE":
                 for path in _mutation_paths(tool_name, args):
-                    rejection = risk.reject_destructive_rewrite(
+                    rejection = agent_state.risk.reject_destructive_rewrite(
                         path, io_tools._resolve(path),
                         tool_name=tool_name, repair_turn=repair_turn_before_dispatch,
                     )
                     if rejection is None:
-                        rejection = risk.reject_protected_test_mutation(
+                        rejection = agent_state.risk.reject_protected_test_mutation(
                             path, io_tools._resolve(path),
                             repair_turn=repair_turn_before_dispatch,
                         )
@@ -2697,9 +2691,9 @@ Rules:
                 last_mutation_rejected = False
                 recovery.clear()
                 successful_mutation_signatures.add(_call_key(tool_name, args))
-                if wm is not None:
+                if agent_state.working_memory is not None:
                     for wm_path in _mutation_paths(tool_name, args):
-                        wm.on_mutation(wm_path)
+                        agent_state.working_memory.on_mutation(wm_path)
                 if first_mutation_elapsed is None:
                     first_mutation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first mutation] {first_mutation_elapsed:.3f}s")
@@ -2714,7 +2708,7 @@ Rules:
                 if first_validation_elapsed is None:
                     first_validation_elapsed = time.monotonic() - agent_started_at
                     print(f"⏱️ [first validation] {first_validation_elapsed:.3f}s")
-            if (wm is not None and tool_name == "read_file"
+            if (agent_state.working_memory is not None and tool_name == "read_file"
                     and not result.startswith(("ERROR:", "REJECTED:"))):
                 # Mechanical read telemetry: exposure of evidence, never a
                 # claim about comprehension. Deliberately independent of the
@@ -2724,9 +2718,9 @@ Rules:
                 # validation-evidence acceptance (and therefore finish_task)
                 # for every non-working-memory run and every non-read_file
                 # validation tool. Keep this block a sibling, not a parent.
-                wm.on_read((args or {}).get("path"), str(result))
+                agent_state.working_memory.on_read((args or {}).get("path"), str(result))
             if capability == "VALIDATE" or phase_validation:
-                if wm is not None and success is not None:
+                if agent_state.working_memory is not None and success is not None:
                     wm_target = validation_event_target(tool_name, args)
                     wm_fingerprint = None
                     if not success:
@@ -2734,7 +2728,7 @@ Rules:
                             wm_fingerprint = normalize_fingerprint(result, get_root())
                         except Exception:
                             wm_fingerprint = None
-                    wm.on_validation(wm_target, bool(success), wm_fingerprint)
+                    agent_state.working_memory.on_validation(wm_target, bool(success), wm_fingerprint)
                     # Harness evidence (test-framework initialization, never
                     # a product assertion — see _framework_setup_only in
                     # workspace/run_tests_tool.py) means the validation
@@ -2833,7 +2827,7 @@ Rules:
                 if tool_plane_recovery_attempts == 0:
                     repair.reopen_validation()
                     tool_plane_recovery_attempts += 1
-                    lifecycle.transition("tool_plane_recovery")
+                    agent_state.lifecycle.transition("tool_plane_recovery")
                     messages.append({"role": "system", "content": (
                         "Tool-plane recovery: the previous validation call was rejected before execution. "
                         "This is not evidence that the product is defective. Reopen the validation target "
@@ -2860,7 +2854,7 @@ Rules:
                 # validation surface, but never force a product patch.
                 repair.reopen_validation()
                 tool_plane_recovery_attempts = 0
-                lifecycle.transition("tool_plane_recovery")
+                agent_state.lifecycle.transition("tool_plane_recovery")
                 messages.append({"role": "system", "content": (
                     "Tool-plane recovery: the previous validation call was rejected before execution "
                     "because its tool name or argument shape was invalid. This is not a product defect. "
@@ -2881,12 +2875,12 @@ Rules:
                 result = tmsg.get("content", "")
                 if capability == "MUTATE" and not result.startswith(("ERROR:", "REJECTED:")):
                     successful_mutation_messages.append(tmsg)
-                    if transaction is not None:
+                    if agent_state.transaction is not None:
                         for path in _mutation_paths(call.function.name, call.function.arguments):
-                            transaction.record_mutation(path, checkpoint_id=iteration)
+                            agent_state.transaction.record_mutation(path, checkpoint_id=iteration)
             last_mutation_checkpoint = successful_mutation_messages or last_mutation_checkpoint
             mutation_was_in_validation_batch = validation_phase_before_turn and not repair_turn_before_dispatch
-            lifecycle.transition("mutation")
+            agent_state.lifecycle.transition("mutation")
             if repair.repair_required:
                 repair_mutations += 1
                 repair.record_mutation_landed()
@@ -2929,7 +2923,7 @@ Rules:
             # This is provider- and task-agnostic; setup failures still flow
             # through the deterministic setup-plane policy below.
             validation_batch_remaining = 0
-            lifecycle.transition("validation_failed")
+            agent_state.lifecycle.transition("validation_failed")
             validation_failures_total += 1
             repair.enter_repair()
             failed_packets = []
@@ -2951,8 +2945,8 @@ Rules:
                         result_content,
                         get_root(),
                         changed_paths=(
-                            tuple(sorted(transaction.files))
-                            if transaction is not None else tuple(sorted(pending_product_paths))
+                            tuple(sorted(agent_state.transaction.files))
+                            if agent_state.transaction is not None else tuple(sorted(pending_product_paths))
                         ),
                     )
                     packet = packet + "\n" + provenance.render()
@@ -2962,8 +2956,8 @@ Rules:
                         result_content,
                         get_root(),
                         changed_paths=(
-                            tuple(sorted(transaction.files))
-                            if transaction is not None else tuple(sorted(pending_product_paths))
+                            tuple(sorted(agent_state.transaction.files))
+                            if agent_state.transaction is not None else tuple(sorted(pending_product_paths))
                         ),
                     )
                     packet = packet + "\n[HOST FAILED VALIDATION PACKET]\n" + host_packet.to_json()
@@ -2994,14 +2988,14 @@ Rules:
             messages.append({"role": "system", "content": (
                 last_repair_packet or ("Validation feedback: " + "; ".join(dict.fromkeys(s for s in validation_suggestions if s)))
             )})
-            if transaction is not None:
-                transaction_decision = transaction.note_validation_failed(last_repair_packet)
-                transaction_status = transaction.control_block()
+            if agent_state.transaction is not None:
+                transaction_decision = agent_state.transaction.note_validation_failed(last_repair_packet)
+                transaction_status = agent_state.transaction.control_block()
                 if transaction_status:
                     messages.append({"role": "system", "content": transaction_status})
                     print(
                         f"🔁 [transaction buffer] action={transaction_decision.action}; "
-                        f"files={list(transaction.files)}; "
+                        f"files={list(agent_state.transaction.files)}; "
                         f"turns_remaining={transaction_decision.turns_remaining}"
                     )
                 if transaction_decision.action == "recover":
@@ -3010,24 +3004,24 @@ Rules:
                     # the available checkpoint for an explicit recovery path.
                     repair.enter_recovery_mode()
                     repair_recovery_entries += 1
-                    if lifecycle.state == LifecycleState.REPAIR:
-                        lifecycle.transition("recovery_budget_exhausted")
+                    if agent_state.lifecycle.state == LifecycleState.REPAIR:
+                        agent_state.lifecycle.transition("recovery_budget_exhausted")
                     messages.append({"role": "system", "content": (
                         "Transaction window expired. Keep the accepted files available for recovery; "
                         "do not perform a destructive reset automatically. Use the latest failure and "
                         "the existing checkpoint to make one deliberate recovery decision."
                     )})
-            if (novelty_context is not None and last_repair_packet
+            if (agent_state.novelty is not None and last_repair_packet
                     and _should_run_worker_triage(
                         novelty_action_critic,
                         novelty_action_gate,
                         validation_failures=repair.validation_failures,
                         failure_packet=last_repair_packet,
-                        transaction=transaction,
+                        transaction=agent_state.transaction,
                     )):
-                gate_judgment = novelty_context.synchronous_triage(
+                gate_judgment = agent_state.novelty.synchronous_triage(
                     iteration,
-                    lifecycle.state.value,
+                    agent_state.lifecycle.state.value,
                     last_repair_packet,
                     legal_actions=(*sorted(GENERIC_MUTATION_TOOLS), "run_tests", "run_command", "run_shell", "finish_task"),
                     protected_paths=tuple(sorted(blocked_mutation_paths)),
@@ -3044,7 +3038,7 @@ Rules:
             # not a reason to spend the whole ordinary repair budget replaying
             # the same action.  Move directly to the bounded mutation
             # checkpoint on the next turn.
-            lifecycle.transition("recovery_budget_exhausted")
+            agent_state.lifecycle.transition("recovery_budget_exhausted")
             # The earlier tool-plane branch may have reopened VALIDATE and
             # cleared the ordinary repair flag. force_recovery_checkpoint
             # preserves the pre-dispatch repair intent so the next loop
@@ -3058,7 +3052,7 @@ Rules:
             )
         if (repair.repair_required and not turn_mutated and repair.repair_turns_used >= REPAIR_TURN_BUDGET
                 and not repair.repair_recovery_mode):
-            lifecycle.transition("recovery_budget_exhausted")
+            agent_state.lifecycle.transition("recovery_budget_exhausted")
             repair.enter_recovery_mode()
             repair_recovery_entries += 1
             print(
@@ -3072,7 +3066,7 @@ Rules:
             repair.record_validation_passed()
             uncovered = validation_plan.uncovered_endpoints(validation_criteria_hits)
             if uncovered:
-                lifecycle.transition("validation_partial")
+                agent_state.lifecycle.transition("validation_partial")
                 # One passing probe is useful evidence, but it is not enough
                 # when the task names several interfaces. Keep the actor in a
                 # focused validation phase until every interface is covered.
@@ -3089,11 +3083,11 @@ Rules:
                     validation_criteria_hits,
                 )
                 if completion_ready:
-                    lifecycle.transition("validation_passed")
+                    agent_state.lifecycle.transition("validation_passed")
                     repair.validation_required = False
                     repair.validation_failures = 0
                     validation_batch_remaining = 0
-                    if transaction is not None and transaction.note_validation_passed():
+                    if agent_state.transaction is not None and agent_state.transaction.note_validation_passed():
                         print("✅ [transaction buffer] authoritative validation passed; cleared transaction state")
                     # Independent validation is the authoritative completion
                     # signal. Waiting for one more model turn to call
@@ -3122,7 +3116,7 @@ Rules:
                         + completion_reason
                     )
 
-        if novelty_context is not None:
+        if agent_state.novelty is not None:
             for call, tmsg in zip(turn_calls, tool_messages):
                 args = call.function.arguments or {}
                 tool_name = call.function.name
@@ -3130,7 +3124,7 @@ Rules:
                 phase_validation = validation_phase_before_turn and tool_name in {
                     "run_tests", "run_command", "run_shell", "process_status", "diff_files", "git_diff"
                 }
-                novelty_context.observe(
+                agent_state.novelty.observe(
                     iteration, tool_name, args, tmsg["content"],
                     mutation=(
                         capability == "MUTATE"
@@ -3139,7 +3133,7 @@ Rules:
                     ),
                     validation=capability == "VALIDATE" or phase_validation,
                 )
-            print(f"🧬 [novelty context] {novelty_context.render_for_model()}")
+            print(f"🧬 [novelty context] {agent_state.novelty.render_for_model()}")
 
         if structured_summary_enabled:
             # Unlike context_summary_enabled, state.update() already extracts
@@ -3148,17 +3142,17 @@ Rules:
             # pruning the raw text afterward loses nothing state.render()
             # depends on — only recall(N) needs it, for exact original text.
             for i, (call, tmsg) in enumerate(zip(turn_calls, tool_messages)):
-                state.update(call.function.name, call.function.arguments, tmsg["content"])
+                agent_state.structured_state.update(call.function.name, call.function.arguments, tmsg["content"])
                 entry_number = len(entry_positions) + 1
                 memory.record(entry_number, tmsg["content"])
                 entry_positions[entry_number] = tool_start_idx + i
-                ledger.record(iteration, call.function.name, call.function.arguments, tmsg["content"])
-            print(f"🧱 [state updated] {state.render()}")
-            recent = ledger.history[-len(turn_calls):]
+                agent_state.ledger.record(iteration, call.function.name, call.function.arguments, tmsg["content"])
+            print(f"🧱 [state updated] {agent_state.structured_state.render()}")
+            recent = agent_state.ledger.history[-len(turn_calls):]
             gov_desc = ", ".join(
                 f"{e['tool_name']}[{e['capability']}]{'(dup)' if e['is_duplicate'] else ''}" for e in recent
             )
-            print(f"📊 [governor] {gov_desc} — recent_progress={ledger.recent_progress()}")
+            print(f"📊 [governor] {gov_desc} — recent_progress={agent_state.ledger.recent_progress()}")
 
             if ENABLE_PRUNING:
                 # Char-budget eligibility (see KEEP_RECENT_RAW_CHARS above):
@@ -3199,7 +3193,7 @@ Rules:
                         # grows in exact lockstep with entry_positions (both
                         # populated once per tool call, same loop, same
                         # order), so entry_number - 1 is always the right index.
-                        source = ledger.history[entry_number - 1] if entry_number - 1 < len(ledger.history) else None
+                        source = agent_state.ledger.history[entry_number - 1] if entry_number - 1 < len(agent_state.ledger.history) else None
                         if source and source.get("scope"):
                             source_desc = f"{source['tool_name']}({source['scope']})"
                         elif source:
@@ -3226,27 +3220,32 @@ Rules:
                 entry_number = len(entry_positions) + 1
                 memory.record(entry_number, tmsg["content"])
                 entry_positions[entry_number] = tool_start_idx + i
-                ledger.record(iteration, call.function.name, call.function.arguments, tmsg["content"])
+                agent_state.ledger.record(iteration, call.function.name, call.function.arguments, tmsg["content"])
                 working_state.update_deterministic(
-                    ws, call.function.name, call.function.arguments, tmsg["content"],
-                    entry_number, io_tools._resolve, ledger,
+                    agent_state.working_state, call.function.name, call.function.arguments, tmsg["content"],
+                    entry_number, io_tools._resolve, agent_state.ledger,
                 )
                 capability = action_governor.classify(call.function.name, call.function.arguments)
                 turn_mutated = turn_mutated or capability == "MUTATE"
                 turn_validated = turn_validated or capability == "VALIDATE"
 
-            recent = ledger.history[-len(turn_calls):]
+            recent = agent_state.ledger.history[-len(turn_calls):]
             gov_desc = ", ".join(
                 f"{e['tool_name']}[{e['capability']}]{'(dup)' if e['is_duplicate'] else ''}" for e in recent
             )
-            print(f"📊 [governor] {gov_desc} — recent_progress={ledger.recent_progress()}")
+            print(f"📊 [governor] {gov_desc} — recent_progress={agent_state.ledger.recent_progress()}")
 
-            if working_state.should_checkpoint(ws, mutated_workspace=turn_mutated, validation_completed=turn_validated):
-                working_state.checkpoint(ws, ledger, memory.ARCHIVE, since_index=ws_since_index)
-                ws_since_index = len(ledger.history)
-                print(f"🧱 [checkpoint rev {ws.revision}] facts={len(ws.facts)} decisions="
-                      f"{sum(1 for d in ws.decisions if not d.superseded)} changes={len(ws.changes)} "
-                      f"validations={len(ws.validations)} phase={ws.phase}")
+            if working_state.should_checkpoint(
+                agent_state.working_state, mutated_workspace=turn_mutated, validation_completed=turn_validated
+            ):
+                working_state.checkpoint(
+                    agent_state.working_state, agent_state.ledger, memory.ARCHIVE, since_index=ws_since_index
+                )
+                ws_since_index = len(agent_state.ledger.history)
+                _ws = agent_state.working_state
+                print(f"🧱 [checkpoint rev {_ws.revision}] facts={len(_ws.facts)} decisions="
+                      f"{sum(1 for d in _ws.decisions if not d.superseded)} changes={len(_ws.changes)} "
+                      f"validations={len(_ws.validations)} phase={_ws.phase}")
 
             if ENABLE_PRUNING:
                 # Same char-budget + semantic-pointer eviction as
@@ -3272,7 +3271,7 @@ Rules:
                     for entry_number in candidates:
                         idx = entry_positions[entry_number]
                         content = messages[idx]["content"]
-                        source = ledger.history[entry_number - 1] if entry_number - 1 < len(ledger.history) else None
+                        source = agent_state.ledger.history[entry_number - 1] if entry_number - 1 < len(agent_state.ledger.history) else None
                         if source and source.get("scope"):
                             source_desc = f"{source['tool_name']}({source['scope']})"
                         elif source:
@@ -3376,21 +3375,21 @@ Rules:
                 if content.startswith("ERROR") or content.startswith("REJECTED"):
                     recent_errors.append(f"iter {iteration}: {content[:200]}")
             recent_errors[:] = recent_errors[-5:]
-            last_entry = ledger.history[-1] if _governed and ledger.history else None
+            last_entry = agent_state.ledger.history[-1] if _governed and agent_state.ledger.history else None
             status_report.write(
                 status_path,
                 iteration=iteration,
                 iteration_budget=iteration_budget,
                 last_action_classification=last_entry["capability"] if last_entry else None,
                 escalation_level=current_level,
-                ledger_size=len(ledger.history) if _governed else None,
+                ledger_size=len(agent_state.ledger.history) if _governed else None,
                 distributions_done=status_report.classes_with_method(
                     io_tools._resolve(distribution_target_file), distribution_names
                 ) if distribution_target_file and distribution_names else None,
                 recent_errors=list(recent_errors),
                 task_done=TASK_STATE["done"],
                 task_summary=TASK_STATE["summary"],
-                novelty_context=novelty_context.metrics() if novelty_context else None,
+                novelty_context=agent_state.novelty.metrics() if agent_state.novelty else None,
             )
 
         if TASK_STATE["done"]:
