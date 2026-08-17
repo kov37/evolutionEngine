@@ -40,6 +40,7 @@ import working_state
 from lifecycle_fsm import LifecycleFSM, LifecycleState
 from kernel.exec_tools import active_background_handles, cleanup_background_processes, restart_background, stop_process
 from dispatch import _call_key, dispatch_tool_calls
+from tool_contracts import schema_for_tool
 from kernel.control import TASK_STATE, approve_task, finish_task
 from kernel.sandbox import get_root, set_root
 from kernel.patch_tools import patch_paths
@@ -62,7 +63,7 @@ ORIENTATION_TURN_BUDGET = 2
 # normal mutation operation, but the engine can replace the generic mutation
 # surface with one whose contract explicitly names the required target plane.
 PRODUCT_MUTATION_TOOLS = frozenset({"patch_product_file", "write_product_file"})
-EDIT_TOOLS = frozenset({"patch_file", "apply_patch"})
+EDIT_TOOLS = frozenset({"patch_file"})
 GENERIC_MUTATION_TOOLS = EDIT_TOOLS | {"write_file"}
 
 
@@ -276,12 +277,13 @@ def _fit_llama_prompt(base_url, messages, max_tokens, timeout_seconds, extra_pay
 
 def _llama_cpp_chat(*, base_url, timeout_seconds, **kwargs):
     """Call llama-server's OpenAI-compatible endpoint as the actor backend."""
-    from ollama import _utils
-
     messages = _normalize_llama_messages(kwargs.get("messages", []))
     max_tokens = kwargs.get("max_tokens", 1024)
-    tool_payload = [json.loads(_utils.convert_function_to_tool(fn).model_dump_json(exclude_none=True))
-                    for fn in kwargs.get("tools", [])]
+    # Send explicit strict schemas to llama.cpp. The ordinary Ollama helper
+    # derives a schema from signatures, but does not expose the host's
+    # additionalProperties/strictness boundary reliably enough for this
+    # local provider.
+    tool_payload = [schema_for_tool(fn) for fn in kwargs.get("tools", [])]
     messages, measured_prompt_tokens, prompt_budget = _fit_llama_prompt(
         base_url, messages, max_tokens, timeout_seconds, extra_payload=tool_payload,
     )
@@ -441,8 +443,7 @@ def _intervention_messages(messages, tail=INTERVENTION_TAIL_MESSAGES):
 
 
 _REPAIR_RECOVERY_TOOLS = frozenset({
-    "read_file", "find_files", "search_file", "list_symbols", "grep_dir",
-    "list_workspace", "list_dir", "diff_files", "git_diff", "recall",
+    "read_file", "find_files", "list_symbols", "diff_files", "git_diff", "recall",
     "run_tests", "run_command", "run_shell", "process_status", "stop_process",
 })
 
@@ -913,7 +914,7 @@ def _nearby_python_test_target(path: str, root: str | None = None) -> str | None
 
 def _has_orientation_evidence(messages) -> bool:
     """Return whether a targeted inspection produced usable evidence."""
-    evidence_tools = {"read_file", "find_files", "search_file", "list_symbols"}
+    evidence_tools = {"read_file", "find_files", "list_symbols"}
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
@@ -1011,11 +1012,11 @@ def _novelty_progress_tool_names(
     if novelty_context is None or not novelty_context.requires_progress():
         return None
     if rejected_mutation_read_pending:
-        return {"read_file", "search_file", "list_symbols", "grep_dir"}
+        return {"read_file", "find_files", "list_symbols"}
     names = set(GENERIC_MUTATION_TOOLS | {"finish_task"})
     repeated_action = novelty_context.repeated_validation_loop()
     if novelty_context.recovery_reads_allowed() and not repeated_action:
-        names.update({"read_file", "find_files", "search_file"})
+        names.update({"read_file", "find_files"})
     if helper_mutation_blocked:
         # A stale model commonly replays the generic mutation call after its
         # temporary helper was rejected. Replace both generic mutation names
@@ -1069,7 +1070,7 @@ def _consume_orientation_recovery_read(
     return bool(recovery_active and evidence_available and blocked_command_calls)
 
 
-def patch_product_file(path: str, search: str, replace: str) -> str:
+def patch_product_file(path: str, find_exact_block: str, replace_with_block: str) -> str:
     """Patch a product source file during novelty recovery.
 
     The alias is intentionally only offered after a validation-helper
@@ -1082,11 +1083,11 @@ def patch_product_file(path: str, search: str, replace: str) -> str:
             "REJECTED: patch_product_file accepts product artifacts only; "
             "choose the source file implicated by the failure or call finish_task."
         )
-    return io_tools.patch_file(path, search, replace)
+    return io_tools.patch_file(path, find_exact_block, replace_with_block)
 
 
 def write_product_file(path: str, content: str) -> str:
-    """Create or replace a product source file during novelty recovery.
+    """Create a new product source file during novelty recovery.
 
     Temporary validation helpers are deliberately excluded; use an inline
     command for a probe instead of spending the progress turn on a verifier.
@@ -1349,11 +1350,9 @@ def run_agent(task, tools, iteration_budget=ITERATION_BUDGET, sidecar_enabled=Fa
             novelty_context.close()
             print(f"🧬 [novelty metrics] {json.dumps(novelty_context.metrics(), sort_keys=True)}")
 
-    edit_tool = "apply_patch" if "apply_patch" in {tool.__name__ for tool in tools} else "patch_file"
     edit_guidance = (
-        "Use apply_patch for one atomic patch that may update multiple files. Use write_file only to create a new file."
-        if edit_tool == "apply_patch" else
-        "Use patch_file for small surgical edits; its search must match the existing text exactly."
+        "Use patch_file to edit an existing file one targeted block at a time; its find_exact_block must "
+        "match the current text exactly. Use write_file only to create a file that does not exist."
     )
     system_prompt = f"""You are a Principal Software Engineer running locally via hardware acceleration.
 You are working inside this directory: {get_root()}
@@ -1368,10 +1367,13 @@ You have a registry of tools. The CURRENT TOOL CONTRACT appended to each turn is
 listed there is invalid for that turn, even if it appeared in an earlier message or in this registry.
 
 - {edit_guidance} Call read_file first if you're not certain of the current contents.
-- Use find_files/grep_dir/list_symbols/list_dir to understand code before changing it (grep_dir searches the whole
-  project at once — prefer it over calling search_file file-by-file). Use run_tests for unittest projects and
+- Use find_files and focused read_file/list_symbols calls to understand code before changing it. Use run_tests for
+  unittest-style projects and
   run_command with an explicit argv list for pytest or the project's native test command; use
   diff_files or git_diff to review one.
+- Native tool calls are already structured; do not manually wrap them in markdown or invent a second JSON format.
+- write_file creates new files only. apply_patch, directory-listing tools, and legacy search/replace tools are
+  unavailable. After ERROR/REJECTED, correct the call or choose a new action; do not repeat it identically.
 - Do not re-explore a file you've already read in full just to "be sure" — if you already have its content
   (including via a pruned entry you called recall(N) on), start editing. Re-reading the same file repeatedly
   without attempting an edit is a sign you're stalling, not being careful; a wrong first attempt you fix with
@@ -1858,9 +1860,19 @@ listed there is invalid for that turn, even if it appeared in an earlier message
         # provider cannot safely fall back to a stale tool name from the
         # original prompt or an earlier assistant message.
         current_tool_names = sorted({tool.__name__ for tool in tools_for_call})
+        if validation_required and repair_required:
+            active_phase = "REPAIR: inspect the failure evidence and mutate the implicated product"
+        elif validation_required:
+            active_phase = "VERIFICATION: run an assertion-bearing check and use its result"
+        elif orientation_recovery_active:
+            active_phase = "RECOVERY: use at most one focused read, then make progress"
+        else:
+            active_phase = "EXPLORATION/IMPLEMENTATION: inspect only when needed, then act"
         messages_for_call = messages_for_call + [{
             "role": "system",
             "content": (
+                "## ACTIVE PHASE\n"
+                + active_phase + "\n"
                 "## CURRENT TOOL CONTRACT\n"
                 "For this turn, call exactly one tool from this list and no other tool: "
                 + (", ".join(current_tool_names) if current_tool_names else "(none)")
@@ -3201,8 +3213,8 @@ if __name__ == "__main__":
         help="Use a model-neutral initial action contract with a small executable tool surface.",
     )
     parser.add_argument(
-        "--editor", choices=["patch_file", "apply_patch"], default="patch_file",
-        help="Select the edit primitive for this run; apply_patch supports atomic multi-file edits.",
+        "--editor", choices=["patch_file"], default="patch_file",
+        help="Model-facing edit primitive; patch_file is the only supported editor.",
     )
     parser.add_argument(
         "--network", action="store_true",

@@ -102,3 +102,42 @@ artifact passed after verifier repair, but the primary workflow scorecard
 failed again. The second run took 147.3 seconds total, including 63.4 seconds
 for verifier repair. This is strong evidence of a repeatable actor/tool
 interaction problem rather than random noise.
+
+## `patch_file` contract checkpoint
+
+The actor-facing single-file editor schema now uses
+`find_exact_block`/`replace_with_block`, which says plainly that the model
+must provide the current block and its replacement. Host normalization still
+accepts legacy `search`/`replace` arguments in old transcripts. Full
+deterministic verification: `207 passed, 38 subtests passed, 1 warning`.
+
+## Strict contract/prompt benchmark checkpoint (2026-08-16)
+
+The current implementation rejects legacy patch fields, makes `write_file`
+new-file-only, validates calls with Pydantic v2, and hides deprecated
+overlapping discovery/editor tools from the model. The unchanged multi-file
+task was rerun with Qwen3.8 27B through llama.cpp.
+
+| Run | Artifact | Workflow | Iterations | Elapsed | First mutation |
+|---|---:|---:|---:|---:|---:|
+| Prior `patch_file` reference | PASS | PASS | 6 | 86.2s | 41.8s |
+| Hardened contract run | PASS | FAIL | 10 | 121.0s | 41.9s |
+
+The actor emitted the new exact-block field names and the independent grader
+passed. The workflow target was missed, so this is a correctness-compatible
+but efficiency-regression result. The benchmark fixture was unchanged.
+
+## Additional real-model benchmark checks (2026-08-16)
+
+| Task | Artifact grader | Workflow | Iterations | Elapsed | Interpretation |
+|---|---:|---:|---:|---:|---|
+| `cascading_loop` | PASS | PASS | 3 | 49.8s | Matches the historical 3-iteration / 49.0s result within noise |
+| `websocket_chat` | PASS | PASS after bounded repair | 17 total | 452.2s | Correct final app, but recovery was expensive |
+
+The WebSocket primary exhausted 12 iterations after a correct server edit,
+dependency installation, and a failed real smoke check. A bounded verifier
+repair then made the frontend mutation and passed the independent smoke check
+in 5 additional iterations. The stricter `write_file` rejection protected
+the existing file, but cost a recovery turn. This is evidence of a convergence
+regression in that workflow, not evidence that the new contracts cannot solve
+the task.

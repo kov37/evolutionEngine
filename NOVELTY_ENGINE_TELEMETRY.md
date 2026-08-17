@@ -23,6 +23,31 @@ latest_tool_fix:
   behavior: "recursive **/ segments now match zero or more directories"
   deterministic_verification: "158 passed, 1 warning in targeted agent-tools and monitor tests"
   real_model_status: "LRU run must be rerun; previous child loaded the pre-fix implementation"
+  strict_contract_checkpoint:
+    date: "2026-08-16"
+    deterministic_suite: "209 passed, 38 subtests passed, 1 warning"
+    maintained_command: "./.venv-swebench/bin/python -m pytest -q tests"
+    model_facing_editor: "patch_file only"
+    host_validation: "Pydantic v2, strict types, extra=forbid"
+    hidden_model_tools: ["apply_patch", "list_workspace", "list_dir", "search_file", "grep_dir"]
+    real_model_task: "multi_file_transaction"
+    actor: "qwen3.8-27b-ctx32 via llama.cpp"
+    result:
+      artifact_grader: "PASS"
+      workflow_scorecard: "FAIL"
+      iterations: 10
+      iteration_target: 6
+      elapsed_seconds: 121.0
+      first_tool_seconds: 7.475
+      first_mutation_seconds: 41.904
+      mutations: 3
+      validations: 4
+      validation_failures: 3
+    comparison:
+      prior_patch_file_iterations: 6
+      prior_patch_file_elapsed_seconds: 86.2
+      conclusion: "Correctness preserved; workflow efficiency regressed in this sample."
+    monitor_log: "state/benchmark/agentic/monitor-multi_file_transaction-novelty-1786935713091859000.jsonl"
 ```
 
 ## 2026-08-16 verified runtime checkpoint
@@ -50,6 +75,17 @@ latest_tool_fix:
 - Worker status: disabled for this clean editor A/B because the worker
   adapter currently uses Ollama and no Qwen 4B GGUF is available. This is an
   actor/editor result, not a worker-on/off result.
+
+## 2026-08-16 patch contract checkpoint
+
+- `patch_file` schema fields: `path`, `find_exact_block`,
+  `replace_with_block`.
+- Compatibility: host-side normalization accepts legacy `search`/`replace`
+  from old transcripts; those names are not exposed in the new schema.
+- Deterministic verification: `207 passed, 38 subtests passed, 1 warning`.
+- Contract inventory: `TOOL_CONTRACTS.md`.
+- Follow-up candidates: make normal `write_file` new-file-only and correct
+  generated optional-path schemas for `git_status` and `git_diff`.
 
 ## Latest generic control-plane checkpoint (the engine's traffic-controller rules)
 
@@ -824,4 +860,36 @@ reproducibility:
     - "paired WebSocket worker ablation"
     - "hidden/shadow grader"
     - "mutation-guided grader-strength tests"
+```
+
+## 2026-08-16 additional real-model checks
+
+```yaml
+additional_runs:
+  runtime:
+    actor: "Qwen3.8 27B Q4_K_M through llama.cpp"
+    context: "32K, MTP, Flash Attention, Q8 KV, batch 2048"
+    ollama: stopped
+  cascading_loop:
+    artifact_grader: PASS
+    workflow: PASS
+    iterations: 3
+    elapsed_seconds: 49.8
+    mutations: 2
+    validations: 3
+    monitor: "state/benchmark/agentic/monitor-cascading_loop-novelty-1786935962311775000.jsonl"
+  websocket_chat:
+    artifact_grader: PASS
+    workflow: "PASS after bounded verifier repair"
+    primary_iterations: 12
+    repair_iterations: 5
+    total_iterations: 17
+    elapsed_seconds: 452.2
+    primary_first_mutation_seconds: 113.499
+    monitor_primary: "state/benchmark/agentic/monitor-websocket_chat-novelty-1786936025475669000.jsonl"
+    monitor_repair: "state/benchmark/agentic/monitor-websocket_chat-novelty-1786936344702478000-repair.jsonl"
+  conclusion: >-
+    Strict contracts preserved correctness but added convergence cost when the
+    actor selected write_file for an existing file. Improve deterministic
+    rejected-mutation recovery; do not weaken the safety boundary.
 ```

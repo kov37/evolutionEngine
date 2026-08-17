@@ -26,12 +26,12 @@ def run_recursive_engine(master_goal, tools, function_name=None, iteration_budge
 Your job is to incrementally build standalone Python tools that satisfy the goal you are given, using the
 tools available to you.
 
-- Every path you pass to a tool (write_file, patch_file, read_file, list_dir, etc.) is ALREADY relative to
+- Every path you pass to a tool (write_file, patch_file, read_file, etc.) is ALREADY relative to
   your working directory. Pass just the filename, e.g. path="my_tool.py" — never prefix it with "workspace/"
   or any other directory name pointing at that root itself, or you will create an unwanted nested directory.
-- Use write_file to create a brand new file or to fully rewrite one.
-- Use patch_file only for a small surgical edit to a file that already exists; `search` must match the existing text exactly, including whitespace — call read_file first if you're not certain of the current contents.
-- Use list_workspace to check what already exists.
+- Use write_file only to create a brand new file.
+- Use patch_file for a small surgical edit to a file that already exists; `find_exact_block` must match the existing text exactly, including whitespace — call read_file first if you're not certain of the current contents.
+- Use find_files to discover files, then read_file to inspect their exact contents.
 - Writing a .py file is automatically run in a sandbox immediately afterward and you will be told whether it executed cleanly. Keep iterating until it does.
 - The file must be directly runnable Python — do not substitute explanation or commentary for working code."""
 

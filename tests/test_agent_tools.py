@@ -10,8 +10,9 @@ from unittest.mock import patch
 
 from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled, _should_run_worker_triage
 from dispatch import _call_key, _format_result, _normalize_tool_arguments, dispatch_tool_calls
+from tool_contracts import schema_for_tool, validate_tool_arguments
 import action_governor
-from ollama import _utils as ollama_utils
+import kernel.io_tools as io_tools
 import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -96,9 +97,6 @@ class KernelToolTests(unittest.TestCase):
     def test_blocked_repair_inspection_triggers_checkpoint_only_for_engine_rejections(self):
         self.assertTrue(_is_blocked_repair_action(
             "read_file", "ERROR: 'read_file' is unavailable this turn — only ['patch_file'] are allowed"
-        ))
-        self.assertTrue(_is_blocked_repair_action(
-            "search_file", "REJECTED: repeated failing call search_file with the same arguments"
         ))
         self.assertTrue(_is_blocked_repair_action(
             "run_command", "ERROR: 'run_command' is unavailable this turn — only ['patch_file'] are allowed"
@@ -415,7 +413,7 @@ class KernelToolTests(unittest.TestCase):
             validation_failures=1, protected_edit_recovery_pending=False,
             repair_recovery_mode=False, rejected_mutation_read_pending=True,
         )
-        self.assertEqual(policy.tools, {"read_file", "search_file", "list_symbols", "grep_dir"})
+        self.assertEqual(policy.tools, {"read_file", "list_symbols"})
         self.assertFalse(policy.requires_mutation)
         self.assertIn("one bounded source-synchronization turn", policy.prompt)
 
@@ -458,7 +456,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertNotIn("list_workspace", policy.tools)
         self.assertNotIn("list_dir", policy.tools)
         self.assertIn("read_file", policy.tools)
-        self.assertIn("search_file", policy.tools)
+        self.assertIn("find_files", policy.tools)
 
     def test_validation_policy_allows_one_bounded_related_mutation(self):
         policy = build_validation_policy(
@@ -541,12 +539,12 @@ class KernelToolTests(unittest.TestCase):
             context.observe(iteration, "run_tests", {}, "failed")
         self.assertEqual(
             _novelty_progress_tool_names(context, rejected_mutation_read_pending=True),
-            {"read_file", "search_file", "list_symbols", "grep_dir"},
+            {"read_file", "find_files", "list_symbols"},
         )
         context.close()
 
     def test_identical_successful_product_mutation_is_rejected(self):
-        arguments = {"path": "src/module.py", "search": "old", "replace": "new"}
+        arguments = {"path": "src/module.py", "find_exact_block": "old", "replace_with_block": "new"}
         signature = _call_key("patch_file", arguments)
         reason = _duplicate_product_mutation_reason(
             "patch_file", arguments, {signature}
@@ -560,7 +558,7 @@ class KernelToolTests(unittest.TestCase):
         ))
 
     def test_identical_rejected_product_mutation_is_rejected_again(self):
-        arguments = {"path": "src/module.py", "search": "stale", "replace": "new"}
+        arguments = {"path": "src/module.py", "find_exact_block": "stale", "replace_with_block": "new"}
         signature = _call_key("patch_file", arguments)
         reason = _replayed_rejected_mutation_reason(
             "patch_file", arguments, {signature}
@@ -592,7 +590,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertFalse(counts_as_repair_inspection("list_dir"))
         self.assertFalse(counts_as_repair_inspection("find_files"))
         self.assertTrue(counts_as_repair_inspection("read_file"))
-        self.assertTrue(counts_as_repair_inspection("search_file"))
+        self.assertTrue(counts_as_repair_inspection("list_symbols"))
 
     def test_orientation_recovery_keeps_targeted_read_available(self):
         tools = orientation_action_tools()
@@ -603,7 +601,7 @@ class KernelToolTests(unittest.TestCase):
     def test_orientation_recovery_allows_one_focused_read_after_partial_evidence(self):
         tools = orientation_action_tools(evidence_available=True, recovery_read_used=False)
         self.assertIn("read_file", tools)
-        self.assertIn("search_file", tools)
+        self.assertIn("find_files", tools)
         self.assertIn("patch_file", tools)
         self.assertNotIn("list_workspace", tools)
 
@@ -897,28 +895,56 @@ class KernelToolTests(unittest.TestCase):
             self.assertFalse(success)
             self.assertIn("timed out", summary)
 
-    def test_dispatch_normalizes_common_command_schema_drift(self):
+    def test_dispatch_does_not_rewrite_arguments_after_validation(self):
+        arguments = {"path": "a.py", "find_exact_block": "old", "replace_with_block": "new"}
+        self.assertEqual(_normalize_tool_arguments("patch_file", arguments), arguments)
+
+    def test_patch_file_schema_uses_exact_block_contract(self):
+        import registry
+
+        fn = next(fn for fn in registry.load_registry(include_network=False)
+                   if fn.__name__ == "patch_file")
+        payload = schema_for_tool(fn)
+        schema = payload["function"]["parameters"]
+        self.assertEqual(set(schema["properties"]), {
+            "path", "find_exact_block", "replace_with_block",
+        })
+        self.assertEqual(set(schema["required"]), {
+            "path", "find_exact_block", "replace_with_block",
+        })
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_registry_hides_deprecated_model_tools(self):
+        import registry
+
+        names = {fn.__name__ for fn in registry.load_registry(include_network=False)}
         self.assertEqual(
-            _normalize_tool_arguments(
-                "run_command",
-                {"argv": '["python3", "-m", "unittest"]', "timeout_ms": 2500},
-            ),
-            {"command": ["python3", "-m", "unittest"], "timeout": 3},
+            names & {"apply_patch", "list_dir", "list_workspace", "search_file", "grep_dir"},
+            set(),
         )
-        self.assertEqual(
-            _normalize_tool_arguments("run_command", {"command": "python3 -V"})["command"],
-            ["python3", "-V"],
-        )
-        self.assertNotIn(
-            "cwd",
-            _normalize_tool_arguments("run_command", {"command": ["python3"], "cwd": '"."'}),
-        )
+
+    def test_strict_contract_rejects_unknown_and_wrongly_typed_arguments(self):
+        with self.assertRaisesRegex(ValueError, "unexpected fields"):
+            validate_tool_arguments(
+                "patch_file",
+                {"path": "a.py", "find_exact_block": "x", "replace_with_block": "y", "search": "x"},
+            )
+        with self.assertRaisesRegex(ValueError, "command"):
+            validate_tool_arguments("run_command", {"command": "python3 -V"})
+
+    def test_write_file_rejects_existing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root(tmp)
+            Path(tmp, "existing.txt").write_text("old\n")
+            result = io_tools.write_file("existing.txt", "new")
+            self.assertTrue(result.startswith("REJECTED:"))
+            self.assertEqual(Path(tmp, "existing.txt").read_text(), "old\n")
 
     def test_dispatch_blocks_a_rejected_protected_mutation_path(self):
         class Call:
             class Function:
                 name = "patch_file"
-                arguments = {"path": "test_contract.py", "search": "x", "replace": "y"}
+                arguments = {"path": "test_contract.py", "find_exact_block": "x", "replace_with_block": "y"}
             function = Function()
         messages = dispatch_tool_calls(
             [Call()], {"patch_file": lambda **_: "should not run"},
@@ -941,13 +967,6 @@ class KernelToolTests(unittest.TestCase):
             },
         )
         self.assertEqual(messages[0]["content"], "REJECTED: product mutation required")
-        self.assertEqual(
-            _normalize_tool_arguments(
-                "run_command",
-                {"command": ["python3"], "timeout": "30,\nbackground=False]"},
-            )["timeout"],
-            30,
-        )
 
     def test_web_validation_rejects_clean_protocol_error_without_evidence(self):
         contract = from_task(
@@ -1624,7 +1643,7 @@ class KernelToolTests(unittest.TestCase):
             context.observe(iteration, "run_tests", {}, "passed")
         self.assertEqual(
             _novelty_progress_tool_names(context),
-            {"patch_file", "apply_patch", "write_file", "finish_task"},
+            {"patch_file", "write_file", "finish_task"},
         )
         context.close()
 
@@ -1914,13 +1933,10 @@ class KernelToolTests(unittest.TestCase):
             "run_command": {"timeout", "cwd", "background"},
             "process_status": {"tail_chars"},
             "run_tests": {"path"},
-            "grep_dir": {"path"},
         }
         for name, optional in expected_optional.items():
             payload = json.loads(
-                ollama_utils.convert_function_to_tool(functions[name]).model_dump_json(
-                    exclude_none=True
-                )
+                json.dumps(schema_for_tool(functions[name]))
             )
             schema = payload["function"]["parameters"]
             self.assertTrue(optional.isdisjoint(set(schema.get("required", []))), name)

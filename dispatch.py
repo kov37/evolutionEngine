@@ -18,6 +18,8 @@ capped.
 
 MAX_MESSAGE_CONTENT_CHARS = 4000
 
+from tool_contracts import validate_tool_arguments
+
 
 def _mutation_paths(tool_name, arguments):
     """Return every path a mutation call may touch for host-side blocking."""
@@ -33,52 +35,13 @@ def _mutation_paths(tool_name, arguments):
 
 
 def _normalize_tool_arguments(tool_name, arguments):
-    """Repair common JSON-schema shape drift before dispatching a tool.
+    """Return arguments unchanged after strict host validation.
 
-    Small local models sometimes emit an argv list as a JSON-encoded string,
-    call it ``argv``, or express milliseconds as ``timeout_ms`` even though
-    the trusted tool schema uses ``command`` and seconds. Normalize only these
-    unambiguous aliases; never reinterpret a command's content.
+    Earlier versions silently repaired aliases such as ``search``/``replace``
+    and string commands. That hid model-contract drift and made failures hard
+    to measure. Calls now either validate or receive a deterministic rejection.
     """
-    import json
-    import re
-    import shlex
-
-    normalized = dict(arguments or {})
-    if tool_name in {"run_command", "run_shell"}:
-        if "command" not in normalized and "argv" in normalized:
-            normalized["command"] = normalized.pop("argv")
-        command = normalized.get("command")
-        if isinstance(command, str):
-            try:
-                decoded = json.loads(command)
-            except (TypeError, json.JSONDecodeError):
-                decoded = None
-            if isinstance(decoded, list):
-                normalized["command"] = decoded
-            elif tool_name == "run_command":
-                normalized["command"] = shlex.split(command)
-        if "timeout" not in normalized and "timeout_ms" in normalized:
-            try:
-                normalized["timeout"] = max(1, (int(normalized.pop("timeout_ms")) + 999) // 1000)
-            except (TypeError, ValueError):
-                normalized.pop("timeout_ms", None)
-        elif "timeout" in normalized and isinstance(normalized["timeout"], str):
-            # Salvage a numeric prefix when a small model leaks punctuation or
-            # a fragment of the surrounding call into a scalar argument.
-            match = re.match(r"\s*(\d+(?:\.\d+)?)", normalized["timeout"])
-            if match:
-                normalized["timeout"] = max(1, int(float(match.group(1))))
-        cwd = normalized.get("cwd")
-        if isinstance(cwd, str):
-            stripped = cwd.strip()
-            if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
-                stripped = stripped[1:-1]
-            if stripped in {"", "."}:
-                normalized.pop("cwd", None)
-            else:
-                normalized["cwd"] = stripped
-    return normalized
+    return dict(arguments or {})
 
 
 def _call_key(tool_name, arguments):
@@ -180,12 +143,16 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
         else:
             print(f"🔧 {call.function.name}({call.function.arguments})")
             try:
+                # Validate the original payload before compatibility
+                # normalization. The schema is therefore an actual boundary,
+                # not merely advice to the model.
+                validate_tool_arguments(call.function.name, call.function.arguments, fn)
                 normalized_arguments = _normalize_tool_arguments(call.function.name, call.function.arguments)
                 result = fn(**normalized_arguments)
             except TypeError as e:
                 result = f"ERROR: bad arguments for {call.function.name}: {e}"
             except ValueError as e:
-                result = f"REJECTED: {e}"
+                result = f"REJECTED: {e}. Use only the fields in the current tool contract."
             except Exception as e:
                 # A graduated tool can raise anything (list_dir_tool.py raising
                 # FileNotFoundError on a hallucinated path is what surfaced this in

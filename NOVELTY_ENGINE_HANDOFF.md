@@ -4312,3 +4312,109 @@ context, forbid accidental file creation/overwrite, and set
 `additionalProperties: false`. Do not claim it manages the transaction buffer
 unless the host actually does so. This should be a separate contract A/B,
 not mixed into the current editor result.
+
+### 2026-08-16: `patch_file` contract checkpoint
+
+The single-file editor now exposes `find_exact_block` and
+`replace_with_block` instead of the vague `search` and `replace` names. The
+host still accepts the old names when replaying an older transcript, then
+normalizes them before dispatch. This preserves compatibility without
+advertising two schemas to the actor.
+
+The full tool inventory is in [TOOL_CONTRACTS.md](TOOL_CONTRACTS.md). The
+most important current contracts are: exact reads through `read_file`,
+targeted single-file mutation through `patch_file`, new/full-file mutation
+through `write_file`, argv execution through `run_command`, bounded process
+inspection through `process_status`, and host-gated completion through
+`finish_task`. Search, inventory, review, and network surfaces are
+conditional. The inventory also records two known contract issues for later
+cleanup: `write_file` can overwrite existing files, and generated schemas
+for `git_status`/`git_diff` mark their default path as required.
+
+Deterministic verification after this isolated contract change:
+`207 passed, 38 subtests passed, 1 warning`. No benchmark fixture was edited.
+
+### 2026-08-16: strict contract and prompt implementation
+
+The current implementation supersedes the compatibility wording in the
+earlier checkpoint above. `patch_file` now rejects legacy `search`/`replace`
+fields at dispatch. `write_file` rejects an existing target and directs the
+actor to `patch_file`. Pydantic v2 models in `tool_contracts.py` enforce strict
+types and unknown-field rejection; llama.cpp receives schemas with
+`additionalProperties: false`.
+
+The model-facing registry now exposes `find_files`, `read_file`, and
+`list_symbols` for focused discovery. `apply_patch`, `list_workspace`,
+`list_dir`, `search_file`, and `grep_dir` are host-only/legacy surfaces and
+are not offered to the model. The base prompt treats native tool calls as
+already structured, permits discovery when evidence is missing, and tells the
+actor to correct rejected calls instead of replaying them. Dynamic phase
+prompts identify exploration/implementation, recovery, repair, and
+verification; host dispatch remains authoritative.
+
+The maintained deterministic suite is **209 passed, 38 subtests passed, 1
+warning** with `./.venv-swebench/bin/python -m pytest -q tests`. Bare `pytest`
+also collects the frozen old SymPy fixture under `assets/benchmarks/sympy-13878`,
+which is incompatible with Python 3.14 (`collections.Mapping`); that fixture
+is excluded from the maintained suite.
+
+### Real-model contract benchmark after hardening
+
+The unchanged `multi_file_transaction` task was run with the same Qwen3.8 27B
+Q4_K_M llama.cpp server, MTP/Flash Attention, 32K context, and 12-turn cap.
+The actor used the new exact-block fields and the independent artifact grader
+passed. The workflow scorecard failed because the run needed 10 iterations
+instead of the target 6.
+
+| Metric | Prior `patch_file` reference | Hardened contract run |
+|---|---:|---:|
+| Artifact grader | PASS | PASS |
+| Workflow scorecard | PASS | FAIL |
+| Iterations | 6 | 10 |
+| Total elapsed | 86.2s | 121.0s |
+| First tool | not recorded | 7.5s |
+| First mutation | 41.8s | 41.9s |
+| Mutations | 3 | 3 |
+| Validations | 3 | 4 |
+| Validation failures | 3 | 3 |
+
+Interpretation: correctness was preserved and first mutation latency was
+unchanged, but this sample was about 40% slower overall and added four
+iterations. This is not yet an efficiency improvement. The likely cost is
+recovery after the actor's first wrong edit, not schema generation itself.
+Keep this as a regression checkpoint until another paired task shape confirms
+the change.
+
+Monitor log:
+`state/benchmark/agentic/monitor-multi_file_transaction-novelty-1786935713091859000.jsonl`
+
+### Additional real-model checks after the strict-contract change (2026-08-16)
+
+These runs used the same Qwen3.8 27B Q4_K_M llama.cpp server and unchanged
+benchmark fixtures. They are follow-up evidence, not fixture edits or answers
+given to the actor.
+
+* `cascading_loop`: independent artifact grader **PASS** and workflow
+  **PASS** in 3 iterations / 49.8 seconds. It used 5 tool calls, 2
+  mutations, and 3 validations. The historical comparison was 3 iterations /
+  49.0 seconds, so this is effectively unchanged within run noise.
+* `websocket_chat`: independent artifact grader **PASS** after the bounded
+  verifier-repair pass. The primary actor used all 12 allowed iterations;
+  the repair pass used 5 more, for 17 total and 452.2 seconds. The primary
+  made the server mutation, installed the missing `ws` dependency, and then
+  failed a real WebSocket smoke check because the browser-side payload was
+  not escaped. The verifier patched the frontend and the final real smoke
+  check passed. This run exposed recovery cost, not a correctness failure.
+
+The honest conclusion is mixed: the stricter contracts preserve correctness,
+but they currently make some wrong first tool choices more expensive. In the
+WebSocket run, rejecting `write_file` on an existing file was correct, but the
+actor spent an extra turn recovering from that rejection. The next fix should
+be a deterministic rejected-mutation handoff (immediately provide the target
+file and require `patch_file`), not weakening the safety boundary.
+
+Monitors:
+
+* `state/benchmark/agentic/monitor-cascading_loop-novelty-1786935962311775000.jsonl`
+* `state/benchmark/agentic/monitor-websocket_chat-novelty-1786936025475669000.jsonl`
+* `state/benchmark/agentic/monitor-websocket_chat-novelty-1786936344702478000-repair.jsonl`

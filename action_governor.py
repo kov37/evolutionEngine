@@ -48,7 +48,6 @@ CAPABILITY_CLASS = {
     "find_files": "OBSERVE",
     "recall": "OBSERVE",
     "patch_file": "MUTATE",
-    "apply_patch": "MUTATE",
     "write_file": "MUTATE",
     "patch_product_file": "MUTATE",
     "write_product_file": "MUTATE",

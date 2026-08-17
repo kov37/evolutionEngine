@@ -1410,8 +1410,8 @@ def main() -> int:
     parser.add_argument("--action-gate", action="store_true")
     parser.add_argument("--action-first", action="store_true",
                         help="Use the model-neutral initial action contract.")
-    parser.add_argument("--editor", choices=["patch_file", "apply_patch"], default="patch_file",
-                        help="Edit primitive for the run; apply_patch supports atomic multi-file edits.")
+    parser.add_argument("--editor", choices=["patch_file"], default="patch_file",
+                        help="Model-facing edit primitive; patch_file is the only supported editor.")
     parser.add_argument("--keep-workspace", action="store_true",
                         help="Preserve the generated task workspace for inspection.")
     parser.add_argument("--skip-preflight", action="store_true",

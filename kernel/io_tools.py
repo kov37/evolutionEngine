@@ -153,14 +153,21 @@ def list_workspace() -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Create a new file inside the workspace, or completely overwrite an
-    existing one. Use this for brand new files or a full rewrite.
+    """Create a new file inside the workspace.
+
+    Existing files are protected: use patch_file for revisions so the model
+    must identify the current block it intends to change.
 
     Args:
       path: Filename to write, e.g. 'patch_validator.py'.
       content: The full source code that should become the file's contents.
     """
     full_path = _resolve(path)
+    if os.path.exists(full_path):
+        return (
+            f"REJECTED: '{path}' already exists. write_file only creates new files; "
+            "use patch_file with the exact current block to edit it."
+        )
     content = _strip_code_fences(content)
 
     valid, err = validate_python_syntax(full_path, content)
@@ -307,19 +314,19 @@ def _find_outer_indent_match(content: str, search: str):
     return char_start, char_end, indent
 
 
-def patch_file(path: str, search: str, replace: str) -> str:
+def patch_file(path: str, find_exact_block: str, replace_with_block: str) -> str:
     """Surgically replace one exact substring inside a file that already
     exists in the workspace. Use this for small, targeted edits instead of
     rewriting the whole file. Call read_file first to see the exact current
-    text. The search string's real content and indentation must match
+    text. The exact block's real content and indentation must match
     verbatim — trailing whitespace and line-ending differences are tolerated,
     everything else is not.
 
     Args:
       path: Filename to patch, e.g. 'patch_validator.py'. Must already exist.
-      search: Exact text to find — content and indentation must match verbatim
+      find_exact_block: Exact text to find — content and indentation must match verbatim
         (trailing whitespace/line endings are tolerated).
-      replace: Text to substitute in place of the search match.
+      replace_with_block: Text to substitute in place of the exact block.
     """
     full_path = _resolve(path)
     if not os.path.exists(full_path):
@@ -328,8 +335,8 @@ def patch_file(path: str, search: str, replace: str) -> str:
     with open(full_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    search = _strip_code_fences(search)
-    replace = _strip_code_fences(replace)
+    search = _strip_code_fences(find_exact_block)
+    replace = _strip_code_fences(replace_with_block)
 
     if search in content:
         new_content = content.replace(search, replace, 1)
@@ -349,7 +356,7 @@ def patch_file(path: str, search: str, replace: str) -> str:
         if match is None:
             hint = _find_closest_match_hint(content, search)
             return (
-                f"ERROR: search text was not found verbatim in '{path}' (checked exact match and "
+                f"ERROR: exact block was not found verbatim in '{path}' (checked exact match and "
                 f"trailing-whitespace-tolerant match — indentation and content still must match "
                 f"exactly). Call read_file to see the exact current contents, then retry.{hint}"
             )

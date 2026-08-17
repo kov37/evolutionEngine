@@ -11,29 +11,26 @@ import ast
 from dataclasses import dataclass
 
 
-READ_TOOLS = frozenset({
-    "read_file", "find_files", "search_file", "list_workspace", "list_dir",
-    "list_symbols", "grep_dir",
-})
+READ_TOOLS = frozenset({"read_file", "find_files", "list_symbols"})
 # Inventory is useful for orientation but is not evidence about the failing
 # implementation. Only these focused readers should consume the one
-# repair-inspection allowance; otherwise a harmless list_workspace call can
-# block the read_file needed to understand the reported failure.
+# repair-inspection allowance; otherwise broad inventory can block the
+# focused read_file needed to understand the reported failure.
 REPAIR_INSPECTION_TOOLS = frozenset({
-    "read_file", "search_file", "list_symbols", "grep_dir",
+    "read_file", "list_symbols",
 })
 # Once a behavioral failure is available, broad inventory is a poor next
 # action: the failure packet already gives the actor a target. Keep focused
 # readers/searches, but remove the two tools most likely to restart orientation
 # instead of repairing. Setup recovery deliberately uses the full READ_TOOLS
 # set because its missing target may be the environment itself.
-BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS - frozenset({"list_workspace", "list_dir"})
+BEHAVIOR_REPAIR_READ_TOOLS = READ_TOOLS
 # A rejected patch usually means the actor's copied source is stale. Give it
 # one focused inspection turn, then close the read surface again.
 REJECTED_MUTATION_READ_TOOLS = frozenset({
-    "read_file", "search_file", "list_symbols", "grep_dir",
+    "read_file", "list_symbols",
 })
-MUTATION_TOOLS = frozenset({"patch_file", "apply_patch", "write_file"})
+MUTATION_TOOLS = frozenset({"patch_file", "write_file"})
 DEPENDENCY_MANIFEST_NAMES = frozenset({
     "package.json", "package-lock.json", "npm-shrinkwrap.json",
     "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock",
@@ -46,7 +43,7 @@ VALIDATION_TOOLS = frozenset({
     "diff_files", "git_diff",
 })
 ORIENTATION_TOOLS = frozenset({
-    "read_file", "find_files", "search_file", "patch_file", "apply_patch", "write_file",
+    "read_file", "find_files", "patch_file", "write_file",
     "finish_task", "recall",
 })
 ORIENTATION_PROGRESS_TOOLS = frozenset({
@@ -55,13 +52,13 @@ ORIENTATION_PROGRESS_TOOLS = frozenset({
     # Once consumed, recovery must be a real state transition: mutate the
     # product or explicitly finish. Re-offering search tools here silently
     # turns the one-read allowance into an unbounded orientation loop.
-    "patch_file", "apply_patch", "write_file", "finish_task", "recall",
+    "patch_file", "write_file", "finish_task", "recall",
 })
 # RECOVER may need one last focused source read when an earlier read was
 # incomplete or covered the wrong file. Keep that escape hatch bounded.
 ORIENTATION_RECOVERY_READ_TOOLS = frozenset({
-    "read_file", "search_file", "list_symbols", "grep_dir",
-    "patch_file", "apply_patch", "write_file", "finish_task", "recall",
+    "read_file", "find_files", "list_symbols",
+    "patch_file", "write_file", "finish_task", "recall",
 })
 
 
@@ -413,7 +410,7 @@ def build_validation_policy(
             prompt=(
                 "The previous product mutation was rejected because its exact source text did not "
                 "match the file on disk. This is the one bounded source-synchronization turn: use "
-                "read_file or a focused symbol/search tool on the implicated product file now. Do "
+                "read_file or list_symbols on the implicated product file now. Do "
                 "not patch, validate, finish, browse broadly, or repeat the rejected search. The "
                 "next turn will require a fresh mutation or recovery decision."
             ),

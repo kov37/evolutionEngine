@@ -25,18 +25,23 @@ import os
 import subprocess
 import sys
 
-from kernel.io_tools import read_file, write_file, patch_file, list_workspace
+from kernel.io_tools import read_file, write_file, patch_file
 from kernel.exec_tools import run_shell, run_command, process_status, stop_process
 from kernel.discovery import find_files
-from kernel.patch_tools import apply_patch
 from kernel.sandbox import confine
 
 # Keep the model-facing kernel small.  run_shell remains importable for
 # internal/backward-compatible callers, but the 35B model gets one execution
 # primitive with unambiguous argv semantics instead of two competing command
 # tools.
-KERNEL_TOOLS = [read_file, write_file, patch_file, list_workspace, find_files,
+KERNEL_TOOLS = [read_file, write_file, patch_file, find_files,
                 run_command, process_status, stop_process]
+
+# Older discovery/editor primitives remain importable for host-side historical
+# tests, but are intentionally absent from the model surface.
+DEPRECATED_MODEL_TOOLS = frozenset({
+    "apply_patch", "list_dir", "list_workspace", "search_file", "grep_dir",
+})
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 MANIFEST_PATH = os.path.join(STATE_DIR, "registry_manifest.json")
@@ -102,19 +107,13 @@ NETWORK_TOOL_NAMES = {"web_search", "fetch"}
 
 
 def load_registry(include_network: bool = True, editor: str = "patch_file") -> list:
-    """Return the model-facing registry with one selected edit primitive.
-
-    ``patch_file`` remains the default for backwards compatibility. The
-    multi-file ``apply_patch`` editor is an explicit experiment surface so
-    benchmark runs can compare it without silently changing existing agents.
-    """
-    selected_kernel = list(KERNEL_TOOLS)
-    if editor == "apply_patch":
-        selected_kernel = [tool for tool in selected_kernel if tool.__name__ != "patch_file"]
-        selected_kernel.append(apply_patch)
-    elif editor != "patch_file":
-        raise ValueError("editor must be 'patch_file' or 'apply_patch'")
-    tools = selected_kernel + _load_graduated_tools(_load_manifest())
+    """Return the model-facing registry with one strict editor."""
+    if editor != "patch_file":
+        raise ValueError("apply_patch is host-only; the model-facing editor is patch_file")
+    tools = [
+        fn for fn in (list(KERNEL_TOOLS) + _load_graduated_tools(_load_manifest()))
+        if fn.__name__ not in DEPRECATED_MODEL_TOOLS
+    ]
     if not include_network:
         tools = [fn for fn in tools if fn.__name__ not in NETWORK_TOOL_NAMES]
     return tools
