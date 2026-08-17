@@ -13,6 +13,22 @@ from typing import Any, Type
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
 
+# Tool-name classification shared by agent.py (novelty-gate mutation-surface
+# swapping) and dispatch.py (protected-path/reason blocking). This module has
+# no internal-repo imports, so it's a safe common home that avoids a circular
+# import between the two — previously dispatch.py carried its own separately
+# hardcoded copy of this set, which had silently drifted (it included
+# "apply_patch", which agent.py's copy never did). See
+# ~/.claude/plans/agile-forging-salamander.md (Step B).
+PRODUCT_MUTATION_TOOLS = frozenset({"patch_product_file", "write_product_file"})
+EDIT_TOOLS = frozenset({"patch_file", "edit_range"})
+GENERIC_MUTATION_TOOLS = EDIT_TOOLS | {"write_file"}
+# apply_patch is deprecated from the model surface (registry.py's
+# DEPRECATED_MODEL_TOOLS) but dispatch.py's blocking checks have historically
+# covered it too; kept here so consolidating the duplicate set doesn't
+# silently narrow that coverage.
+DISPATCH_BLOCKABLE_MUTATION_TOOLS = GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS | {"apply_patch"}
+
 
 class StrictToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)

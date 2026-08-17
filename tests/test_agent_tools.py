@@ -4,11 +4,13 @@ import urllib.error
 import unittest
 import json
 import os
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled, _should_run_worker_triage
+from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, GENERIC_MUTATION_TOOLS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _render_turn_control_block, _repair_checkpoint_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled, _should_run_worker_triage
+from recovery_state import RecoveryKind, RecoveryState, classify_rejection, rejected_mutation_inspection_messages, rejected_mutation_symbol_map
 from dispatch import _call_key, _format_result, _normalize_tool_arguments, dispatch_tool_calls
 from tool_contracts import schema_for_tool, validate_tool_arguments
 import action_governor
@@ -61,6 +63,21 @@ class _FakeResponse:
 
 
 class KernelToolTests(unittest.TestCase):
+    def test_current_control_block_is_compact_and_actionable(self):
+        block = _render_turn_control_block(
+            active_phase="REPAIR",
+            tool_names=["patch_file", "finish_task"],
+            must="make one targeted mutation",
+            may="use the failure packet",
+            must_not="repeat the failed patch",
+            success="the implicated file changes",
+        )
+        self.assertIn("CURRENT CONTROL STATE", block)
+        self.assertIn("PHASE: REPAIR", block)
+        self.assertIn("MUST: make one targeted mutation", block)
+        self.assertIn("TOOLS: patch_file, finish_task", block)
+        self.assertIn("Call exactly one listed tool", block)
+
     def test_action_first_detects_conventional_test_artifacts(self):
         self.assertTrue(_has_test_artifacts("target.py\ntest_metrics.py"))
         self.assertTrue(_has_test_artifacts("src/Thing.test.ts\n"))
@@ -185,7 +202,7 @@ class KernelToolTests(unittest.TestCase):
         self.assertIn("do not reread these files", rendered)
 
     def test_rejected_mutation_checkpoint_requires_one_fresh_read(self):
-        checkpoint = _rejected_mutation_inspection_messages(
+        checkpoint = rejected_mutation_inspection_messages(
             [{"role": "system", "content": "foundation"}, {"role": "user", "content": "task"},
              {"role": "assistant", "content": "stale patch"}],
             last_repair_packet="search text was not found",
@@ -193,9 +210,81 @@ class KernelToolTests(unittest.TestCase):
         )
         rendered = "\n".join(str(message) for message in checkpoint)
         self.assertIn("one turn to read the current source", rendered)
+        self.assertIn("find_exact_block", rendered)
         self.assertIn("src/module.py", rendered)
         self.assertIn("Do not patch", rendered)
         self.assertNotIn("stale patch", rendered)
+
+    def test_block_mismatch_checkpoint_requires_an_exact_read_of_the_path(self):
+        # A symbol listing cannot supply exact block text, so a block-mismatch
+        # recovery must name read_file and the rejected path directly.
+        checkpoint = rejected_mutation_inspection_messages(
+            [{"role": "system", "content": "foundation"}, {"role": "user", "content": "task"},
+             {"role": "assistant", "content": "stale patch"}],
+            last_repair_packet="exact block was not found",
+            target_path="src/module.py",
+            kind=RecoveryKind.EXACT_READ,
+        )
+        rendered = "\n".join(str(message) for message in checkpoint)
+        self.assertIn("read_file", rendered)
+        self.assertIn("src/module.py", rendered)
+        self.assertIn("current exact text", rendered)
+        self.assertNotIn("stale patch", rendered)
+
+    def test_block_mismatch_checkpoint_includes_a_symbol_map_for_large_files(self):
+        # Inside a large file the read must land on the right region, so the
+        # checkpoint carries the file's own symbol/line anchors.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_root = get_root()
+            try:
+                set_root(str(root))
+                (root / "fields.py").write_text(
+                    "import os\n\n\nclass Alpha:\n    pass\n\n\nclass Beta:\n    def run(self):\n"
+                    "        return 1\n",
+                    encoding="utf-8",
+                )
+                checkpoint = rejected_mutation_inspection_messages(
+                    [{"role": "system", "content": "foundation"}, {"role": "user", "content": "task"}],
+                    last_repair_packet="exact block was not found",
+                    target_path="fields.py",
+                    kind=RecoveryKind.EXACT_READ,
+                )
+                rendered = "\n".join(str(message) for message in checkpoint)
+                self.assertIn("Symbol map", rendered)
+                self.assertIn("class Alpha (line 4)", rendered)
+                self.assertIn("class Beta (line 8)", rendered)
+                self.assertIn("read_file offset", rendered)
+            finally:
+                try:
+                    set_root(sandbox_root)
+                except OSError:
+                    # An earlier test can leave the sandbox root pointing at
+                    # an already-deleted temporary directory. Leave a valid
+                    # default instead of failing the restore.
+                    set_root(str(Path.cwd()))
+
+    def test_block_mismatch_progress_gate_surface_is_read_file_only(self):
+        # The recovery checkpoint carries the symbol map, so the gate surface
+        # must not re-open a listing tool that cannot consume the allowance.
+        context = NoveltyContext(chat_fn=lambda **kwargs: _FakeResponse("{}"), action_after_events=3)
+        for iteration in range(1, 4):
+            context.observe(iteration, "run_tests", {}, "failed")
+        self.assertEqual(
+            _novelty_progress_tool_names(
+                context,
+                rejected_mutation_read_pending=True,
+                rejected_mutation_needs_read=True,
+            ),
+            {"read_file"},
+        )
+        self.assertEqual(
+            _novelty_progress_tool_names(
+                context, rejected_mutation_read_pending=True,
+            ),
+            {"read_file", "find_files", "list_symbols"},
+        )
+        context.close()
 
     def test_transaction_deferral_does_not_disable_single_file_fast_validation(self):
         transaction = TransactionBuffer("/tmp/novelty-test", followup_turns=1)
@@ -253,6 +342,97 @@ class KernelToolTests(unittest.TestCase):
                 model="model", messages=[], tools=[], think=False,
             )
         self.assertEqual(captured["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_llama_adapter_surfaces_reasoning_content(self):
+        # The thinking experiment needs the model's reasoning visible in the
+        # transcript. The adapter must carry reasoning_content into the
+        # message's thinking attribute (the serializer deliberately keeps it
+        # out of subsequent requests so context stays lean).
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {
+                        "content": "408",
+                        "reasoning_content": "compute 17*24 step by step",
+                    }}],
+                    "usage": {},
+                }).encode()
+
+        def fake_urlopen(request, timeout=None):
+            captured.update(json.loads(request.data.decode()))
+            return Response()
+
+        with patch("agent._fit_llama_prompt", return_value=([], 3, 100)), \
+             patch("agent.urllib.request.urlopen", side_effect=fake_urlopen):
+            response = _llama_cpp_chat(
+                base_url="http://provider/v1", timeout_seconds=1,
+                model="model", messages=[], tools=[], think=True,
+            )
+        self.assertEqual(captured["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(response.message.thinking, "compute 17*24 step by step")
+        self.assertEqual(response.message.content, "408")
+
+    def test_llama_adapter_extracts_inline_think_blocks_from_content(self):
+        # Hybrid-thinking templates can return <think>...</think> inside the
+        # content field. The adapter must surface it as thinking and keep
+        # the conversation content clean so later turns do not re-read it.
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {
+                        "content": "<think>\nThe label must use the supported "
+                                   "entry point.\n</think>\n\nUsing run_command now.",
+                    }}],
+                    "usage": {},
+                }).encode()
+
+        def fake_urlopen(request, timeout=None):
+            captured.update(json.loads(request.data.decode()))
+            return Response()
+
+        with patch("agent._fit_llama_prompt", return_value=([], 3, 100)), \
+             patch("agent.urllib.request.urlopen", side_effect=fake_urlopen):
+            response = _llama_cpp_chat(
+                base_url="http://provider/v1", timeout_seconds=1,
+                model="model", messages=[], tools=[], think=True,
+            )
+        self.assertIn("must use the supported", response.message.thinking)
+        self.assertEqual(response.message.content, "Using run_command now.")
+
+    def test_reproduce_first_lock_and_evidence_predicates(self):
+        from agent import _is_reproduction_evidence, _reproduction_locked
+        self.assertTrue(_reproduction_locked(True, False))
+        self.assertFalse(_reproduction_locked(True, True))
+        self.assertFalse(_reproduction_locked(False, False))
+        # A genuinely failing execution demonstrates the bug.
+        self.assertTrue(_is_reproduction_evidence("AssertionError: 1 != 2\n", False))
+        self.assertTrue(_is_reproduction_evidence("pytest failed (exit 1): F", False))
+        # A passing check and a rejected tool call are not evidence.
+        self.assertFalse(_is_reproduction_evidence("Exit code: 0\nok", True))
+        self.assertFalse(_is_reproduction_evidence("REJECTED: bad arguments", False))
+        self.assertFalse(_is_reproduction_evidence("anything", None))
+
+    def test_thinking_mode_caps_forced_action_budget(self):
+        from agent import FORCED_ACTION_MAX_TOKENS, THINKING_ACTION_MAX_TOKENS, _forced_action_max_tokens
+        self.assertEqual(_forced_action_max_tokens(False), FORCED_ACTION_MAX_TOKENS)
+        self.assertEqual(_forced_action_max_tokens(True), THINKING_ACTION_MAX_TOKENS)
+        self.assertLess(THINKING_ACTION_MAX_TOKENS, FORCED_ACTION_MAX_TOKENS)
 
     def test_lifecycle_fsm_has_deterministic_repair_path(self):
         fsm = LifecycleFSM()
@@ -556,6 +736,56 @@ class KernelToolTests(unittest.TestCase):
         self.assertIsNone(_duplicate_product_mutation_reason(
             "patch_file", {**arguments, "path": ".agentic/probe.py"}, {signature}
         ))
+
+    def test_replay_guard_rejections_also_require_an_exact_read(self):
+        # A replayed failed patch means the actor's source snapshot is stale,
+        # exactly like a block mismatch, so the recovery must demand current
+        # file text instead of accepting any structural inspection.
+        self.assertEqual(classify_rejection(
+            "ERROR: exact block was not found verbatim in 'a.py'"
+        ), RecoveryKind.EXACT_READ)
+        self.assertEqual(classify_rejection(
+            "REJECTED: this exact product mutation already failed in the current run."
+        ), RecoveryKind.EXACT_READ)
+        self.assertEqual(classify_rejection(
+            "REJECTED: this identical product mutation already succeeded in the current run."
+        ), RecoveryKind.EXACT_READ)
+        self.assertNotEqual(classify_rejection(
+            "REJECTED: mutation path 'test.py' is blocked after a protected-test edit was rejected."
+        ), RecoveryKind.EXACT_READ)
+        self.assertNotEqual(classify_rejection(
+            "REJECTED (invalid syntax, nothing written): unexpected indent"
+        ), RecoveryKind.EXACT_READ)
+
+    def test_classify_rejection_recognizes_harness_evidence_stagnation(self):
+        self.assertEqual(classify_rejection(
+            "REJECTED: stagnation policy — harness-evidence failure. The active failure has "
+            "been harness evidence for 3 cycles."
+        ), RecoveryKind.TEST_COMMAND)
+        self.assertEqual(classify_rejection(
+            "REJECTED: stagnation policy. The same failure has been unchanged for 3 cycles."
+        ), RecoveryKind.BOUNDED_INSPECTION)
+
+    def test_recovery_state_transitions(self):
+        recovery = RecoveryState()
+        self.assertFalse(recovery.pending)
+        recovery.start(
+            "REJECTED: stagnation policy — harness-evidence failure. The active failure has "
+            "been harness evidence for 3 cycles.",
+            ["a.py"],
+        )
+        self.assertEqual(recovery.kind, RecoveryKind.TEST_COMMAND)
+        self.assertEqual(recovery.tools_allowed(), frozenset({"run_command"}))
+        self.assertFalse(recovery.consume("read_file", {"path": "a.py"}))
+        self.assertTrue(recovery.consume("run_command", {"command": "python tests/runtests.py"}))
+        self.assertFalse(recovery.pending)
+
+        recovery.start("ERROR: exact block was not found verbatim in 'a.py'", ["a.py"])
+        self.assertEqual(recovery.tools_allowed(), frozenset({"read_file"}))
+        self.assertFalse(recovery.consume("read_file", {"path": "other.py"}))
+        self.assertTrue(recovery.pending)
+        self.assertTrue(recovery.consume("read_file", {"path": "a.py"}))
+        self.assertFalse(recovery.pending)
 
     def test_identical_rejected_product_mutation_is_rejected_again(self):
         arguments = {"path": "src/module.py", "find_exact_block": "stale", "replace_with_block": "new"}
@@ -895,9 +1125,158 @@ class KernelToolTests(unittest.TestCase):
             self.assertFalse(success)
             self.assertIn("timed out", summary)
 
+    def test_run_tests_delegates_to_declared_task_interpreter(self):
+        # A runner can declare a dedicated venv (VIRTUAL_ENV). The tool must
+        # execute under that interpreter instead of reporting misleading
+        # in-process collection errors from the agent's own Python.
+        with tempfile.TemporaryDirectory() as tmp:
+            venv_bin = Path(tmp) / "venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            fake_python = venv_bin / "python"
+            fake_python.write_text(
+                "#!/bin/sh\necho 'delegated run under task interpreter'\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            old_env = dict(os.environ)
+            os.environ["VIRTUAL_ENV"] = str(Path(tmp) / "venv")
+            try:
+                success, summary = run_tests(".")
+                self.assertTrue(success, summary)
+                self.assertIn("task-interpreter", summary)
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+
+    def test_run_tests_does_not_delegate_when_virtualenv_matches_interpreter(self):
+        # VIRTUAL_ENV pointing at the current interpreter must not delegate.
+        from workspace.run_tests_tool import _task_interpreter
+        old_env = dict(os.environ)
+        os.environ["VIRTUAL_ENV"] = str(Path(sys.executable).parent.parent)
+        try:
+            self.assertIsNone(_task_interpreter())
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+    def test_framework_setup_errors_are_classified_as_harness_evidence(self):
+        # setUp/tearDown failures and module-import failures never executed a
+        # test body; the summary must say so instead of letting the actor
+        # treat harness noise as a product failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_framework.py").write_text(
+                "import unittest\n"
+                "class NeedsSetup(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls):\n"
+                "        raise RuntimeError('database connection refused')\n"
+                "    def test_never_runs(self):\n"
+                "        self.assertTrue(False)\n",
+                encoding="utf-8",
+            )
+            success, summary = run_tests(str(root / "test_framework.py"))
+            self.assertFalse(success)
+            self.assertIn("harness evidence, not product evidence", summary)
+            self.assertIn("run_command", summary)
+
+    def test_assertion_failures_are_not_harness_evidence(self):
+        # A real assertion failure must keep the ordinary product-failure
+        # summary without the framework-setup note.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_product.py").write_text(
+                "import unittest\n"
+                "class Real(unittest.TestCase):\n"
+                "    def test_math(self):\n"
+                "        self.assertEqual(1 + 1, 3)\n",
+                encoding="utf-8",
+            )
+            success, summary = run_tests(str(root / "test_product.py"))
+            self.assertFalse(success)
+            self.assertNotIn("harness evidence, not product evidence", summary)
+            self.assertIn("AssertionError", summary)
+
     def test_dispatch_does_not_rewrite_arguments_after_validation(self):
         arguments = {"path": "a.py", "find_exact_block": "old", "replace_with_block": "new"}
         self.assertEqual(_normalize_tool_arguments("patch_file", arguments), arguments)
+
+    def test_edit_range_batches_edits_bottom_up_atomically(self):
+        # Line anchors stay valid within one batch even when edits at
+        # different positions shift each other's numbers.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            set_root(str(root))
+            (root / "m.py").write_text(
+                "def a():\n    return 1\n\ndef b():\n    return 2\n\ndef c():\n    return 3\n",
+                encoding="utf-8",
+            )
+            result = io_tools.edit_range("m.py", [
+                {"start_line": 6, "end_line": 7, "replacement": "def c2():\n    return 30\n"},
+                {"start_line": 1, "end_line": 2, "replacement": "def a2():\n    return 10\n"},
+            ])
+            self.assertIn("Applied 2 edit(s)", result)
+            content = (root / "m.py").read_text(encoding="utf-8")
+            self.assertIn("def a2():", content)
+            self.assertIn("def c2():", content)
+            self.assertIn("def b():", content)
+
+    def test_edit_range_expect_token_rejects_drifted_batch_with_region(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            set_root(str(root))
+            (root / "m.py").write_text(
+                "def a():\n    return 1\n\ndef b():\n    return 2\n", encoding="utf-8"
+            )
+            result = io_tools.edit_range("m.py", [
+                {"start_line": 1, "end_line": 2,
+                 "replacement": "def a2():\n    return 10\n",
+                 "expect": "def old_name_that_does_not_exist"},
+            ])
+            self.assertIn("REJECTED", result)
+            self.assertIn("has drifted", result)
+            self.assertIn("def a():", result)  # actual region returned
+            # Atomic: nothing was written.
+            self.assertEqual(
+                (root / "m.py").read_text(encoding="utf-8"),
+                "def a():\n    return 1\n\ndef b():\n    return 2\n",
+            )
+
+    def test_edit_range_rejects_stale_and_invalid_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            set_root(str(root))
+            (root / "m.py").write_text("x = 1\n", encoding="utf-8")
+            self.assertIn("exceeds the current file length",
+                          io_tools.edit_range("m.py", [
+                              {"start_line": 1, "end_line": 5, "replacement": "y = 2\n"},
+                          ]))
+            self.assertIn("invalid syntax",
+                          io_tools.edit_range("m.py", [
+                              {"start_line": 1, "end_line": 1, "replacement": "def broken(:\n"},
+                          ]))
+            self.assertIn("unknown fields",
+                          io_tools.edit_range("m.py", [
+                              {"start_line": 1, "end_line": 1, "replacement": "x", "bogus": 1},
+                          ]))
+            # Still unchanged after all rejections.
+            self.assertEqual((root / "m.py").read_text(encoding="utf-8"), "x = 1\n")
+
+    def test_edit_range_schema_is_batched_and_strict(self):
+        import registry
+
+        fn = next(fn for fn in registry.load_registry(include_network=False)
+                   if fn.__name__ == "edit_range")
+        payload = schema_for_tool(fn)
+        schema = payload["function"]["parameters"]
+        self.assertEqual(set(schema["properties"]), {"path", "edits", "snapshot"})
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_edit_range_is_classified_as_mutation(self):
+        self.assertEqual(
+            action_governor.classify("edit_range", {"path": "a.py", "edits": []}),
+            "MUTATE",
+        )
 
     def test_patch_file_schema_uses_exact_block_contract(self):
         import registry
@@ -939,6 +1318,20 @@ class KernelToolTests(unittest.TestCase):
             result = io_tools.write_file("existing.txt", "new")
             self.assertTrue(result.startswith("REJECTED:"))
             self.assertEqual(Path(tmp, "existing.txt").read_text(), "old\n")
+
+    def test_dispatch_mutation_tool_set_matches_agent_classification(self):
+        # dispatch.py used to carry its own hardcoded copy of this set,
+        # separate from agent.py's GENERIC_MUTATION_TOOLS/
+        # PRODUCT_MUTATION_TOOLS, which had already silently drifted (it
+        # included "apply_patch", agent.py's never did). Both now import the
+        # same tool_contracts.py constant; this pins that so a future drift
+        # fails loudly instead of silently.
+        from tool_contracts import DISPATCH_BLOCKABLE_MUTATION_TOOLS
+        self.assertTrue((GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS) <= DISPATCH_BLOCKABLE_MUTATION_TOOLS)
+        self.assertEqual(
+            DISPATCH_BLOCKABLE_MUTATION_TOOLS - (GENERIC_MUTATION_TOOLS | PRODUCT_MUTATION_TOOLS),
+            {"apply_patch"},
+        )
 
     def test_dispatch_blocks_a_rejected_protected_mutation_path(self):
         class Call:
@@ -1643,7 +2036,7 @@ class KernelToolTests(unittest.TestCase):
             context.observe(iteration, "run_tests", {}, "passed")
         self.assertEqual(
             _novelty_progress_tool_names(context),
-            {"patch_file", "write_file", "finish_task"},
+            {"patch_file", "edit_range", "write_file", "finish_task"},
         )
         context.close()
 

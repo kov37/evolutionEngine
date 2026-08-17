@@ -18,7 +18,7 @@ capped.
 
 MAX_MESSAGE_CONTENT_CHARS = 4000
 
-from tool_contracts import validate_tool_arguments
+from tool_contracts import DISPATCH_BLOCKABLE_MUTATION_TOOLS, validate_tool_arguments
 
 
 def _mutation_paths(tool_name, arguments):
@@ -87,9 +87,7 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
         call_arguments = call.function.arguments or {}
         touched_paths = _mutation_paths(call.function.name, call_arguments)
         if (blocked_mutation_paths
-                and call.function.name in {
-                    "write_file", "patch_file", "apply_patch", "write_product_file", "patch_product_file"
-                }
+                and call.function.name in DISPATCH_BLOCKABLE_MUTATION_TOOLS
                 and any(path in blocked_mutation_paths for path in touched_paths)):
             blocked_path = next(path for path in touched_paths if path in blocked_mutation_paths)
             result = (
@@ -101,9 +99,7 @@ def dispatch_tool_calls(tool_calls, tool_map, allowed_names=None, blocked_calls=
             continue
         mutation_key = _call_key(call.function.name, call.function.arguments)
         if (blocked_mutation_reasons
-                and call.function.name in {
-                    "write_file", "patch_file", "apply_patch", "write_product_file", "patch_product_file"
-                }
+                and call.function.name in DISPATCH_BLOCKABLE_MUTATION_TOOLS
                 and mutation_key in blocked_mutation_reasons):
             result = blocked_mutation_reasons[mutation_key]
             print(f"🚫 blocked progress mutation {call.function.name}({call_arguments})")
