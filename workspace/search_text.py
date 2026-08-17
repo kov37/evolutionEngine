@@ -24,6 +24,10 @@ def search_file(pattern: str, filepath: str) -> list[tuple[int, str]]:
 
     Returns a list of ``(line_number, line_content)`` tuples.
     ``line_content`` still carries its trailing newline if the file had one.
+
+    Args:
+      pattern: Regular expression or literal fallback to find.
+      filepath: Workspace-relative file to scan.
     """
     try:
         matcher = re.compile(pattern)

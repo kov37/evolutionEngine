@@ -14,6 +14,15 @@ goal: >-
   validation, recovery, and bounded memory to make reliable progress on
   progressively harder tasks.
 primary_unresolved_target: SymPy issue 13878
+
+latest_tool_fix:
+  tool: find_files
+  failure: "Python fnmatch treated **/ as requiring at least one directory"
+  observed_effect: "root-level cache.py was reported as missing during lru_cache"
+  design_decision: "repair the existing bounded tool; do not add a duplicate discovery tool"
+  behavior: "recursive **/ segments now match zero or more directories"
+  deterministic_verification: "158 passed, 1 warning in targeted agent-tools and monitor tests"
+  real_model_status: "LRU run must be rerun; previous child loaded the pre-fix implementation"
 ```
 
 ## Latest generic control-plane checkpoint (the engine's traffic-controller rules)

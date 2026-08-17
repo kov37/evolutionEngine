@@ -15,8 +15,6 @@ Includes an internal self-test in __main__ that validates core behaviour via a
 throwaway unittest suite containing one passing and one failing test case.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import subprocess
@@ -28,6 +26,7 @@ import importlib.util
 import signal
 import re
 import hashlib
+from typing import Optional
 from io import StringIO
 
 
@@ -209,7 +208,7 @@ def _function_style_fallback(path: str, absolute_path: str) -> tuple[bool, str] 
     return pass_count == tests_run and tests_run > 0, summary
 
 
-def run_tests(path: str = ".") -> tuple[bool, str]:
+def run_tests(path: Optional[str] = ".") -> tuple[bool, str]:
     """Discover and run all tests under *path* using unittest APIs.
 
     Args:
@@ -227,6 +226,7 @@ def run_tests(path: str = ".") -> tuple[bool, str]:
     # file they just inspected. unittest.discover only accepts directories;
     # normalize a file target into its parent directory plus an exact pattern
     # so the tool contract remains ergonomic and deterministic.
+    path = path or "."
     absolute_path = os.path.abspath(path)
     project_root = _project_import_root(absolute_path)
     # This tool is called repeatedly inside one long-lived agent process.

@@ -4171,3 +4171,28 @@ servers. Report TIMEOUT, ENVIRONMENT_INVALID, FAIL, or PASS exactly as
 observed. After every material change record changed files, generic reason,
 deterministic result, real-model result, benchmark paths, unverified items,
 and the next safe action.
+
+### 2026-08-16: discovery-tool failure found in the LRU run
+
+The LRU benchmark exposed a generic discovery failure. The actor requested
+`find_files(pattern="**/*.py", path=".")`, but the host returned `No files
+matched` even though the workspace contained a root-level `cache.py`. Python's
+`fnmatch` treats the `**/` part as literal text and therefore requires a
+directory; it does not implement the usual glob meaning of “zero or more
+directories.” The actor consequently spent turns repeating discovery instead
+of reading and repairing the project.
+
+The fix stays in the existing bounded `find_files` tool. It now also tests the
+pattern with recursive `**/` segments removed, so both `**/*.py` and
+`src/**/*.py` match files directly at the relevant root as well as deeper
+files. It still confines paths, skips dependency/build noise, sorts results,
+and caps output at 200 entries. A second discovery tool was deliberately not
+added: duplicate tools increase model choice load and create inconsistent
+semantics. The deterministic regression covers root recursive globs, nested
+recursive globs, ignored directories, and the result cap.
+
+Targeted verification after this change: `158 passed, 1 warning` across
+`tests/test_agent_tools.py` and `tests/test_run_monitor.py`. The earlier LRU
+real-model run remains a valid failure diagnosis: its child process loaded the
+old discovery implementation, so it is not evidence against this fix. Rerun
+the unchanged LRU fixture before judging capability improvement.

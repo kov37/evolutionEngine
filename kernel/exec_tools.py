@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from typing import Optional
 
 from kernel.sandbox import confine, get_root
 
@@ -85,8 +86,15 @@ def _start_background(command, cwd, shell, handle=None, env=None):
     )
 
 
-def process_status(handle: str, tail_chars: int = 3000) -> str:
-    """Inspect a process started by run_shell/run_command(background=True)."""
+def process_status(handle: str, tail_chars: Optional[int] = 3000) -> str:
+    """Inspect a process started by run_shell/run_command(background=True).
+
+    Args:
+      handle: Process handle returned by a background command.
+      tail_chars: Maximum log characters to include. Defaults to 3000.
+    """
+    if tail_chars is None:
+        tail_chars = 3000
     with _BACKGROUND_LOCK:
         item = _BACKGROUND.get(handle)
     if item is None:
@@ -170,7 +178,8 @@ def restart_background(handle: str) -> str:
     return f"{stopped}\n{started}"
 
 
-def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bool = False) -> str:
+def run_shell(command: str, timeout: Optional[int] = SHELL_TIMEOUT_SECONDS,
+              background: Optional[bool] = False) -> str:
     """Run a shell command with its working directory confined to the
     workspace, and report exit code, stdout, and stderr. Use this to run
     tests, install a package, or invoke a tool you already wrote.
@@ -182,6 +191,10 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bo
         command (e.g. a full test suite); capped at 120s regardless of
         what's requested.
     """
+    if timeout is None:
+        timeout = SHELL_TIMEOUT_SECONDS
+    if background is None:
+        background = False
     if background:
         try:
             return _start_background(command, get_root(), shell=True,
@@ -214,8 +227,8 @@ def run_shell(command: str, timeout: int = SHELL_TIMEOUT_SECONDS, background: bo
     )
 
 
-def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: str = ".",
-                background: bool = False) -> str:
+def run_command(command: list[str], timeout: Optional[int] = SHELL_TIMEOUT_SECONDS,
+                cwd: Optional[str] = ".", background: Optional[bool] = False) -> str:
     """Run an executable with argv semantics and a confined working directory.
 
     Prefer this for tests and project commands. Unlike ``run_shell`` it does
@@ -223,7 +236,19 @@ def run_command(command: list[str], timeout: int = SHELL_TIMEOUT_SECONDS, cwd: s
     cannot change the command's meaning. Keep every argv token on one line;
     use an escaped ``\\n`` or a short one-line interpreter command instead of
     embedding a literal newline in a tool argument.
+
+    Args:
+      command: Non-empty argv list. The first item is the executable.
+      timeout: Maximum runtime in seconds, capped at 120. Defaults to 15.
+      cwd: Workspace-relative working directory. Defaults to the workspace root.
+      background: Start a managed process instead of waiting. Defaults to false.
     """
+    if timeout is None:
+        timeout = SHELL_TIMEOUT_SECONDS
+    if cwd is None:
+        cwd = "."
+    if background is None:
+        background = False
     if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
         return "ERROR: command must be a non-empty list of strings."
     try:

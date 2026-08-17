@@ -11,6 +11,7 @@ from unittest.mock import patch
 from agent import ChatTimeoutError, FORCED_ACTION_MAX_TOKENS, NO_ACTION_TOOL_FORCE_THRESHOLD, ORIENTATION_TURN_BUDGET, PRODUCT_MUTATION_TOOLS, REPAIR_TURN_BUDGET, _TOKENIZE_UNAVAILABLE_BASE_URLS, _authoritative_gate_restrictions, _auto_validation_command, _chat_with_timeout, _completion_ready, _consume_orientation_recovery_read, _consume_worker_gate, _duplicate_product_mutation_reason, _fit_llama_prompt, _force_repair_recovery, _force_tool_call_after_no_action, _has_orientation_evidence, _has_test_artifacts, _intervention_messages, _is_blocked_repair_action, _is_validation_setup_failure, _json_message, _llama_cpp_chat, _nearby_python_test_target, _novelty_progress_tool_names, _progress_tool_call_required, _repair_checkpoint_messages, _rejected_mutation_inspection_messages, _replayed_rejected_mutation_reason, _retryable_provider_disconnect, _source_backed_repair_messages, _stale_tool_names, _terminal_provider_error, _transaction_window_open, _worker_triage_enabled, _should_run_worker_triage
 from dispatch import _call_key, _format_result, _normalize_tool_arguments, dispatch_tool_calls
 import action_governor
+from ollama import _utils as ollama_utils
 import kernel.exec_tools as exec_tools
 from kernel.discovery import find_files
 from kernel.exec_tools import run_command
@@ -1687,6 +1688,8 @@ class KernelToolTests(unittest.TestCase):
             (root / ".git" / "hidden.py").write_text("x")
             set_root(tmp)
             self.assertEqual(find_files("*.py"), "src/a.py")
+            self.assertEqual(find_files("**/*.py"), "src/a.py")
+            self.assertEqual(find_files("src/**/*.py"), "src/a.py")
 
     def test_run_command_uses_argv_and_confined_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1896,6 +1899,32 @@ class KernelToolTests(unittest.TestCase):
             result = run_command(["python3", "test_empty.py"])
             self.assertTrue(result.startswith("ERROR:"))
             self.assertIn("no test evidence", result)
+
+    def test_tool_schemas_do_not_make_default_arguments_required(self):
+        """The provider schema must match the callable's real defaults."""
+        import registry
+
+        functions = {
+            fn.__name__: fn for fn in registry.load_registry(include_network=False)
+        }
+        expected_optional = {
+            "read_file": {"offset", "limit"},
+            "find_files": {"pattern", "path", "max_results"},
+            "run_command": {"timeout", "cwd", "background"},
+            "process_status": {"tail_chars"},
+            "run_tests": {"path"},
+            "grep_dir": {"path"},
+        }
+        for name, optional in expected_optional.items():
+            payload = json.loads(
+                ollama_utils.convert_function_to_tool(functions[name]).model_dump_json(
+                    exclude_none=True
+                )
+            )
+            schema = payload["function"]["parameters"]
+            self.assertTrue(optional.isdisjoint(set(schema.get("required", []))), name)
+            for field in optional:
+                self.assertTrue(schema["properties"][field].get("description"), f"{name}.{field}")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Optional
 
 from kernel.sandbox import confine, get_root
 
@@ -89,7 +90,7 @@ def _test_after_write(full_path: str) -> str:
     )
 
 
-def read_file(path: str, offset: int = 1, limit: int = None) -> str:
+def read_file(path: str, offset: Optional[int] = 1, limit: Optional[int] = None) -> str:
     """Read and return the exact current contents of a file in the workspace,
     optionally windowed to a range of lines. Always check this before
     patch_file — its search text must match verbatim (a windowed read still
@@ -111,6 +112,8 @@ def read_file(path: str, offset: int = 1, limit: int = None) -> str:
         None, meaning read to the end of the file.
     """
     full_path = _resolve(path)
+    if offset is None:
+        offset = 1
     if not os.path.exists(full_path):
         return f"ERROR: '{path}' does not exist in the workspace."
     with open(full_path, "r", encoding="utf-8") as f:

@@ -5,14 +5,13 @@ Searches every text file under a root directory for a given pattern,
 returning (relative_path, line_number, line_text) tuples.
 """
 
-from __future__ import annotations
-
 import os
 import re
 import sys
 import tempfile
 import shutil
 from pathlib import Path
+from typing import Optional
 
 # Duplicated from list_dir_tool.py's SKIP_DIR_NAMES rather than imported —
 # these workspace/ tools are each standalone, independently runnable
@@ -26,7 +25,7 @@ SKIP_DIR_NAMES = {
 }
 
 
-def grep_dir(pattern: str, path: str = "."):
+def grep_dir(pattern: str, path: Optional[str] = "."):
     """Recursively search files under *path* for *pattern*. If *path* is a
     single file rather than a directory, searches just that file instead of
     erroring — the common case of pointing grep_dir at one known file works
@@ -58,7 +57,12 @@ def grep_dir(pattern: str, path: str = "."):
         Match tuples: (relative_path_with_forward_slashes, line_number,
         stripped_line_text). On error, a string starting with "ERROR:"
         instead.
+
+    Args:
+      pattern: Regular expression or literal fallback to find.
+      path: Workspace-relative directory or file to scan. Defaults to ".".
     """
+    path = path or "."
     original_path = path
     path = os.path.abspath(path)
 
